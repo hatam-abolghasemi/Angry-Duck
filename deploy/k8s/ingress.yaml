@@ -1,0 +1,38 @@
+# Exposes ONLY the preheat webhook to the outside world, for pipelines
+# running outside the cluster. Everything else (/report, /status,
+# /healthz) stays unreachable externally because no path rule matches
+# them — ingress-nginx 404s anything that doesn't match a configured path.
+#
+# Assumes the ingress-nginx controller. Adjust the ingressClassName and
+# annotations if you use a different controller (Traefik, ALB, etc).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: angryduck-webhook
+  namespace: angryduck
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # Restrict to your CI/CD runners' egress IP range(s), comma-separated.
+    # Leaving this unset means anyone who can reach the host can trigger a
+    # preheat — low blast radius (it only orders pulls of an image name you
+    # give it) but still worth locking down.
+    nginx.ingress.kubernetes.io/whitelist-source-range: "203.0.113.0/24"
+    # Uncomment if you terminate TLS via cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: angryduck-webhook.internal-registry.example.com # replace with your real external hostname
+      http:
+        paths:
+          - path: /webhook/preheat
+            pathType: Exact
+            backend:
+              service:
+                name: angryduck-controller
+                port:
+                  number: 8080
+  # tls:
+  #   - hosts:
+  #       - angryduck-webhook.internal-registry.example.com
+  #     secretName: angryduck-webhook-tls

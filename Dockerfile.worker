@@ -1,0 +1,16 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY internal ./internal
+COPY cmd/worker ./cmd/worker
+RUN CGO_ENABLED=0 go build -o /out/angryduck-worker ./cmd/worker
+
+# Runtime image needs the containerd CLI (`ctr`) available since the worker
+# shells out to it by default. Swap CONTAINER_RUNTIME=crictl or =docker and
+# adjust this base if your nodes use a different tool.
+FROM ubuntu:24.04
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends containerd ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/angryduck-worker /angryduck-worker
+ENTRYPOINT ["/angryduck-worker"]

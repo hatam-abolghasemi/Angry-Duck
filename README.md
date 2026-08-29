@@ -1,93 +1,202 @@
 # Angry Duck
 
+A small Go system that pre-pulls a freshly-pushed container image onto a
+handful of low-utilization cluster nodes, right after `docker push` and
+ahead of (or alongside) the GitOps sync — so that when ArgoCD tells every
+replica's node to pull the image, only one node hits the origin registry
+and the rest fan out the layers peer-to-peer via [Spegel](https://github.com/spegel-org/spegel).
 
+## Why
 
-## Getting started
+Without Angry Duck: ArgoCD syncs, and N replicas scheduled across N nodes
+each pull independently from the origin registry — 40 replicas, 40
+simultaneous origin pulls, Spegel sitting idle because nothing has the
+image yet for peers to fetch from.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+With Angry Duck: as soon as the pipeline pushes a new image, the
+controller orders 1–3 of the least-utilized nodes to pull it immediately.
+By the time Argo actually schedules pods onto other nodes, Spegel can serve
+those layers from a peer instead of the origin registry. It turns "N origin
+pulls" into "1 origin pull + Spegel fan-out," running in parallel with the
+GitOps update rather than blocking it.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+It is **not** trying to guarantee the image lands on the exact node a pod
+will be scheduled to — with layer sharing and Spegel already in place,
+chasing that doesn't pay off.
 
-## Add your files
+Disk pressure on nodes is the constraint that shaped every design decision
+below: the controller refuses to preheat anything if it has no fresh view
+of any node's disk state, and every worker garbage-collects images it isn't
+using anymore (with a grace period so a pre-pull doesn't get GC'd before
+Argo ever asks for it).
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Architecture
 
 ```
-cd existing_repo
-git remote add origin https://git.internal-registry.example.com/devops/platform-orchestration/angry-duck.git
-git branch -M main
-git push -uf origin main
+CI/CD pipeline                     Angry Duck controller               Angry Duck worker (DaemonSet, 1/node)
+─────────────────                  ───────────────────────             ──────────────────────────────────────
+docker push  ──POST /webhook/──►   - tracks worker freshness           - every REPORT_INTERVAL_S: scrape
+             preheat {image}       - rejects if 0 fresh workers          node-exporter, POST /report
+                                    - ranks fresh workers by             {node_id, address, utilization}
+                                      utilization (ascending)
+                                    - every RANK_INTERVAL_S, orders     - on POST /pull {image}: pull the
+                                      lowest RANK_TOP_N workers to        image asynchronously via ctr/
+                                      pull the current target image       crictl/docker; remember the order
+                                      (POST worker's /pull)                time for GC grace-period protection
+                                                                        - every GC_CHECK_INTERVAL_S: compare
+                                                                          local images vs. running containers;
+                                                                          remove images unused for
+                                                                          GC_MISS_THRESHOLD consecutive
+                                                                          checks, unless still within
+                                                                          GC_GRACE_PERIOD_S of a pull order
 ```
 
-## Integrate with your tools
+ArgoCD's normal sync proceeds unmodified and independently — Angry Duck
+never blocks or gates the deploy, it just gets ahead of it.
 
-* [Set up project integrations](https://git.internal-registry.example.com/devops/platform-orchestration/angry-duck/-/settings/integrations)
+## Repo layout
 
-## Collaborate with your team
+```
+cmd/controller/         controller entrypoint
+cmd/worker/              worker entrypoint (runs as a DaemonSet pod)
+internal/model/          shared JSON wire types
+internal/config/         dependency-free .env loader + typed getters
+internal/controller/     worker registry, ranking loop, HTTP handlers
+internal/worker/         node-exporter scraping, container runtime shim,
+                         pull handler + GC loop, HTTP handlers
+deploy/k8s/              namespace, ConfigMap, controller Deployment/Service,
+                         worker DaemonSet, Ingress for the external webhook
+Dockerfile.controller
+Dockerfile.worker
+.env.example             every tunable, documented
+```
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+No third-party Go modules are used — everything is stdlib, so `go build
+./...` works offline with no `go mod download`.
 
-## Test and Deploy
+## Configuration
 
-Use the built-in continuous integration in GitLab.
+Every interval, threshold, and count lives in one place — see
+[`.env.example`](.env.example) for the full list with explanations:
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+| Variable | Default | Meaning |
+|---|---|---|
+| `WORKER_STALE_AFTER_S` | 30 | worker silence timeout before it's excluded from ranking |
+| `TARGET_TTL_S` | 120 | how long a preheat target stays active |
+| `RANK_INTERVAL_S` | 10 | how often the controller re-ranks and re-orders |
+| `RANK_TOP_N` | 2 | how many low-utilization nodes get ordered per rank |
+| `REPORT_INTERVAL_S` | 15 | how often a worker pushes its utilization |
+| `GC_CHECK_INTERVAL_S` | 60 | how often a worker checks for unused images |
+| `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before removal |
+| `GC_GRACE_PERIOD_S` | 60 | protection window after a controller-ordered pull |
+| `CONTAINER_RUNTIME` | containerd | `containerd` (`ctr`), `crictl`, or `docker` |
 
-***
+Copy `.env.example` to `.env` next to the binary, or inject the same keys
+via a k8s ConfigMap (see `deploy/k8s/configmap.yaml`) — real environment
+variables always win over `.env` file values.
 
-# Editing this README
+## Running locally
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+go build -o bin/angryduck-controller ./cmd/controller
+go build -o bin/angryduck-worker ./cmd/worker
 
-## Suggestions for a good README
+# terminal 1
+ENV_FILE=.env.example ./bin/angryduck-controller
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+# terminal 2 (needs NODE_ID/SELF_ADDRESS set; SELF_ADDRESS needs a real
+# reachable host:port for the controller to call back)
+NODE_ID=node-1 SELF_ADDRESS=localhost:8081 ENV_FILE=.env.example ./bin/angryduck-worker
+```
 
-## Name
-Choose a self-explaining name for your project.
+Trigger a preheat the way the pipeline would, right after `docker push`:
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+curl -X POST http://localhost:8080/webhook/preheat \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"registry.example.com/app:1.2.3"}'
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Check what the controller currently sees:
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+curl http://localhost:8080/status
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Deploying
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+1. Build and push both images. Tag/registry convention:
+   ```bash
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.0 -f Dockerfile.controller .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.0 -f Dockerfile.worker .
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.0
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.0
+   ```
+   `deploy/k8s/controller.yaml` and `deploy/k8s/worker-daemonset.yaml` already
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.0`
+   — bump the tag there too when you cut a new version.
+2. Apply the manifests:
+   ```bash
+   kubectl apply -f deploy/k8s/namespace.yaml
+   kubectl apply -f deploy/k8s/configmap.yaml
+   kubectl apply -f deploy/k8s/controller.yaml
+   kubectl apply -f deploy/k8s/worker-daemonset.yaml
+   ```
+3. Your pipeline runs outside the cluster, so apply the Ingress that
+   exposes just the webhook path (edit the host and IP allowlist first):
+   ```bash
+   kubectl apply -f deploy/k8s/ingress.yaml
+   ```
+   Then point the pipeline at it, right after `docker push`:
+   ```bash
+   curl -X POST https://angryduck-webhook.internal-registry.example.com/webhook/preheat \
+     -H 'Content-Type: application/json' \
+     -d "{\"image\":\"$IMAGE_REF\"}"
+   ```
+   `/report`, `/status`, and `/healthz` are intentionally **not** in the
+   Ingress's path rules, so they stay unreachable from outside the cluster
+   — only `/webhook/preheat` is exposed, and only from the IP range set in
+   `nginx.ingress.kubernetes.io/whitelist-source-range`. Worker-to-
+   controller traffic (reports and pull orders) never leaves the pod
+   network; it always uses the in-cluster Service (`CONTROLLER_URL` in
+   `deploy/k8s/configmap.yaml`), not this Ingress.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Notes on the worker DaemonSet:
+- It runs with `hostNetwork: true` and `hostPID: true`, and mounts the
+  node's containerd socket, so it needs a privileged security context.
+  Adjust this if your cluster's containerd socket path differs.
+- `NODE_EXPORTER_URL` defaults to `http://localhost:9100/metrics`, which
+  assumes node-exporter also runs hostNetwork on each node (the common
+  setup). Point it elsewhere if not.
+- The worker's runtime shim (`internal/worker/runtime.go`) shells out to
+  `ctr`, `crictl`, or `docker` depending on `CONTAINER_RUNTIME` — pick
+  whichever CLI is actually present in the worker's container image (the
+  provided `Dockerfile.worker` installs containerd's `ctr`).
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## API summary
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+**Controller**
+- `POST /webhook/preheat` — `{"image": "..."}`. Rejects with `503` if zero
+  workers have reported recently. Otherwise sets the target and
+  immediately orders the lowest-utilization fresh nodes to pull.
+- `POST /report` — worker utilization reports (workers call this
+  themselves; you shouldn't need to).
+- `GET /status` — debug snapshot of every known worker and the current
+  target image.
+- `GET /healthz` — liveness/readiness.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+**Worker**
+- `POST /pull` — `{"image": "...", "ordered_at": "..."}`, called by the
+  controller. Pulls asynchronously and returns `202` immediately.
+- `GET /healthz` — liveness/readiness.
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+## Testing
 
-## License
-For open source projects, say how it is licensed.
+```bash
+go test ./...
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Covers the node-exporter metrics parser (the trickiest bit of pure logic —
+matching the PromQL expression's `fstype!~"tmpfs|overlay|fuse.lxcfs"` /
+`mountpoint="/"` filters and computing the utilization ratio).

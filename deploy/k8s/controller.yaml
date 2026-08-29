@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: angryduck-controller
+  namespace: angryduck
+  labels:
+    app: angryduck-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: angryduck-controller
+  template:
+    metadata:
+      labels:
+        app: angryduck-controller
+    spec:
+      containers:
+        - name: controller
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.0
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: angryduck-config
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: angryduck-controller
+  namespace: angryduck
+spec:
+  selector:
+    app: angryduck-controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

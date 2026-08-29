@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: angryduck-worker
+  namespace: angryduck
+  labels:
+    app: angryduck-worker
+spec:
+  selector:
+    matchLabels:
+      app: angryduck-worker
+  template:
+    metadata:
+      labels:
+        app: angryduck-worker
+    spec:
+      # hostNetwork so the worker can reach node-exporter at localhost:9100
+      # and so its own pod IP equals the node's IP for SELF_ADDRESS.
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: worker
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.0
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SELF_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+              # A bare IP is fine here: the worker binary appends its own
+              # WORKER_LISTEN_ADDR port automatically if SELF_ADDRESS has
+              # no ":" in it.
+          envFrom:
+            - configMapRef:
+                name: angryduck-config
+          ports:
+            - containerPort: 8081
+              name: http
+              hostPort: 8081
+          volumeMounts:
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            privileged: true # required to talk to the node's containerd socket
+      volumes:
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+      tolerations:
+        - operator: Exists # run on every node, including tainted ones
