@@ -2,11 +2,11 @@ package worker
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
+	"angryduck/internal/logging"
 	"angryduck/internal/model"
 )
 
@@ -51,13 +51,16 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 	p.orderedAt[order.Image] = time.Now()
 	p.mu.Unlock()
 
+	logging.Infof("angryduck-worker: received pull order for image=%s", order.Image)
+
 	go func() {
-		log.Printf("angryduck-worker: pulling image=%s", order.Image)
+		start := time.Now()
+		logging.Infof("angryduck-worker: pulling image=%s", order.Image)
 		if err := p.runtime.PullImage(order.Image); err != nil {
-			log.Printf("angryduck-worker: pull failed for image=%s: %v", order.Image, err)
+			logging.Errorf("angryduck-worker: pull failed for image=%s after %s: %v", order.Image, time.Since(start).Round(time.Millisecond), err)
 			return
 		}
-		log.Printf("angryduck-worker: pull succeeded for image=%s", order.Image)
+		logging.Infof("angryduck-worker: pull succeeded for image=%s in %s", order.Image, time.Since(start).Round(time.Millisecond))
 	}()
 
 	writeJSON(w, http.StatusAccepted, model.PullAck{Accepted: true})

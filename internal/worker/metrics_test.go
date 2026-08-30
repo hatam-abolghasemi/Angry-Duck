@@ -18,14 +18,24 @@ node_filesystem_free_bytes{device="overlay",fstype="overlay",mountpoint="/var/li
 `
 
 func TestParseRootUtilization(t *testing.T) {
-	util, err := parseRootUtilization(strings.NewReader(sampleMetrics))
+	result, err := parseRootUtilization(strings.NewReader(sampleMetrics))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// (1e11 - 2.5e10) / 1e11 = 0.75
 	want := 0.75
-	if diff := util - want; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("got utilization %v, want %v", util, want)
+	if diff := result.Utilization - want; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("got utilization %v, want %v", result.Utilization, want)
+	}
+	if result.SizeBytes != 1.0e+11 {
+		t.Errorf("got SizeBytes %v, want %v", result.SizeBytes, 1.0e+11)
+	}
+	if result.FreeBytes != 2.5e+10 {
+		t.Errorf("got FreeBytes %v, want %v", result.FreeBytes, 2.5e+10)
+	}
+	wantUsed := 1.0e+11 - 2.5e+10
+	if result.UsedBytes != wantUsed {
+		t.Errorf("got UsedBytes %v, want %v", result.UsedBytes, wantUsed)
 	}
 }
 

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -16,6 +17,18 @@ import (
 // keeps the worker binary small and lets operators pick whatever CLI is
 // already present on their nodes (containerd's `ctr`, `crictl`, or plain
 // `docker`) via CONTAINER_RUNTIME in the .env file.
+//
+// Every backend below parses its tool's output with encoding/json rather
+// than hand-rolled substring scraping. An earlier version of this file used
+// substring markers like `"Image":"` (no space) against ctr's and crictl's
+// pretty-printed JSON, which actually renders as `"Image": "value"` (space
+// after the colon) — meaning those markers never matched anything, ever.
+// ListRunningImages() silently returned nothing for every container, on
+// every check, which made GC (before it was scoped to self-managed images
+// only) treat every image on the node as permanently unused and eventually
+// delete it — including images actively backing running containers. Proper
+// JSON parsing is not a style preference here; it was a real, confirmed,
+// reproducible production bug that deleted a worker's own running image.
 type Runtime interface {
 	PullImage(image string) error
 	ListLocalImages() ([]string, error)
@@ -48,6 +61,17 @@ func runCmd(name string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+func splitNonEmptyLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // --- containerd (ctr) ---
 
 type containerdRuntime struct{}
@@ -65,14 +89,15 @@ func (containerdRuntime) ListLocalImages() ([]string, error) {
 	return splitNonEmptyLines(out), nil
 }
 
+// ctrContainerInfo covers only the field we need from `ctr containers info`
+// output. It's intentionally minimal — extra fields in the real JSON are
+// ignored by encoding/json without any special handling.
+type ctrContainerInfo struct {
+	Image string `json:"Image"`
+}
+
 func (containerdRuntime) ListRunningImages() ([]string, error) {
-	// %s prints the Image column only, header included; we filter it out.
-	out, err := runCmd("ctr", "-n", "k8s.io", "task", "ls")
-	if err != nil {
-		return nil, err
-	}
-	// `ctr task ls` doesn't print images directly; fall back to `ctr -n k8s.io c ls`.
-	out, err = runCmd("ctr", "-n", "k8s.io", "containers", "list", "-q")
+	out, err := runCmd("ctr", "-n", "k8s.io", "containers", "list", "-q")
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +108,13 @@ func (containerdRuntime) ListRunningImages() ([]string, error) {
 		if err != nil {
 			continue
 		}
-		images = append(images, extractField(info, `"Image":"`))
+		var parsed ctrContainerInfo
+		if err := json.Unmarshal([]byte(info), &parsed); err != nil {
+			continue
+		}
+		if parsed.Image != "" {
+			images = append(images, parsed.Image)
+		}
 	}
 	return images, nil
 }
@@ -102,12 +133,44 @@ func (crictlRuntime) PullImage(image string) error {
 	return err
 }
 
+// crictlImagesOutput matches the shape of `crictl images -o json`:
+//
+//	{"images": [{"id": "sha256:...", "repoTags": ["name:tag", ...], ...}]}
+type crictlImagesOutput struct {
+	Images []struct {
+		ID       string   `json:"id"`
+		RepoTags []string `json:"repoTags"`
+	} `json:"images"`
+}
+
 func (crictlRuntime) ListLocalImages() ([]string, error) {
 	out, err := runCmd("crictl", "images", "-o", "json")
 	if err != nil {
 		return nil, err
 	}
-	return extractCrictlImageRefs(out), nil
+	var parsed crictlImagesOutput
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, fmt.Errorf("parsing crictl images output: %w", err)
+	}
+	var refs []string
+	for _, img := range parsed.Images {
+		refs = append(refs, img.RepoTags...)
+	}
+	return refs, nil
+}
+
+// crictlPsOutput matches the shape of `crictl ps -o json`. Per the CRI
+// ContainerStatus schema, the requested image reference lives at
+// containers[].image.image (a nested object, not a bare string) — imageRef
+// is a separate, usually digest-form field we deliberately don't use here
+// since ListLocalImages() reports tag-form refs and we need both sides of
+// the comparison in the same form.
+type crictlPsOutput struct {
+	Containers []struct {
+		Image struct {
+			Image string `json:"image"`
+		} `json:"image"`
+	} `json:"containers"`
 }
 
 func (crictlRuntime) ListRunningImages() ([]string, error) {
@@ -115,7 +178,17 @@ func (crictlRuntime) ListRunningImages() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return extractCrictlContainerImages(out), nil
+	var parsed crictlPsOutput
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, fmt.Errorf("parsing crictl ps output: %w", err)
+	}
+	var images []string
+	for _, c := range parsed.Containers {
+		if c.Image.Image != "" {
+			images = append(images, c.Image.Image)
+		}
+	}
+	return images, nil
 }
 
 func (crictlRuntime) RemoveImage(image string) error {
@@ -151,83 +224,4 @@ func (dockerRuntime) ListRunningImages() ([]string, error) {
 func (dockerRuntime) RemoveImage(image string) error {
 	_, err := runCmd("docker", "rmi", image)
 	return err
-}
-
-// --- helpers ---
-
-func splitNonEmptyLines(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			out = append(out, line)
-		}
-	}
-	return out
-}
-
-// extractField does a crude single-field pull out of ctr's non-JSON `info`
-// text dump; it's intentionally tolerant since we only need a best-effort
-// image reference for GC comparisons, not a strict parser.
-func extractField(text, marker string) string {
-	idx := strings.Index(text, marker)
-	if idx < 0 {
-		return ""
-	}
-	rest := text[idx+len(marker):]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
-}
-
-// extractCrictlImageRefs pulls "repoTags":["..."] entries out of
-// `crictl images -o json` output without a full JSON schema dependency.
-func extractCrictlImageRefs(jsonOut string) []string {
-	var out []string
-	marker := `"repoTags":[`
-	idx := 0
-	for {
-		pos := strings.Index(jsonOut[idx:], marker)
-		if pos < 0 {
-			break
-		}
-		start := idx + pos + len(marker)
-		end := strings.Index(jsonOut[start:], "]")
-		if end < 0 {
-			break
-		}
-		segment := jsonOut[start : start+end]
-		for _, tag := range strings.Split(segment, ",") {
-			tag = strings.Trim(strings.TrimSpace(tag), `"`)
-			if tag != "" {
-				out = append(out, tag)
-			}
-		}
-		idx = start + end
-	}
-	return out
-}
-
-// extractCrictlContainerImages pulls "image":{"image":"..."} refs out of
-// `crictl ps -o json` output.
-func extractCrictlContainerImages(jsonOut string) []string {
-	var out []string
-	marker := `"image":"`
-	idx := 0
-	for {
-		pos := strings.Index(jsonOut[idx:], marker)
-		if pos < 0 {
-			break
-		}
-		start := idx + pos + len(marker)
-		end := strings.Index(jsonOut[start:], `"`)
-		if end < 0 {
-			break
-		}
-		out = append(out, jsonOut[start:start+end])
-		idx = start + end
-	}
-	return out
 }

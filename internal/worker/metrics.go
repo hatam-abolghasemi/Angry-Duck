@@ -18,6 +18,16 @@ var excludedFstypes = map[string]bool{
 	"fuse.lxcfs": true,
 }
 
+// UtilizationResult carries both the final ratio and the raw inputs it was
+// computed from, so callers can log the actual math (not just the answer)
+// when troubleshooting a suspicious utilization reading.
+type UtilizationResult struct {
+	SizeBytes   float64
+	FreeBytes   float64
+	UsedBytes   float64
+	Utilization float64 // (SizeBytes - FreeBytes) / SizeBytes
+}
+
 // FetchRootUtilization scrapes a node-exporter /metrics endpoint and
 // computes (size-free)/size for the root filesystem ("/"), replicating:
 //
@@ -28,20 +38,20 @@ var excludedFstypes = map[string]bool{
 // It does a lightweight line-based scan of the Prometheus text exposition
 // format rather than pulling in a full client_golang/prometheus parser
 // dependency, since we only need two specific metric families.
-func FetchRootUtilization(metricsURL string, timeout time.Duration) (float64, error) {
+func FetchRootUtilization(metricsURL string, timeout time.Duration) (UtilizationResult, error) {
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(metricsURL)
 	if err != nil {
-		return 0, fmt.Errorf("fetching %s: %w", metricsURL, err)
+		return UtilizationResult{}, fmt.Errorf("fetching %s: %w", metricsURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("fetching %s: unexpected status %d", metricsURL, resp.StatusCode)
+		return UtilizationResult{}, fmt.Errorf("fetching %s: unexpected status %d", metricsURL, resp.StatusCode)
 	}
 	return parseRootUtilization(resp.Body)
 }
 
-func parseRootUtilization(r io.Reader) (float64, error) {
+func parseRootUtilization(r io.Reader) (UtilizationResult, error) {
 	var size, free float64
 	var sawSize, sawFree bool
 
@@ -91,15 +101,21 @@ func parseRootUtilization(r io.Reader) (float64, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return 0, err
+		return UtilizationResult{}, err
 	}
 	if !sawSize || !sawFree {
-		return 0, fmt.Errorf("root filesystem metrics not found (mountpoint=\"/\")")
+		return UtilizationResult{}, fmt.Errorf("root filesystem metrics not found (mountpoint=\"/\")")
 	}
 	if size == 0 {
-		return 0, fmt.Errorf("root filesystem size is zero")
+		return UtilizationResult{}, fmt.Errorf("root filesystem size is zero")
 	}
-	return (size - free) / size, nil
+	used := size - free
+	return UtilizationResult{
+		SizeBytes:   size,
+		FreeBytes:   free,
+		UsedBytes:   used,
+		Utilization: used / size,
+	}, nil
 }
 
 // hasExcludedFstype checks the fstype="..." label against the excluded set.

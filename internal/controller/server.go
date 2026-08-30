@@ -2,11 +2,11 @@ package controller
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"angryduck/internal/logging"
 	"angryduck/internal/model"
 )
 
@@ -56,7 +56,7 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.registry.FreshCount() == 0 {
-		log.Printf("angryduck-controller: rejecting preheat for %s: zero fresh workers", req.Image)
+		logging.Warnf("angryduck-controller: rejecting preheat for image=%s: zero fresh workers reporting", req.Image)
 		writeJSON(w, http.StatusServiceUnavailable, model.PreheatResponse{
 			Accepted: false,
 			Reason:   "no fresh workers reporting; refusing to guess at disk state",
@@ -67,7 +67,7 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	s.registry.SetTarget(req.Image)
 	ordered := s.ranker.OrderNow(req.Image)
 
-	log.Printf("angryduck-controller: accepted preheat for image=%s ordered_nodes=%v", req.Image, ordered)
+	logging.Infof("angryduck-controller: accepted preheat for image=%s, ordered %d node(s): %v", req.Image, len(ordered), ordered)
 	writeJSON(w, http.StatusAccepted, model.PreheatResponse{
 		Accepted:     true,
 		TargetImage:  req.Image,
@@ -94,6 +94,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		rep.Timestamp = time.Now()
 	}
 	s.registry.Update(rep)
+	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%%", rep.NodeID, rep.Address, rep.Utilization*100)
 	writeJSON(w, http.StatusOK, model.ReportAck{Accepted: true})
 }
 

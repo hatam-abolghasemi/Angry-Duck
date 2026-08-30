@@ -18,11 +18,16 @@ spec:
       # and so its own pod IP equals the node's IP for SELF_ADDRESS.
       hostNetwork: true
       hostPID: true
+      # REQUIRED alongside hostNetwork: true — without this, the pod falls
+      # back to the node's own /etc/resolv.conf and cannot resolve
+      # cluster-internal Service DNS names like
+      # angryduck-controller.angryduck.svc.cluster.local.
+      dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.5
           env:
             - name: NODE_ID
               valueFrom:

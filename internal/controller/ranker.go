@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
+	"angryduck/internal/logging"
 	"angryduck/internal/model"
 )
 
@@ -69,6 +69,7 @@ func (rk *Ranker) OrderNow(image string) []string {
 func (rk *Ranker) orderLowestN(image string) []string {
 	fresh := rk.registry.FreshWorkers()
 	if len(fresh) == 0 {
+		logging.Warnf("angryduck-controller: cannot order preheat for image=%s: zero fresh workers", image)
 		return nil
 	}
 	n := rk.topN
@@ -76,6 +77,11 @@ func (rk *Ranker) orderLowestN(image string) []string {
 		n = len(fresh)
 	}
 	chosen := fresh[:n]
+
+	logging.Debugf("angryduck-controller: ranked %d fresh worker(s), choosing lowest %d by utilization for image=%s", len(fresh), n, image)
+	for _, w := range fresh {
+		logging.Debugf("angryduck-controller: candidate node=%s utilization=%.1f%%", w.NodeID, w.Utilization*100)
+	}
 
 	ordered := make([]string, 0, len(chosen))
 	for _, w := range chosen {
@@ -89,26 +95,26 @@ func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
 	order := model.PullOrder{Image: image, OrderedAt: time.Now()}
 	body, err := json.Marshal(order)
 	if err != nil {
-		log.Printf("angryduck-controller: failed to marshal pull order for %s: %v", nodeID, err)
+		logging.Errorf("angryduck-controller: failed to marshal pull order for node=%s: %v", nodeID, err)
 		return
 	}
 	url := "http://" + addr + "/pull"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("angryduck-controller: failed to build pull request for %s: %v", nodeID, err)
+		logging.Errorf("angryduck-controller: failed to build pull request for node=%s: %v", nodeID, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := rk.httpClient.Do(req)
 	if err != nil {
-		log.Printf("angryduck-controller: pull order to node=%s addr=%s failed: %v", nodeID, addr, err)
+		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s failed: %v", nodeID, addr, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		log.Printf("angryduck-controller: pull order to node=%s addr=%s rejected: status=%d", nodeID, addr, resp.StatusCode)
+		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s rejected: status=%d", nodeID, addr, resp.StatusCode)
 		return
 	}
-	log.Printf("angryduck-controller: ordered node=%s to pull image=%s", nodeID, image)
+	logging.Infof("angryduck-controller: ordered node=%s to pull image=%s", nodeID, image)
 }

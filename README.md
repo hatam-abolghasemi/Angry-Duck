@@ -26,9 +26,18 @@ chasing that doesn't pay off.
 
 Disk pressure on nodes is the constraint that shaped every design decision
 below: the controller refuses to preheat anything if it has no fresh view
-of any node's disk state, and every worker garbage-collects images it isn't
-using anymore (with a grace period so a pre-pull doesn't get GC'd before
-Argo ever asks for it).
+of any node's disk state, and every worker garbage-collects images across
+the whole node that aren't in use anymore (with a grace period so a
+pre-pull doesn't get GC'd before Argo ever asks for it). This is a node-wide
+scan by design — Angry Duck manages disk space for the whole node, not just
+its own preheating overhead — which is safe because the "is this image
+actually running?" check parses real JSON from the container runtime rather
+than string-matching, so it doesn't misjudge which images are in use (see
+the comment at the top of `internal/worker/gc.go` for the specific bug this
+replaced). Even so, GC ships with `GC_DRY_RUN=true` by default — it logs
+every removal decision without deleting anything until you explicitly flip
+it to `false`, so you can verify its judgment against your real nodes
+first, especially after any change to the matching logic.
 
 ## Architecture
 
@@ -44,7 +53,9 @@ docker push  ──POST /webhook/──►   - tracks worker freshness          
                                       pull the current target image       crictl/docker; remember the order
                                       (POST worker's /pull)                time for GC grace-period protection
                                                                         - every GC_CHECK_INTERVAL_S: compare
-                                                                          local images vs. running containers;
+                                                                          every local image vs. running
+                                                                          containers (matched via real JSON
+                                                                          parsing, not string-scraping);
                                                                           remove images unused for
                                                                           GC_MISS_THRESHOLD consecutive
                                                                           checks, unless still within
@@ -81,6 +92,7 @@ Every interval, threshold, and count lives in one place — see
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `LOG_LEVEL` | info | `debug`, `info`, `warn`, or `error` — see [Logging](#logging) below |
 | `WORKER_STALE_AFTER_S` | 30 | worker silence timeout before it's excluded from ranking |
 | `TARGET_TTL_S` | 120 | how long a preheat target stays active |
 | `RANK_INTERVAL_S` | 10 | how often the controller re-ranks and re-orders |
@@ -89,11 +101,36 @@ Every interval, threshold, and count lives in one place — see
 | `GC_CHECK_INTERVAL_S` | 60 | how often a worker checks for unused images |
 | `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before removal |
 | `GC_GRACE_PERIOD_S` | 60 | protection window after a controller-ordered pull |
+| `GC_DRY_RUN` | true | log removal decisions without deleting anything |
 | `CONTAINER_RUNTIME` | containerd | `containerd` (`ctr`), `crictl`, or `docker` |
 
 Copy `.env.example` to `.env` next to the binary, or inject the same keys
 via a k8s ConfigMap (see `deploy/k8s/configmap.yaml`) — real environment
 variables always win over `.env` file values.
+
+## Logging
+
+Every log line is tagged `[DEBUG]`, `[INFO]`, `[WARN]`, or `[ERROR]`, filtered by `LOG_LEVEL`:
+
+- **`debug`** — every per-image GC decision on every check (running/spared,
+  grace-period/spared, miss count incrementing), plus the raw
+  disk-utilization math the reporter computes each cycle (used/free/size
+  bytes, not just the final ratio) and the controller's per-node ranking
+  candidates. High volume — use when actively troubleshooting.
+- **`info`** (default) — normal operational events: a GC tick's summary
+  (`tick start: N local images, M running...` / `tick done: ... removed`),
+  each image's miss count progress toward the threshold, pulls starting and
+  completing, preheat requests accepted, workers reporting.
+- **`warn`** — decisions with real consequences: an image is being removed
+  (or would be, under `GC_DRY_RUN`), a preheat request was rejected, a pull
+  order failed to reach a worker.
+- **`error`** — a command or request failed outright (couldn't list images,
+  couldn't reach the controller, image removal failed).
+
+GC's reasoning is deliberately visible at `info` by default — you shouldn't
+need `debug` just to see *why* GC is about to remove something; you only
+need it to see routine "yes, this is fine" confirmations for every running
+image on every tick.
 
 ## Running locally
 
@@ -127,14 +164,14 @@ curl http://localhost:8080/status
 
 1. Build and push both images. Tag/registry convention:
    ```bash
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.0 -f Dockerfile.controller .
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.0 -f Dockerfile.worker .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.5 -f Dockerfile.controller .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.5 -f Dockerfile.worker .
 
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.0
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.0
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.5
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.5
    ```
    `deploy/k8s/controller.yaml` and `deploy/k8s/worker-daemonset.yaml` already
-   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.0`
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.5`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"angryduck/internal/config"
+	"angryduck/internal/logging"
 	"angryduck/internal/worker"
 )
 
@@ -26,6 +27,7 @@ func main() {
 	if err := config.Load(envFile); err != nil {
 		log.Printf("angryduck-worker: warning: failed to load %s: %v", envFile, err)
 	}
+	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
 
 	nodeID := config.String("NODE_ID", "")
 	if nodeID == "" {
@@ -57,13 +59,17 @@ func main() {
 	gcMissThreshold := config.Int("GC_MISS_THRESHOLD", 5)
 	gracePeriod := config.Duration("GC_GRACE_PERIOD_S", 60)
 	runtimeKind := config.String("CONTAINER_RUNTIME", "containerd")
+	// Defaults to true deliberately: after any change to the runtime
+	// matching logic, watch what GC decides via logs before letting it
+	// actually delete anything. Set GC_DRY_RUN=false to enable real removal.
+	gcDryRun := config.Bool("GC_DRY_RUN", true)
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s gc_dry_run=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, gcDryRun)
 
 	rt := worker.NewRuntime(runtimeKind)
 	puller := worker.NewPuller(rt, gracePeriod)
-	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold)
+	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())

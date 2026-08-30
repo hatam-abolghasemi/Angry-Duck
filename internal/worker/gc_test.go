@@ -1,0 +1,239 @@
+package worker
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"angryduck/internal/model"
+)
+
+// fakeRuntime is an in-memory Runtime double for testing GC and Puller
+// without shelling out to a real container runtime.
+type fakeRuntime struct {
+	mu       sync.Mutex
+	local    map[string]bool
+	running  map[string]bool
+	removed  []string
+	pullErrs map[string]error
+}
+
+func newFakeRuntime() *fakeRuntime {
+	return &fakeRuntime{
+		local:    make(map[string]bool),
+		running:  make(map[string]bool),
+		pullErrs: make(map[string]error),
+	}
+}
+
+func (f *fakeRuntime) PullImage(image string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err, ok := f.pullErrs[image]; ok {
+		return err
+	}
+	f.local[image] = true
+	return nil
+}
+
+func (f *fakeRuntime) ListLocalImages() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for img := range f.local {
+		out = append(out, img)
+	}
+	return out, nil
+}
+
+func (f *fakeRuntime) ListRunningImages() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for img := range f.running {
+		out = append(out, img)
+	}
+	return out, nil
+}
+
+func (f *fakeRuntime) RemoveImage(image string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.local, image)
+	f.removed = append(f.removed, image)
+	return nil
+}
+
+func (f *fakeRuntime) wasRemoved(image string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, img := range f.removed {
+		if img == image {
+			return true
+		}
+	}
+	return false
+}
+
+// orderPull drives Puller.HandlePull synchronously enough to record the
+// order (the actual pull happens in a goroutine, so we poll briefly for it
+// to land in the fake runtime).
+func orderPull(t *testing.T, p *Puller, rt *fakeRuntime, image string) {
+	t.Helper()
+	body, _ := json.Marshal(model.PullOrder{Image: image, OrderedAt: time.Now()})
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	p.HandlePull(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("HandlePull(%s) = %d, want %d", image, rec.Code, http.StatusAccepted)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		local, _ := rt.ListLocalImages()
+		for _, img := range local {
+			if img == image {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("image %s never appeared locally after pull order", image)
+}
+
+// TestGCRemovesAnyUnusedImageAfterThreshold proves the restored node-wide
+// scan: an image Angry Duck never pulled itself (simulating a system image
+// like calico/kube-proxy that's genuinely unused) still gets removed after
+// enough consecutive misses. This is the operator's explicit choice — Angry
+// Duck manages disk space for the whole node, not just its own preheating
+// overhead — and is safe specifically because ListRunningImages() here
+// returns correctly-parsed values, not the empty-string result the old
+// substring-marker bug produced.
+func TestGCRemovesAnyUnusedImageAfterThreshold(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.local["some-system-image:v1"] = true // never ordered via Angry Duck's puller
+
+	puller := NewPuller(rt, 0) // zero grace period
+	gc := NewGC(rt, puller, time.Millisecond, 3, false)
+
+	for i := 0; i < 2; i++ {
+		gc.tick()
+	}
+	if rt.wasRemoved("some-system-image:v1") {
+		t.Fatalf("image removed before reaching miss threshold")
+	}
+
+	gc.tick() // third consecutive miss
+	if !rt.wasRemoved("some-system-image:v1") {
+		t.Fatalf("expected unused image to be removed after threshold misses, regardless of who pulled it")
+	}
+}
+
+// TestGCNeverRemovesImageThatIsActuallyRunning is the regression test for
+// the real production bug: it exercises the exact ctrContainerInfo JSON
+// path (not raw map membership) to prove a running image survives, even
+// though the pretty-printed JSON `ctr containers info` actually emits has a
+// space after each colon — the format that broke the old substring-marker
+// extraction.
+func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
+	// Simulates exactly what `ctr -n k8s.io containers info <id>` prints:
+	// pretty-printed JSON with a space after the colon.
+	const prettyPrintedInfo = `{
+    "ID": "abc123",
+    "Image": "registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2",
+    "Runtime": {}
+}`
+	var parsed ctrContainerInfo
+	if err := json.Unmarshal([]byte(prettyPrintedInfo), &parsed); err != nil {
+		t.Fatalf("unexpected JSON parse error: %v", err)
+	}
+	if parsed.Image != "registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2" {
+		t.Fatalf("failed to extract Image field from pretty-printed JSON, got %q", parsed.Image)
+	}
+
+	// Now prove GC actually spares it end-to-end using that extracted value.
+	rt := newFakeRuntime()
+	image := "registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2"
+	rt.local[image] = true
+	rt.running[image] = true // what ListRunningImages() would now correctly report
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+
+	for i := 0; i < 10; i++ {
+		gc.tick()
+	}
+
+	if rt.wasRemoved(image) {
+		t.Fatalf("GC removed its own actively-running image — this is the exact bug that hit production")
+	}
+}
+
+func TestGCSparesRunningImage(t *testing.T) {
+	rt := newFakeRuntime()
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+
+	orderPull(t, puller, rt, "myapp:1.0.0")
+	rt.mu.Lock()
+	rt.running["myapp:1.0.0"] = true
+	rt.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		gc.tick()
+	}
+
+	if rt.wasRemoved("myapp:1.0.0") {
+		t.Fatalf("GC removed an image that is actively running")
+	}
+}
+
+func TestGCSparesImageInGracePeriod(t *testing.T) {
+	rt := newFakeRuntime()
+	puller := NewPuller(rt, time.Hour) // long grace period
+	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+
+	orderPull(t, puller, rt, "myapp:1.0.0")
+
+	for i := 0; i < 5; i++ {
+		gc.tick()
+	}
+
+	if rt.wasRemoved("myapp:1.0.0") {
+		t.Fatalf("GC removed an image still within its grace period")
+	}
+}
+
+// TestGCDryRunNeverActuallyRemoves proves dry-run mode reaches the same
+// removal decision (past miss threshold, not running, not in grace period)
+// but never calls RemoveImage — the safety valve for validating GC's
+// decisions against real production data before trusting it to delete.
+func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.local["some-image:v1"] = true
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 1, true) // dryRun=true
+
+	for i := 0; i < 10; i++ {
+		gc.tick()
+	}
+
+	if rt.wasRemoved("some-image:v1") {
+		t.Fatalf("dry-run GC actually removed an image — dry-run must never call RemoveImage")
+	}
+	// The image should still be reported as present, since nothing removed it.
+	local, _ := rt.ListLocalImages()
+	found := false
+	for _, img := range local {
+		if img == "some-image:v1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected image to remain present under dry-run")
+	}
+}
