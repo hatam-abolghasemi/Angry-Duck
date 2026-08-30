@@ -14,14 +14,8 @@ spec:
       labels:
         app: angryduck-worker
     spec:
-      # hostNetwork so the worker can reach node-exporter at localhost:9100
-      # and so its own pod IP equals the node's IP for SELF_ADDRESS.
       hostNetwork: true
       hostPID: true
-      # REQUIRED alongside hostNetwork: true — without this, the pod falls
-      # back to the node's own /etc/resolv.conf and cannot resolve
-      # cluster-internal Service DNS names like
-      # angryduck-controller.angryduck.svc.cluster.local.
       dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         - name: gitlab-docker-registry
@@ -37,9 +31,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-              # A bare IP is fine here: the worker binary appends its own
-              # WORKER_LISTEN_ADDR port automatically if SELF_ADDRESS has
-              # no ":" in it.
           envFrom:
             - configMapRef:
                 name: angryduck-config
@@ -72,23 +63,14 @@ spec:
               cpu: 200m
               memory: 128Mi
           securityContext:
-            privileged: true # required to talk to the node's containerd socket
+            privileged: true
       volumes:
         - name: containerd-sock
           hostPath:
             path: /run/containerd/containerd.sock
             type: Socket
-        # Same secret already used above for imagePullSecrets (kubelet's
-        # own pull of the worker's own image) — reused here so the worker
-        # process itself can read it too, since the worker's own preheat
-        # pulls (`ctr images pull`) bypass kubelet's CRI plumbing entirely
-        # and get none of the imagePullSecrets credentials otherwise. Make
-        # sure this secret's "auths" map includes every registry Angry
-        # Duck might be asked to preheat from, not just the one your own
-        # images live in — dockerconfigjson supports multiple registries
-        # in one secret natively.
         - name: registry-creds
           secret:
             secretName: gitlab-registry-pull
       tolerations:
-        - operator: Exists # run on every node, including tainted ones
+        - operator: Exists
