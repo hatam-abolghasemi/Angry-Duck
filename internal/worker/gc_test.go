@@ -18,6 +18,7 @@ type fakeRuntime struct {
 	mu       sync.Mutex
 	local    map[string]bool
 	running  map[string]bool
+	digests  map[string]string // ref (any alias) -> digest
 	removed  []string
 	pullErrs map[string]error
 }
@@ -26,6 +27,7 @@ func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{
 		local:    make(map[string]bool),
 		running:  make(map[string]bool),
+		digests:  make(map[string]string),
 		pullErrs: make(map[string]error),
 	}
 }
@@ -56,6 +58,16 @@ func (f *fakeRuntime) ListRunningImages() ([]string, error) {
 	var out []string
 	for img := range f.running {
 		out = append(out, img)
+	}
+	return out, nil
+}
+
+func (f *fakeRuntime) ImageDigests() (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.digests))
+	for k, v := range f.digests {
+		out[k] = v
 	}
 	return out, nil
 }
@@ -169,6 +181,78 @@ func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
 
 	if rt.wasRemoved(image) {
 		t.Fatalf("GC removed its own actively-running image — this is the exact bug that hit production")
+	}
+}
+
+// TestGCSparesEveryAliasOfARunningImage is the regression test for the
+// second confirmed production bug: containerd reports one running
+// container's image via only ONE of that image's several valid aliases (a
+// tag, a digest-pinned ref, or a bare digest "image ID"), while
+// ListLocalImages() enumerates ALL of them as separate entries. Before
+// digest-based matching, GC correctly spared whichever single alias
+// happened to match the running container's reported string, but treated
+// the image's OTHER aliases as separate, unused images — including on the
+// worker's own running image and the node's `pause` image. This uses the
+// exact digests and reference shapes captured from that real incident.
+func TestGCSparesEveryAliasOfARunningImage(t *testing.T) {
+	const workerDigest = "sha256:a46eb1fcc56fbd68951fbb5c5318534abec151ffac85de937ce7fcef51757efd"
+	const pauseDigest = "sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+
+	workerTag := "registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.5"
+	workerDigestRef := "registry.internal-registry.example.com/devops/generic/angry-duck-worker@" + workerDigest
+	workerBareDigest := workerDigest // containerd also lists the bare digest as its own ref row
+
+	pauseTag := "repo-sahand.internal-dev.example.com/pause:3.10.1"
+	pauseDigestRef := "repo-sahand.internal-dev.example.com/pause@" + pauseDigest
+
+	rt := newFakeRuntime()
+	// All the aliases containerd would list for these two pieces of content.
+	for _, ref := range []string{workerTag, workerDigestRef, workerBareDigest} {
+		rt.local[ref] = true
+		rt.digests[ref] = workerDigest
+	}
+	for _, ref := range []string{pauseTag, pauseDigestRef} {
+		rt.local[ref] = true
+		rt.digests[ref] = pauseDigest
+	}
+	// A running container only ever reports ONE alias — the tag, in this
+	// case, matching what was actually observed in production logs.
+	rt.running[workerTag] = true
+	rt.running[pauseTag] = true
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+
+	for i := 0; i < 5; i++ {
+		gc.tick()
+	}
+
+	for _, ref := range []string{workerTag, workerDigestRef, workerBareDigest, pauseTag, pauseDigestRef} {
+		if rt.wasRemoved(ref) {
+			t.Fatalf("GC removed alias=%q of a running image — this is the exact production bug (6 local images, 12 running, only 2 spared)", ref)
+		}
+	}
+}
+
+// TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled proves digest
+// matching doesn't just spare everything indiscriminately — an image whose
+// digest genuinely doesn't match anything running should still be removed.
+func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.local["stale-image:v1"] = true
+	rt.digests["stale-image:v1"] = "sha256:deadbeef"
+	rt.running["something-else:v1"] = true
+	rt.digests["something-else:v1"] = "sha256:cafef00d"
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+
+	for i := 0; i < 3; i++ {
+		gc.tick()
+	}
+
+	if !rt.wasRemoved("stale-image:v1") {
+		t.Fatalf("expected genuinely unused image to still be removed with digest matching enabled")
 	}
 }
 

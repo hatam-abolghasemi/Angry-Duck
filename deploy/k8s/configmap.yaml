@@ -6,7 +6,7 @@ metadata:
 data:
   # debug shows every per-image GC decision and the raw disk-utilization
   # math; info shows normal events without that volume.
-  LOG_LEVEL: "info"
+  LOG_LEVEL: "debug"
   CONTROLLER_LISTEN_ADDR: ":8080"
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"

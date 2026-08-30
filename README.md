@@ -31,13 +31,21 @@ the whole node that aren't in use anymore (with a grace period so a
 pre-pull doesn't get GC'd before Argo ever asks for it). This is a node-wide
 scan by design — Angry Duck manages disk space for the whole node, not just
 its own preheating overhead — which is safe because the "is this image
-actually running?" check parses real JSON from the container runtime rather
-than string-matching, so it doesn't misjudge which images are in use (see
-the comment at the top of `internal/worker/gc.go` for the specific bug this
-replaced). Even so, GC ships with `GC_DRY_RUN=true` by default — it logs
-every removal decision without deleting anything until you explicitly flip
-it to `false`, so you can verify its judgment against your real nodes
-first, especially after any change to the matching logic.
+actually running?" check resolves every reference to its canonical content
+digest before comparing, rather than comparing strings directly. Two
+confirmed production bugs shaped this: first, JSON was being parsed with a
+substring marker that never matched real output, making every image look
+permanently unused; second, even with correct parsing, one piece of image
+content has multiple valid aliases (a tag, a digest-pinned ref, a bare
+digest), a running container only ever reports one of them, and comparing
+by raw string spared that one alias while scheduling the image's other
+aliases — including its own — for removal. See the comment at the top of
+`internal/worker/gc.go` for details; `internal/worker/gc_test.go` includes
+a regression test built from the actual digests and reference shapes
+captured during that incident. Even so, GC ships with `GC_DRY_RUN=true` by
+default — it logs every removal decision without deleting anything until
+you explicitly flip it to `false`, so you can verify its judgment against
+your real nodes first, especially after any change to the matching logic.
 
 ## Architecture
 
@@ -164,14 +172,14 @@ curl http://localhost:8080/status
 
 1. Build and push both images. Tag/registry convention:
    ```bash
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.5 -f Dockerfile.controller .
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.5 -f Dockerfile.worker .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.6 -f Dockerfile.controller .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.6 -f Dockerfile.worker .
 
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.5
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.5
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.6
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.6
    ```
    `deploy/k8s/controller.yaml` and `deploy/k8s/worker-daemonset.yaml` already
-   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.5`
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.6`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash

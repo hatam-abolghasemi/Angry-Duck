@@ -15,13 +15,31 @@ import (
 // This scans ALL local images, not just ones Angry Duck itself ordered
 // pulled — a deliberate operator choice to have Angry Duck manage disk
 // space for the whole node, not just its own preheating overhead. This is
-// safe only because ListLocalImages()/ListRunningImages() now parse real
-// JSON output (see runtime.go) instead of the substring-marker extraction
-// bug that previously made every image on the node look permanently
-// unused. Do not revert that extraction to substring scraping — this GC
-// loop has no independent safety net against a broken "is this running?"
-// check, since it deliberately scans every image, including ones critical
-// to cluster operation (calico, kube-proxy, coredns, etc.).
+// safe only because the "is this running?" check compares images by their
+// canonical content digest (via runtime.ImageDigests()), not by raw
+// reference string. Two confirmed production bugs motivated this:
+//
+//  1. ListRunningImages() originally used a substring marker that never
+//     matched ctr's pretty-printed JSON at all, so every image on the node
+//     looked permanently unused regardless of reality. Fixed by parsing
+//     real JSON.
+//  2. Even with correct JSON parsing, comparing by raw string still
+//     misjudged images as unused: containerd gives one piece of content
+//     multiple valid aliases (a tag, a digest-pinned ref, and a bare
+//     digest "image ID"), and a running container's reported Image field
+//     is only ever one of those aliases. GC spared the alias that
+//     happened to match and scheduled the image's OTHER aliases for
+//     removal — even though they were the exact same content backing that
+//     same running container. Confirmed in production: 6 local images, 12
+//     running images, only 2 spared. Fixed by resolving every reference to
+//     its digest before comparing, since the digest is identical across
+//     all aliases of one piece of content.
+//
+// Do not revert to raw-string comparison. This GC loop has no independent
+// safety net against a broken "is this running?" check, since it
+// deliberately scans every image, including ones critical to cluster
+// operation (calico, kube-proxy, coredns, the pause image every pod
+// sandbox depends on, etc.).
 //
 // Every decision GC makes is logged, at a level matching its consequence:
 //   - DEBUG: routine, expected-to-be-boring per-image facts (this image is
@@ -86,10 +104,24 @@ func (g *GC) tick() {
 		logging.Errorf("angryduck-worker-gc: failed to list running images: %v", err)
 		return
 	}
+	digests, err := g.runtime.ImageDigests()
+	if err != nil {
+		// Not fatal: fall back to raw-string matching only. Log loudly
+		// since this silently re-exposes the alias-mismatch bug — better
+		// to know GC is running degraded than to wonder why.
+		logging.Errorf("angryduck-worker-gc: failed to resolve image digests, falling back to raw reference matching only (this re-exposes the alias-mismatch bug for this tick): %v", err)
+		digests = map[string]string{}
+	}
+
 	runningSet := make(map[string]bool, len(running))
+	runningDigests := make(map[string]bool, len(running))
 	for _, img := range running {
-		if img != "" {
-			runningSet[img] = true
+		if img == "" {
+			continue
+		}
+		runningSet[img] = true
+		if d, ok := digests[img]; ok {
+			runningDigests[d] = true
 		}
 	}
 
@@ -104,11 +136,20 @@ func (g *GC) tick() {
 		}
 		seen[img] = true
 
-		if runningSet[img] {
+		inUse := runningSet[img]
+		matchedVia := "direct reference match"
+		if !inUse {
+			if d, ok := digests[img]; ok && runningDigests[d] {
+				inUse = true
+				matchedVia = "digest match (different alias of a running image)"
+			}
+		}
+
+		if inUse {
 			if g.missCounts[img] > 0 {
-				logging.Infof("angryduck-worker-gc: image=%s now in use again, resetting miss count from %d to 0", img, g.missCounts[img])
+				logging.Infof("angryduck-worker-gc: image=%s now in use again (%s), resetting miss count from %d to 0", img, matchedVia, g.missCounts[img])
 			} else {
-				logging.Debugf("angryduck-worker-gc: image=%s is running, no action", img)
+				logging.Debugf("angryduck-worker-gc: image=%s is running (%s), no action", img, matchedVia)
 			}
 			delete(g.missCounts, img)
 			sparedRunning++
