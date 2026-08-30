@@ -261,16 +261,16 @@ func TestGCSparesRunningImage(t *testing.T) {
 	puller := NewPuller(rt, 0)
 	gc := NewGC(rt, puller, time.Millisecond, 1, false)
 
-	orderPull(t, puller, rt, "myapp:1.0.0")
+	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 	rt.mu.Lock()
-	rt.running["myapp:1.0.0"] = true
+	rt.running["registry.example.com/myapp:1.0.0"] = true
 	rt.mu.Unlock()
 
 	for i := 0; i < 5; i++ {
 		gc.tick()
 	}
 
-	if rt.wasRemoved("myapp:1.0.0") {
+	if rt.wasRemoved("registry.example.com/myapp:1.0.0") {
 		t.Fatalf("GC removed an image that is actively running")
 	}
 }
@@ -280,13 +280,13 @@ func TestGCSparesImageInGracePeriod(t *testing.T) {
 	puller := NewPuller(rt, time.Hour) // long grace period
 	gc := NewGC(rt, puller, time.Millisecond, 1, false)
 
-	orderPull(t, puller, rt, "myapp:1.0.0")
+	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 
 	for i := 0; i < 5; i++ {
 		gc.tick()
 	}
 
-	if rt.wasRemoved("myapp:1.0.0") {
+	if rt.wasRemoved("registry.example.com/myapp:1.0.0") {
 		t.Fatalf("GC removed an image still within its grace period")
 	}
 }

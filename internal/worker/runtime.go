@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"angryduck/internal/imageref"
+	"angryduck/internal/registryauth"
 )
 
 // Runtime is the minimal container-runtime interface Angry Duck needs on
@@ -58,15 +61,17 @@ type Runtime interface {
 }
 
 // NewRuntime builds a Runtime based on the given kind: "containerd" (default,
-// uses `ctr -n k8s.io`), "crictl", or "docker".
-func NewRuntime(kind string) Runtime {
+// uses `ctr -n k8s.io`), "crictl", or "docker". creds resolves per-registry
+// pull credentials — pass registryauth.Empty() if none are configured;
+// every pull then proceeds anonymously, same as before this existed.
+func NewRuntime(kind string, creds *registryauth.Store) Runtime {
 	switch strings.ToLower(kind) {
 	case "docker":
-		return dockerRuntime{}
+		return dockerRuntime{creds: creds}
 	case "crictl":
-		return crictlRuntime{}
+		return crictlRuntime{creds: creds}
 	default:
-		return containerdRuntime{}
+		return containerdRuntime{creds: creds}
 	}
 }
 
@@ -95,10 +100,17 @@ func splitNonEmptyLines(s string) []string {
 
 // --- containerd (ctr) ---
 
-type containerdRuntime struct{}
+type containerdRuntime struct {
+	creds *registryauth.Store
+}
 
-func (containerdRuntime) PullImage(image string) error {
-	_, err := runCmd("ctr", "-n", "k8s.io", "images", "pull", image)
+func (r containerdRuntime) PullImage(image string) error {
+	args := []string{"-n", "k8s.io", "images", "pull"}
+	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
+		args = append(args, "--user", userpass)
+	}
+	args = append(args, image)
+	_, err := runCmd("ctr", args...)
 	return err
 }
 
@@ -190,10 +202,17 @@ func (containerdRuntime) RemoveImage(image string) error {
 
 // --- crictl ---
 
-type crictlRuntime struct{}
+type crictlRuntime struct {
+	creds *registryauth.Store
+}
 
-func (crictlRuntime) PullImage(image string) error {
-	_, err := runCmd("crictl", "pull", image)
+func (r crictlRuntime) PullImage(image string) error {
+	args := []string{"pull"}
+	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
+		args = append(args, "--creds", userpass)
+	}
+	args = append(args, image)
+	_, err := runCmd("crictl", args...)
 	return err
 }
 
@@ -299,9 +318,30 @@ func (crictlRuntime) RemoveImage(image string) error {
 
 // --- docker ---
 
-type dockerRuntime struct{}
+type dockerRuntime struct {
+	creds *registryauth.Store
+}
 
-func (dockerRuntime) PullImage(image string) error {
+// PullImage logs in to the target registry first if credentials are
+// configured for it, then pulls. Unlike ctr/crictl, docker has no
+// per-invocation credential flag on `pull` itself — `docker login` is the
+// only mechanism, and it persists into the shared Docker credential store
+// for the lifetime of the daemon, not just this one call. The password is
+// piped via stdin rather than passed as a CLI argument, since arguments
+// are visible to anything that can list processes on the node.
+func (r dockerRuntime) PullImage(image string) error {
+	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
+		user, pass, found := strings.Cut(userpass, ":")
+		if found {
+			cmd := exec.Command("docker", "login", imageref.Host(image), "-u", user, "--password-stdin")
+			cmd.Stdin = strings.NewReader(pass)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("docker login to %s failed: %w: %s", imageref.Host(image), err, strings.TrimSpace(stderr.String()))
+			}
+		}
+	}
 	_, err := runCmd("docker", "pull", image)
 	return err
 }

@@ -111,10 +111,55 @@ Every interval, threshold, and count lives in one place — see
 | `GC_GRACE_PERIOD_S` | 60 | protection window after a controller-ordered pull |
 | `GC_DRY_RUN` | true | log removal decisions without deleting anything |
 | `CONTAINER_RUNTIME` | containerd | `containerd` (`ctr`), `crictl`, or `docker` |
+| `REGISTRY_CREDENTIALS_PATH` | (empty) | path to a dockerconfigjson file for private-registry pulls — see [Registry credentials](#registry-credentials) below |
 
 Copy `.env.example` to `.env` next to the binary, or inject the same keys
 via a k8s ConfigMap (see `deploy/k8s/configmap.yaml`) — real environment
 variables always win over `.env` file values.
+
+## Registry credentials
+
+Angry Duck's worker pulls images by shelling out directly to the container
+runtime CLI (`ctr images pull`, by default). This is a plain CLI
+invocation — it does **not** go through kubelet's CRI plumbing, which is
+the only place `imagePullSecrets` actually gets applied. Concretely: a
+Pod's `imagePullSecrets` lets *kubelet* authenticate when *kubelet* pulls
+that Pod's declared image — that's why Angry Duck's own controller/worker
+images pull fine. It does nothing for images the *worker process itself*
+decides to pull afterward, because that pull was never routed through
+kubelet at all. Without credentials configured, every preheat pull is
+attempted anonymously, and fails with a 401/403 for any private registry:
+
+```
+ctr: failed to resolve image: failed to authorize: failed to fetch
+anonymous token: ... 403 Forbidden
+```
+
+To fix this, mount a standard `dockerconfigjson` secret — the same format
+`imagePullSecrets` already uses — into the worker container, and point
+`REGISTRY_CREDENTIALS_PATH` at it. `deploy/k8s/worker-daemonset.yaml`
+already does this, reusing the same `gitlab-docker-registry` secret used
+for `imagePullSecrets`. You do **not** need a separate secret per
+registry — a `dockerconfigjson`'s `auths` map natively supports multiple
+registries in one file:
+
+```json
+{
+  "auths": {
+    "registry.internal-registry.example.com": { "auth": "base64(user:pass)" },
+    "some-other-registry.example.com": { "auth": "base64(user:pass)" }
+  }
+}
+```
+
+If the secret you're reusing doesn't already have credentials for a
+registry you want to preheat images from, add that registry to its
+`auths` map (or point `REGISTRY_CREDENTIALS_PATH` at a different secret
+entirely) — Angry Duck reads whatever's mounted there and resolves
+credentials by matching the image's registry host.
+
+Leaving `REGISTRY_CREDENTIALS_PATH` unset is fine if every image you'll
+ever preheat is public.
 
 ## Logging
 
@@ -172,14 +217,14 @@ curl http://localhost:8080/status
 
 1. Build and push both images. Tag/registry convention:
    ```bash
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.6 -f Dockerfile.controller .
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.6 -f Dockerfile.worker .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.7 -f Dockerfile.controller .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7 -f Dockerfile.worker .
 
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.6
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.6
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.7
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7
    ```
    `deploy/k8s/controller.yaml` and `deploy/k8s/worker-daemonset.yaml` already
-   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.6`
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.7`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash
@@ -224,7 +269,13 @@ Notes on the worker DaemonSet:
 **Controller**
 - `POST /webhook/preheat` — `{"image": "..."}`. Rejects with `503` if zero
   workers have reported recently. Otherwise sets the target and
-  immediately orders the lowest-utilization fresh nodes to pull.
+  immediately orders the lowest-utilization fresh nodes to pull. Short
+  Docker-style references are normalized before anything else happens —
+  `"nginx"` and `"nginx:latest"` both become
+  `"docker.io/library/nginx:latest"` — because `ctr` (the worker's default
+  pull mechanism) does not do this expansion itself and fails with a
+  confusing `invalid port ":latest" after host` error on short references.
+  See `internal/imageref` for the exact rules.
 - `POST /report` — worker utilization reports (workers call this
   themselves; you shouldn't need to).
 - `GET /status` — debug snapshot of every known worker and the current

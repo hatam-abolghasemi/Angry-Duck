@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
 	"angryduck/internal/model"
 )
@@ -46,6 +47,14 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, model.PullAck{Accepted: false, Reason: "missing image"})
 		return
 	}
+	// Defense-in-depth: the controller already normalizes at the webhook,
+	// but normalize here too in case /pull is ever hit directly, so `ctr`
+	// never sees an ambiguous short reference regardless of caller.
+	normalized := imageref.Normalize(order.Image)
+	if normalized != order.Image {
+		logging.Infof("angryduck-worker: normalized image reference %q to %q", order.Image, normalized)
+	}
+	order.Image = normalized
 
 	p.mu.Lock()
 	p.orderedAt[order.Image] = time.Now()

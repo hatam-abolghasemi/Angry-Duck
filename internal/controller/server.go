@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
 	"angryduck/internal/model"
 )
@@ -54,6 +55,20 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Normalize short Docker-style references ("nginx", "nginx:latest")
+	// into fully-qualified ones ("docker.io/library/nginx:latest") here,
+	// once, at the entry point. `ctr` (the worker's default runtime) does
+	// not do this expansion itself and fails with a confusing
+	// "invalid port after host" error on short references — normalizing
+	// centrally means every downstream consumer (ranking, the pull order
+	// sent to workers, GC's tracking of what it pulled) sees the same
+	// canonical reference throughout, rather than each having to repeat
+	// this logic or risk seeing inconsistent forms of the same image.
+	normalized := imageref.Normalize(req.Image)
+	if normalized != req.Image {
+		logging.Infof("angryduck-controller: normalized image reference %q to %q", req.Image, normalized)
+	}
+	req.Image = normalized
 
 	if s.registry.FreshCount() == 0 {
 		logging.Warnf("angryduck-controller: rejecting preheat for image=%s: zero fresh workers reporting", req.Image)

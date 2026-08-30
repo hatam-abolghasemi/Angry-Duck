@@ -19,6 +19,7 @@ import (
 
 	"angryduck/internal/config"
 	"angryduck/internal/logging"
+	"angryduck/internal/registryauth"
 	"angryduck/internal/worker"
 )
 
@@ -64,10 +65,26 @@ func main() {
 	// actually delete anything. Set GC_DRY_RUN=false to enable real removal.
 	gcDryRun := config.Bool("GC_DRY_RUN", true)
 
+	// The worker pulls images by shelling out directly to the container
+	// runtime CLI, bypassing kubelet's CRI plumbing entirely — so
+	// kubelet's own imagePullSecrets never apply here. Point this at a
+	// mounted dockerconfigjson secret (the same format imagePullSecrets
+	// use) to give preheat pulls credentials for private registries. Not
+	// setting this is fine for public images; private ones will fail with
+	// a 401/403 until it's configured.
+	credsPath := config.String("REGISTRY_CREDENTIALS_PATH", "")
+	creds, err := registryauth.Load(credsPath)
+	if err != nil {
+		log.Fatalf("angryduck-worker: failed to load registry credentials from %s: %v", credsPath, err)
+	}
+	if credsPath != "" {
+		log.Printf("angryduck-worker: loaded credentials for %d registr(y/ies) from %s", creds.Count(), credsPath)
+	}
+
 	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s gc_dry_run=%v",
 		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, gcDryRun)
 
-	rt := worker.NewRuntime(runtimeKind)
+	rt := worker.NewRuntime(runtimeKind, creds)
 	puller := worker.NewPuller(rt, gracePeriod)
 	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval)

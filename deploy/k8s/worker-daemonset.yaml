@@ -27,7 +27,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.6
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7
           env:
             - name: NODE_ID
               valueFrom:
@@ -49,6 +49,9 @@ spec:
           volumeMounts:
             - name: containerd-sock
               mountPath: /run/containerd/containerd.sock
+            - name: registry-creds
+              mountPath: /etc/angryduck/registry-creds
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -75,5 +78,17 @@ spec:
           hostPath:
             path: /run/containerd/containerd.sock
             type: Socket
+        # Same secret already used above for imagePullSecrets (kubelet's
+        # own pull of the worker's own image) — reused here so the worker
+        # process itself can read it too, since the worker's own preheat
+        # pulls (`ctr images pull`) bypass kubelet's CRI plumbing entirely
+        # and get none of the imagePullSecrets credentials otherwise. Make
+        # sure this secret's "auths" map includes every registry Angry
+        # Duck might be asked to preheat from, not just the one your own
+        # images live in — dockerconfigjson supports multiple registries
+        # in one secret natively.
+        - name: registry-creds
+          secret:
+            secretName: gitlab-registry-pull
       tolerations:
         - operator: Exists # run on every node, including tainted ones
