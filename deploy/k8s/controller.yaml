@@ -15,9 +15,11 @@ spec:
       labels:
         app: angryduck-controller
     spec:
+      imagePullSecrets:
+        - name: gitlab-docker-registry
       containers:
         - name: controller
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.0
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.2
           ports:
             - containerPort: 8080
               name: http

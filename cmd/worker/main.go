@@ -41,7 +41,7 @@ func main() {
 		log.Fatalf("angryduck-worker: SELF_ADDRESS must be set to a controller-reachable host or host:port (e.g. pod IP via downward API)")
 	}
 
-	listenAddr := config.String("WORKER_LISTEN_ADDR", ":8081")
+	listenAddr := config.String("WORKER_LISTEN_ADDR", ":18081")
 
 	// SELF_ADDRESS is commonly injected via the k8s downward API as a bare
 	// IP (status.podIP), which has no port. If it's missing one, append the
@@ -93,16 +93,16 @@ func main() {
 	cancel()
 }
 
-// listenPort extracts the port from a listen address like ":8081" or
-// "0.0.0.0:8081". Falls back to "8081" if it can't parse one.
+// listenPort extracts the port from a listen address like ":18081" or
+// "0.0.0.0:18081". Falls back to "18081" if it can't parse one.
 func listenPort(listenAddr string) string {
 	idx := strings.LastIndex(listenAddr, ":")
 	if idx < 0 || idx == len(listenAddr)-1 {
-		return "8081"
+		return "18081"
 	}
 	port := listenAddr[idx+1:]
 	if _, err := strconv.Atoi(port); err != nil {
-		return "8081"
+		return "18081"
 	}
 	return port
 }

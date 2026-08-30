@@ -106,7 +106,7 @@ ENV_FILE=.env.example ./bin/angryduck-controller
 
 # terminal 2 (needs NODE_ID/SELF_ADDRESS set; SELF_ADDRESS needs a real
 # reachable host:port for the controller to call back)
-NODE_ID=node-1 SELF_ADDRESS=localhost:8081 ENV_FILE=.env.example ./bin/angryduck-worker
+NODE_ID=node-1 SELF_ADDRESS=localhost:18081 ENV_FILE=.env.example ./bin/angryduck-worker
 ```
 
 Trigger a preheat the way the pipeline would, right after `docker push`:

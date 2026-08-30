@@ -10,7 +10,7 @@ data:
   RANK_INTERVAL_S: "10"
   RANK_TOP_N: "2"
 
-  WORKER_LISTEN_ADDR: ":8081"
+  WORKER_LISTEN_ADDR: ":18081"
   NODE_EXPORTER_URL: "http://localhost:9100/metrics"
   CONTROLLER_URL: "http://angryduck-controller.angryduck.svc.cluster.local:8080"
   REPORT_INTERVAL_S: "15"

@@ -1,10 +1,10 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.27.0-alpine3.24 AS build
 WORKDIR /src
 COPY go.mod ./
 COPY internal ./internal
 COPY cmd/controller ./cmd/controller
 RUN CGO_ENABLED=0 go build -o /out/angryduck-controller ./cmd/controller
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian13
 COPY --from=build /out/angryduck-controller /angryduck-controller
 ENTRYPOINT ["/angryduck-controller"]

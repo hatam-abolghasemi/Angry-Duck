@@ -18,9 +18,11 @@ spec:
       # and so its own pod IP equals the node's IP for SELF_ADDRESS.
       hostNetwork: true
       hostPID: true
+      imagePullSecrets:
+        - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.0
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2
           env:
             - name: NODE_ID
               valueFrom:
@@ -37,22 +39,21 @@ spec:
             - configMapRef:
                 name: angryduck-config
           ports:
-            - containerPort: 8081
+            - containerPort: 18081
               name: http
-              hostPort: 8081
           volumeMounts:
             - name: containerd-sock
               mountPath: /run/containerd/containerd.sock
           readinessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: 18081
             initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: 18081
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
