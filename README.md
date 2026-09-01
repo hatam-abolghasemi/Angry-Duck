@@ -83,7 +83,7 @@ internal/config/         dependency-free .env loader + typed getters
 internal/controller/     worker registry, ranking loop, HTTP handlers
 internal/worker/         node-exporter scraping, container runtime shim,
                          pull handler + GC loop, HTTP handlers
-deploy/k8s/              namespace, ConfigMap, controller Deployment/Service,
+deploy/stg/              namespace, ConfigMap, controller Deployment/Service,
                          worker DaemonSet, Ingress for the external webhook
 Dockerfile.controller
 Dockerfile.worker
@@ -114,7 +114,7 @@ Every interval, threshold, and count lives in one place — see
 | `REGISTRY_CREDENTIALS_PATH` | (empty) | path to a dockerconfigjson file for private-registry pulls — see [Registry credentials](#registry-credentials) below |
 
 Copy `.env.example` to `.env` next to the binary, or inject the same keys
-via a k8s ConfigMap (see `deploy/k8s/configmap.yaml`) — real environment
+via a k8s ConfigMap (see `deploy/stg/configmap.yaml`) — real environment
 variables always win over `.env` file values.
 
 ## Registry credentials
@@ -137,7 +137,7 @@ anonymous token: ... 403 Forbidden
 
 To fix this, mount a standard `dockerconfigjson` secret — the same format
 `imagePullSecrets` already uses — into the worker container, and point
-`REGISTRY_CREDENTIALS_PATH` at it. `deploy/k8s/worker-daemonset.yaml`
+`REGISTRY_CREDENTIALS_PATH` at it. `deploy/stg/worker-daemonset.yaml`
 already does this, reusing the same `gitlab-docker-registry` secret used
 for `imagePullSecrets`. You do **not** need a separate secret per
 registry — a `dockerconfigjson`'s `auths` map natively supports multiple
@@ -223,20 +223,20 @@ curl http://localhost:8080/status
    sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.7
    sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7
    ```
-   `deploy/k8s/controller.yaml` and `deploy/k8s/worker-daemonset.yaml` already
+   `deploy/stg/controller.yaml` and `deploy/stg/worker-daemonset.yaml` already
    point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.7`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash
-   kubectl apply -f deploy/k8s/namespace.yaml
-   kubectl apply -f deploy/k8s/configmap.yaml
-   kubectl apply -f deploy/k8s/controller.yaml
-   kubectl apply -f deploy/k8s/worker-daemonset.yaml
+   kubectl apply -f deploy/stg/namespace.yaml
+   kubectl apply -f deploy/stg/configmap.yaml
+   kubectl apply -f deploy/stg/controller.yaml
+   kubectl apply -f deploy/stg/worker-daemonset.yaml
    ```
 3. Your pipeline runs outside the cluster, so apply the Ingress that
    exposes just the webhook path (edit the host and IP allowlist first):
    ```bash
-   kubectl apply -f deploy/k8s/ingress.yaml
+   kubectl apply -f deploy/stg/ingress.yaml
    ```
    Then point the pipeline at it, right after `docker push`:
    ```bash
@@ -250,7 +250,7 @@ curl http://localhost:8080/status
    `nginx.ingress.kubernetes.io/whitelist-source-range`. Worker-to-
    controller traffic (reports and pull orders) never leaves the pod
    network; it always uses the in-cluster Service (`CONTROLLER_URL` in
-   `deploy/k8s/configmap.yaml`), not this Ingress.
+   `deploy/stg/configmap.yaml`), not this Ingress.
 
 Notes on the worker DaemonSet:
 - It runs with `hostNetwork: true` and `hostPID: true`, and mounts the

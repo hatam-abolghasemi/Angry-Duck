@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: angryduck-config
+  namespace: angryduck
+data:
+  # debug shows every per-image GC decision and the raw disk-utilization
+  # math; info shows normal events without that volume.
+  LOG_LEVEL: "info"
+  CONTROLLER_LISTEN_ADDR: ":8080"
+  WORKER_STALE_AFTER_S: "30"
+  TARGET_TTL_S: "120"
+  RANK_INTERVAL_S: "10"
+  RANK_TOP_N: "2"
+
+  WORKER_LISTEN_ADDR: ":18081"
+  NODE_EXPORTER_URL: "http://localhost:9100/metrics"
+  CONTROLLER_URL: "http://angryduck-controller.angryduck.svc.cluster.local:8080"
+  REPORT_INTERVAL_S: "15"
+  GC_CHECK_INTERVAL_S: "60"
+  GC_MISS_THRESHOLD: "5"
+  GC_GRACE_PERIOD_S: "60"
+  # Logs GC decisions without deleting anything until explicitly turned off.
+  # Only set to "false" after reviewing dry-run logs on real nodes.
+  GC_DRY_RUN: "false"
+  CONTAINER_RUNTIME: "containerd"
+  # Path to a mounted dockerconfigjson secret (same format imagePullSecrets
+  # uses) so preheat pulls can authenticate to private registries — the
+  # worker's own pull mechanism bypasses kubelet's CRI plumbing entirely,
+  # so kubelet's imagePullSecrets never apply to it otherwise. Leave unset
+  # to pull anonymously (fine for public images only).
+  REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"

@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: angryduck-worker
+  namespace: angryduck
+  labels:
+    app: angryduck-worker
+spec:
+  selector:
+    matchLabels:
+      app: angryduck-worker
+  template:
+    metadata:
+      labels:
+        app: angryduck-worker
+    spec:
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: gitlab-docker-registry
+      containers:
+        - name: worker
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SELF_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          envFrom:
+            - configMapRef:
+                name: angryduck-config
+          ports:
+            - containerPort: 18081
+              name: http
+          volumeMounts:
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: registry-creds
+              mountPath: /etc/angryduck/registry-creds
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 18081
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            privileged: true
+      volumes:
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        - name: registry-creds
+          secret:
+            secretName: gitlab-registry-pull
+      tolerations:
+        - operator: Exists
