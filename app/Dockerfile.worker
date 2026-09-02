@@ -5,26 +5,33 @@ COPY internal ./internal
 COPY cmd/worker ./cmd/worker
 RUN CGO_ENABLED=0 go build -o /out/angryduck-worker ./cmd/worker
 
-# The worker shells out to `ctr` by default (CONTAINER_RUNTIME=containerd).
-# Rather than installing the full containerd daemon package (which drags in
-# runc and its dependency tree just to get one CLI binary), pull only the
-# `ctr` binary out of containerd's official *static* release tarball, which
-# has no glibc dependency — letting the final image stay on distroless/static
-# instead of needing a glibc-based distroless variant.
-FROM alpine:3.24.1 AS ctr-fetch
+# The worker shells out to a CLI for image operations — crictl by default
+# (CONTAINER_RUNTIME=crictl), with ctr available as a fallback
+# (CONTAINER_RUNTIME=containerd; see the comment on worker.NewRuntime for
+# why crictl is preferred: it lists every running container's image in one
+# call, where ctr needs one subprocess per container). Rather than
+# installing the full containerd daemon package or a Python/glibc cri-tools
+# build just to get two CLI binaries, pull both straight from their
+# official *static* release tarballs — no glibc dependency for either,
+# verified with `ldd` (reports "not a dynamic executable" for both) —
+# letting the final image stay on distroless/static instead of needing a
+# glibc-based distroless variant. (docker's CLI, unlike these two, *is*
+# glibc-dynamic — if you switch to CONTAINER_RUNTIME=docker you'll need
+# distroless/base or distroless/cc instead.)
+FROM alpine:3.24.1 AS cli-fetch
 ARG CONTAINERD_VERSION=2.3.4
+ARG CRICTL_VERSION=1.37.0
 ARG TARGETARCH=amd64
 RUN apk add --no-cache curl && \
     curl -fsSL -o /tmp/containerd.tgz \
       "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-static-${CONTAINERD_VERSION}-linux-${TARGETARCH}.tar.gz" && \
-    tar -C /tmp -xzf /tmp/containerd.tgz bin/ctr
+    tar -C /tmp -xzf /tmp/containerd.tgz bin/ctr && \
+    curl -fsSL -o /tmp/crictl.tgz \
+      "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${CRICTL_VERSION}/crictl-v${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz" && \
+    tar -C /tmp -xzf /tmp/crictl.tgz crictl
 
-# ctr from the static tarball has no dynamic dependencies (verified: `ldd`
-# reports "not a dynamic executable"), so distroless/static is sufficient —
-# no libc needed. Swap CONTAINER_RUNTIME=crictl or =docker and this base
-# image if your nodes use a different tool (those CLIs are glibc-dynamic,
-# so you'd need distroless/base or distroless/cc instead).
 FROM gcr.io/distroless/static-debian13
 COPY --from=build /out/angryduck-worker /angryduck-worker
-COPY --from=ctr-fetch /tmp/bin/ctr /usr/local/bin/ctr
+COPY --from=cli-fetch /tmp/bin/ctr /usr/local/bin/ctr
+COPY --from=cli-fetch /tmp/crictl /usr/local/bin/crictl
 ENTRYPOINT ["/angryduck-worker"]

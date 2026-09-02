@@ -94,6 +94,10 @@ func (g *GC) Run(ctx context.Context) {
 func (g *GC) tick() {
 	tickStart := time.Now()
 
+	if pruned := g.puller.PruneExpired(); pruned > 0 {
+		logging.Debugf("angryduck-worker-gc: pruned %d expired pull-order record(s) from the puller's grace-period tracker", pruned)
+	}
+
 	local, err := g.runtime.ListLocalImages()
 	if err != nil {
 		logging.Errorf("angryduck-worker-gc: failed to list local images: %v", err)

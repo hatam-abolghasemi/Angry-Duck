@@ -23,7 +23,11 @@ data:
   # Logs GC decisions without deleting anything until explicitly turned off.
   # Only set to "false" after reviewing dry-run logs on real nodes.
   GC_DRY_RUN: "false"
-  CONTAINER_RUNTIME: "containerd"
+  # crictl lists every running container's image in one call; ctr needs one
+  # subprocess per container, which is what was pushing worker pods 2-3x
+  # over their own CPU limit on busy nodes. See worker.NewRuntime.
+  CONTAINER_RUNTIME: "crictl"
+  CONTAINER_RUNTIME_ENDPOINT: "unix:///run/containerd/containerd.sock"
   # Path to a mounted dockerconfigjson secret (same format imagePullSecrets
   # uses) so preheat pulls can authenticate to private registries — the
   # worker's own pull mechanism bypasses kubelet's CRI plumbing entirely,

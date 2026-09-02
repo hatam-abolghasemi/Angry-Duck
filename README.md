@@ -110,12 +110,24 @@ Every interval, threshold, and count lives in one place — see
 | `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before removal |
 | `GC_GRACE_PERIOD_S` | 60 | protection window after a controller-ordered pull |
 | `GC_DRY_RUN` | true | log removal decisions without deleting anything |
-| `CONTAINER_RUNTIME` | containerd | `containerd` (`ctr`), `crictl`, or `docker` |
+| `CONTAINER_RUNTIME` | crictl | `crictl`, `containerd` (`ctr`), or `docker` — see note below |
+| `CONTAINER_RUNTIME_ENDPOINT` | `unix:///run/containerd/containerd.sock` | CRI socket, only used by the crictl backend |
 | `REGISTRY_CREDENTIALS_PATH` | (empty) | path to a dockerconfigjson file for private-registry pulls — see [Registry credentials](#registry-credentials) below |
 
 Copy `.env.example` to `.env` next to the binary, or inject the same keys
 via a k8s ConfigMap (see `deploy/stg/configmap.yaml`) — real environment
 variables always win over `.env` file values.
+
+**On `CONTAINER_RUNTIME`:** crictl is the default because it lists every
+running container's image in a single `crictl ps -o json` call. The
+`containerd` backend has no bulk equivalent — it lists container IDs, then
+shells out to `ctr containers info <id>` once *per container*, every GC
+tick. On a busy node (100+ containers between real workloads, sidecars,
+and pause containers) that's 100+ subprocess spawns a minute, enough on
+its own to push a 200m-limit worker pod to 2-3x its own CPU limit
+sustained — confirmed in production. Only pick `containerd` if crictl
+genuinely isn't available on your nodes; the worker logs a loud warning on
+startup if you do.
 
 ## Registry credentials
 
@@ -217,14 +229,14 @@ curl http://localhost:8080/status
 
 1. Build and push both images. Tag/registry convention:
    ```bash
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.7 -f Dockerfile.controller .
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7 -f Dockerfile.worker .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.8 -f Dockerfile.controller .
+   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.8 -f Dockerfile.worker .
 
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.7
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.8
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.8
    ```
    `deploy/stg/controller.yaml` and `deploy/stg/worker-daemonset.yaml` already
-   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.7`
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.8`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash

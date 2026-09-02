@@ -21,7 +21,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.7
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.8
           env:
             - name: NODE_ID
               valueFrom:
@@ -61,7 +61,11 @@ spec:
               memory: 32Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              # Was 128Mi: observed steady usage is ~20-30Mi (max ~40Mi
+              # over 12h), so 128Mi was ~4-5x actual need. 64Mi keeps a
+              # healthy ~2x safety margin over the observed max while
+              # freeing up schedulable memory across the fleet.
+              memory: 64Mi
           securityContext:
             privileged: true
       volumes:

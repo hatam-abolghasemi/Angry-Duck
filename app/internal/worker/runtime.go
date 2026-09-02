@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"angryduck/internal/imageref"
+	"angryduck/internal/logging"
 	"angryduck/internal/registryauth"
 )
 
@@ -60,18 +61,36 @@ type Runtime interface {
 	RemoveImage(image string) error
 }
 
-// NewRuntime builds a Runtime based on the given kind: "containerd" (default,
-// uses `ctr -n k8s.io`), "crictl", or "docker". creds resolves per-registry
-// pull credentials — pass registryauth.Empty() if none are configured;
-// every pull then proceeds anonymously, same as before this existed.
-func NewRuntime(kind string, creds *registryauth.Store) Runtime {
+// NewRuntime builds a Runtime based on the given kind: "containerd" (uses
+// `ctr -n k8s.io`), "crictl" (default — see below), or "docker". creds
+// resolves per-registry pull credentials — pass registryauth.Empty() if
+// none are configured; every pull then proceeds anonymously, same as
+// before this existed. endpoint is the CRI runtime socket, only used by
+// the crictl backend (e.g. "unix:///run/containerd/containerd.sock",
+// matching the socket every deploy manifest already mounts).
+//
+// crictl is the recommended default: ListRunningImages() for containerd
+// (`ctr`) lists container IDs and then shells out to `ctr containers info
+// <id>` once PER container — on a busy node this can mean well over a
+// hundred subprocess spawns every single GC tick, which is enough to push
+// a 200m-limit worker pod's CPU usage 2-3x over its own limit in
+// production. crictl exposes the same information via one `crictl ps -o
+// json` call for the whole node. Both `ctr` and `crictl` ship as fully
+// static Go binaries (verified: neither is a dynamic executable), so this
+// choice has no effect on the base image — distroless/static works for
+// either.
+func NewRuntime(kind string, creds *registryauth.Store, endpoint string) Runtime {
 	switch strings.ToLower(kind) {
 	case "docker":
 		return dockerRuntime{creds: creds}
-	case "crictl":
-		return crictlRuntime{creds: creds}
-	default:
+	case "containerd":
+		logging.Warnf("angryduck-worker: CONTAINER_RUNTIME=containerd shells out once PER running container on the node every GC tick (ctr has no bulk-list-with-image equivalent to crictl's `ps -o json`) — this is known to spike CPU well past the container's own limit on busy nodes; prefer crictl unless you have a specific reason not to")
 		return containerdRuntime{creds: creds}
+	default:
+		if kind != "" && strings.ToLower(kind) != "crictl" {
+			logging.Warnf("angryduck-worker: unrecognized CONTAINER_RUNTIME=%q, defaulting to crictl", kind)
+		}
+		return crictlRuntime{creds: creds, endpoint: endpoint}
 	}
 }
 
@@ -203,7 +222,20 @@ func (containerdRuntime) RemoveImage(image string) error {
 // --- crictl ---
 
 type crictlRuntime struct {
-	creds *registryauth.Store
+	creds    *registryauth.Store
+	endpoint string
+}
+
+// withEndpoint prepends `-r <endpoint>` when one is configured, so crictl
+// talks to the exact socket this worker has mounted rather than relying on
+// its own version-dependent default-search behavior (older crictl tries a
+// short list of well-known paths; newer versions require this to be set
+// explicitly via flag or /etc/crictl.yaml).
+func (r crictlRuntime) withEndpoint(args ...string) []string {
+	if r.endpoint == "" {
+		return args
+	}
+	return append([]string{"-r", r.endpoint}, args...)
 }
 
 func (r crictlRuntime) PullImage(image string) error {
@@ -212,7 +244,7 @@ func (r crictlRuntime) PullImage(image string) error {
 		args = append(args, "--creds", userpass)
 	}
 	args = append(args, image)
-	_, err := runCmd("crictl", args...)
+	_, err := runCmd("crictl", r.withEndpoint(args...)...)
 	return err
 }
 
@@ -227,8 +259,8 @@ type crictlImagesOutput struct {
 	} `json:"images"`
 }
 
-func (crictlRuntime) ListLocalImages() ([]string, error) {
-	out, err := runCmd("crictl", "images", "-o", "json")
+func (r crictlRuntime) ListLocalImages() ([]string, error) {
+	out, err := runCmd("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -250,8 +282,8 @@ func (crictlRuntime) ListLocalImages() ([]string, error) {
 // column does for the containerd backend: a stable value shared by every
 // alias of one piece of content, letting GC match by digest instead of by
 // whichever specific alias a running container happens to report.
-func (crictlRuntime) ImageDigests() (map[string]string, error) {
-	out, err := runCmd("crictl", "images", "-o", "json")
+func (r crictlRuntime) ImageDigests() (map[string]string, error) {
+	out, err := runCmd("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -290,8 +322,8 @@ type crictlPsOutput struct {
 	} `json:"containers"`
 }
 
-func (crictlRuntime) ListRunningImages() ([]string, error) {
-	out, err := runCmd("crictl", "ps", "-o", "json")
+func (r crictlRuntime) ListRunningImages() ([]string, error) {
+	out, err := runCmd("crictl", r.withEndpoint("ps", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -311,8 +343,8 @@ func (crictlRuntime) ListRunningImages() ([]string, error) {
 	return images, nil
 }
 
-func (crictlRuntime) RemoveImage(image string) error {
-	_, err := runCmd("crictl", "rmi", image)
+func (r crictlRuntime) RemoveImage(image string) error {
+	_, err := runCmd("crictl", r.withEndpoint("rmi", image)...)
 	return err
 }
 

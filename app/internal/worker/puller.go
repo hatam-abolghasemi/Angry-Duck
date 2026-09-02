@@ -88,6 +88,27 @@ func (p *Puller) InGracePeriod(image string) bool {
 	return time.Since(t) <= p.gracePeriod
 }
 
+// PruneExpired drops orderedAt entries whose grace period has fully
+// elapsed. Without this, orderedAt grows by one entry per unique image
+// reference ever ordered, for the lifetime of the process — harmless at
+// small scale, but unbounded on a long-lived pod in a repo with a steady
+// stream of new tags. Safe to call on a timer (the GC loop already ticks
+// on one); an entry past its grace period has nothing left to protect, so
+// dropping it changes no GC decision.
+func (p *Puller) PruneExpired() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	pruned := 0
+	for img, t := range p.orderedAt {
+		if now.Sub(t) > p.gracePeriod {
+			delete(p.orderedAt, img)
+			pruned++
+		}
+	}
+	return pruned
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

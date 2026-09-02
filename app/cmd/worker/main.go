@@ -59,7 +59,14 @@ func main() {
 	gcInterval := config.Duration("GC_CHECK_INTERVAL_S", 60)
 	gcMissThreshold := config.Int("GC_MISS_THRESHOLD", 5)
 	gracePeriod := config.Duration("GC_GRACE_PERIOD_S", 60)
-	runtimeKind := config.String("CONTAINER_RUNTIME", "containerd")
+	// crictl is the default: unlike ctr, it lists every running
+	// container's image in one call instead of one subprocess per
+	// container — see the comment on NewRuntime for why this matters.
+	runtimeKind := config.String("CONTAINER_RUNTIME", "crictl")
+	// Only consulted by the crictl backend. Defaults to the socket every
+	// deploy manifest already mounts, so this normally doesn't need to be
+	// set explicitly.
+	runtimeEndpoint := config.String("CONTAINER_RUNTIME_ENDPOINT", "unix:///run/containerd/containerd.sock")
 	// Defaults to true deliberately: after any change to the runtime
 	// matching logic, watch what GC decides via logs before letting it
 	// actually delete anything. Set GC_DRY_RUN=false to enable real removal.
@@ -81,10 +88,10 @@ func main() {
 		log.Printf("angryduck-worker: loaded credentials for %d registr(y/ies) from %s", creds.Count(), credsPath)
 	}
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s gc_dry_run=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, gcDryRun)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun)
 
-	rt := worker.NewRuntime(runtimeKind, creds)
+	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint)
 	puller := worker.NewPuller(rt, gracePeriod)
 	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval)
