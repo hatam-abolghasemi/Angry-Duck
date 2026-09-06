@@ -42,14 +42,18 @@ func (f *fakeRuntime) PullImage(image string) error {
 	return nil
 }
 
-func (f *fakeRuntime) ListLocalImages() ([]string, error) {
+func (f *fakeRuntime) LocalImages() ([]string, map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []string
+	var refs []string
 	for img := range f.local {
-		out = append(out, img)
+		refs = append(refs, img)
 	}
-	return out, nil
+	digests := make(map[string]string, len(f.digests))
+	for k, v := range f.digests {
+		digests[k] = v
+	}
+	return refs, digests, nil
 }
 
 func (f *fakeRuntime) ListRunningImages() ([]string, error) {
@@ -58,16 +62,6 @@ func (f *fakeRuntime) ListRunningImages() ([]string, error) {
 	var out []string
 	for img := range f.running {
 		out = append(out, img)
-	}
-	return out, nil
-}
-
-func (f *fakeRuntime) ImageDigests() (map[string]string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make(map[string]string, len(f.digests))
-	for k, v := range f.digests {
-		out[k] = v
 	}
 	return out, nil
 }
@@ -105,7 +99,7 @@ func orderPull(t *testing.T, p *Puller, rt *fakeRuntime, image string) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		local, _ := rt.ListLocalImages()
+		local, _, _ := rt.LocalImages()
 		for _, img := range local {
 			if img == image {
 				return
@@ -188,7 +182,7 @@ func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
 // second confirmed production bug: containerd reports one running
 // container's image via only ONE of that image's several valid aliases (a
 // tag, a digest-pinned ref, or a bare digest "image ID"), while
-// ListLocalImages() enumerates ALL of them as separate entries. Before
+// LocalImages() enumerates ALL of them as separate entries. Before
 // digest-based matching, GC correctly spared whichever single alias
 // happened to match the running container's reported string, but treated
 // the image's OTHER aliases as separate, unused images — including on the
@@ -310,7 +304,7 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 		t.Fatalf("dry-run GC actually removed an image — dry-run must never call RemoveImage")
 	}
 	// The image should still be reported as present, since nothing removed it.
-	local, _ := rt.ListLocalImages()
+	local, _, _ := rt.LocalImages()
 	found := false
 	for _, img := range local {
 		if img == "some-image:v1" {

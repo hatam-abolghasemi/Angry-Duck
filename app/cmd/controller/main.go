@@ -30,12 +30,13 @@ func main() {
 	targetTTL := config.Duration("TARGET_TTL_S", 120)
 	rankInterval := config.Duration("RANK_INTERVAL_S", 10)
 	topN := config.Int("RANK_TOP_N", 2)
+	excludeNodeSubstrings := config.StringSlice("RANK_EXCLUDE_NODE_SUBSTRINGS", nil)
 
-	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d",
-		listenAddr, staleAfter, targetTTL, rankInterval, topN)
+	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v",
+		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings)
 
 	registry := controller.NewRegistry(staleAfter, targetTTL)
-	ranker := controller.NewRanker(registry, topN, rankInterval)
+	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings)
 	server := controller.NewServer(registry, ranker)
 
 	ctx, cancel := context.WithCancel(context.Background())

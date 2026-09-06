@@ -12,6 +12,10 @@ data:
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
   RANK_TOP_N: "2"
+  # Node names in this cluster follow "sahand-k8s-stg-master{N}-...", so
+  # "master" alone is enough; "control-plane" is included too in case the
+  # taint/role naming ever changes without the node name changing.
+  RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
 
   WORKER_LISTEN_ADDR: ":18081"
   NODE_EXPORTER_URL: "http://localhost:9100/metrics"

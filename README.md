@@ -105,6 +105,7 @@ Every interval, threshold, and count lives in one place — see
 | `TARGET_TTL_S` | 120 | how long a preheat target stays active |
 | `RANK_INTERVAL_S` | 10 | how often the controller re-ranks and re-orders |
 | `RANK_TOP_N` | 2 | how many low-utilization nodes get ordered per rank |
+| `RANK_EXCLUDE_NODE_SUBSTRINGS` | (empty) | comma-separated substrings matched against a worker's NodeID; matching nodes stay in the registry and keep running GC, but are never chosen as a preheat target — see [Excluding nodes from preheat selection](#excluding-nodes-from-preheat-selection) |
 | `REPORT_INTERVAL_S` | 15 | how often a worker pushes its utilization |
 | `GC_CHECK_INTERVAL_S` | 60 | how often a worker checks for unused images |
 | `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before removal |
@@ -129,9 +130,28 @@ sustained — confirmed in production. Only pick `containerd` if crictl
 genuinely isn't available on your nodes; the worker logs a loud warning on
 startup if you do.
 
-## Registry credentials
+## Excluding nodes from preheat selection
 
-Angry Duck's worker pulls images by shelling out directly to the container
+Master/control-plane nodes still run the worker DaemonSet like every other
+node — they still report utilization and still need their own local GC,
+since they accumulate images too. But no real workload pod is ever
+scheduled onto a master (they don't carry the taint tolerations to land
+there), so a master's disk looks structurally emptier than a real worker's
+and it would otherwise keep winning the ranking, taking a preheat slot that
+never actually gets used by anything.
+
+`RANK_EXCLUDE_NODE_SUBSTRINGS` fixes this at selection time rather than by
+pulling masters out of the DaemonSet entirely (which would silently stop
+their GC): any worker whose NodeID (its k8s node name, via the downward
+API) contains one of the given comma-separated substrings is still tracked
+as fresh and still shows up at `/status`, it's just skipped when the ranker
+picks the lowest-utilization top-N. `deploy/stg/configmap.yaml` sets this
+to `master,control-plane`, matching this cluster's `sahand-k8s-stg-masterN-...`
+node naming; adjust the substrings if your node names differ. Leave it
+empty to disable and consider every fresh worker, which was the only
+behavior before this existed.
+
+## Registry credentialsAngry Duck's worker pulls images by shelling out directly to the container
 runtime CLI (`ctr images pull`, by default). This is a plain CLI
 invocation — it does **not** go through kubelet's CRI plumbing, which is
 the only place `imagePullSecrets` actually gets applied. Concretely: a
@@ -229,14 +249,14 @@ curl http://localhost:8080/status
 
 1. Build and push both images. Tag/registry convention:
    ```bash
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.8 -f Dockerfile.controller .
-   sudo docker build -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.8 -f Dockerfile.worker .
+   sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.9 -f Dockerfile.controller .
+   sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.9 -f Dockerfile.worker .
 
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.8
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.8
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.9
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.9
    ```
    `deploy/stg/controller.yaml` and `deploy/stg/worker-daemonset.yaml` already
-   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.8`
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.9`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash

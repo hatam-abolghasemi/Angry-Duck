@@ -94,3 +94,22 @@ func Bool(key string, def bool) bool {
 	}
 	return def
 }
+
+// StringSlice returns the env var split on commas, trimming whitespace and
+// dropping empty entries, or def if the env var is unset/empty. Used for
+// tunables that are naturally a short list rather than a single value
+// (e.g. RANK_EXCLUDE_NODE_SUBSTRINGS=master,control-plane).
+func StringSlice(key string, def []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}

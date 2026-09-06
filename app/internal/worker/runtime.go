@@ -45,19 +45,22 @@ import (
 // also confirmed in production: GC reported "6 local images, 12 running
 // images" but only 2 spared as running, because only the tag-form alias of
 // each in-use image matched; its @digest and bare-digest aliases did not.
-// ImageDigests() exists specifically to close this: it resolves every known
+// LocalImages() exists specifically to close this: it resolves every known
 // alias to its canonical content digest, so GC can compare by digest —
 // which is identical across all aliases of the same content — instead of
 // by raw reference string.
 type Runtime interface {
 	PullImage(image string) error
-	ListLocalImages() ([]string, error)
+	// LocalImages returns every local image reference (in any alias form)
+	// AND a map of every one of those references to its canonical content
+	// digest, from a single underlying runtime query. This used to be two
+	// separate methods (ListLocalImages + ImageDigests) that each shelled
+	// out and parsed the exact same command's output independently, every
+	// single GC tick — on crictl that meant `crictl images -o json` ran
+	// and was JSON-unmarshaled twice per tick for identical output.
+	// Combined into one call/parse that serves both needs.
+	LocalImages() (refs []string, digests map[string]string, err error)
 	ListRunningImages() ([]string, error)
-	// ImageDigests returns every locally-known reference (in any alias
-	// form) mapped to its canonical content digest. Multiple keys will
-	// commonly map to the same digest value, since that's precisely the
-	// alias relationship this method exists to expose.
-	ImageDigests() (map[string]string, error)
 	RemoveImage(image string) error
 }
 
@@ -133,20 +136,22 @@ func (r containerdRuntime) PullImage(image string) error {
 	return err
 }
 
-func (containerdRuntime) ListLocalImages() ([]string, error) {
-	out, err := runCmd("ctr", "-n", "k8s.io", "images", "list", "-q")
-	if err != nil {
-		return nil, err
-	}
-	return splitNonEmptyLines(out), nil
-}
-
-func (containerdRuntime) ImageDigests() (map[string]string, error) {
+// LocalImages fetches `ctr images list` (the full table, not the `-q`
+// ref-only form) exactly once, and derives both the ref list and the
+// digest map from that single parse — the ref list used to come from a
+// separate `-q` invocation, doubling the subprocess spawns for no reason,
+// since every ref `-q` would return is already a key in the table's parse.
+func (containerdRuntime) LocalImages() ([]string, map[string]string, error) {
 	out, err := runCmd("ctr", "-n", "k8s.io", "images", "list")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return parseCtrImagesList(out), nil
+	digests := parseCtrImagesList(out)
+	refs := make([]string, 0, len(digests))
+	for ref := range digests {
+		refs = append(refs, ref)
+	}
+	return refs, digests, nil
 }
 
 // parseCtrImagesList extracts a ref->digest map from the tabular output of
@@ -259,40 +264,36 @@ type crictlImagesOutput struct {
 	} `json:"images"`
 }
 
-func (r crictlRuntime) ListLocalImages() ([]string, error) {
+// LocalImages runs `crictl images -o json` exactly once per call and
+// derives both the ref list and the digest map from that single parse.
+// This used to be two separate methods that each ran this exact same
+// command and re-unmarshaled the exact same output independently, every
+// single GC tick — on a master node with a large image/container count,
+// that's the biggest single allocation spike this worker makes, doubled
+// for no reason. One call, one parse, both results.
+//
+// The digest map covers every known alias of every local image — its
+// repoTags (tag-form), its repoDigests (digest-pinned form), and its bare
+// id (the "image ID") — mapped to that image's id. CRI defines id as the
+// canonical content identifier, so this plays the same role
+// parseCtrImagesList's DIGEST column does for the containerd backend: a
+// stable value shared by every alias of one piece of content, letting GC
+// match by digest instead of by whichever specific alias a running
+// container happens to report.
+func (r crictlRuntime) LocalImages() ([]string, map[string]string, error) {
 	out, err := runCmd("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var parsed crictlImagesOutput
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return nil, fmt.Errorf("parsing crictl images output: %w", err)
+		return nil, nil, fmt.Errorf("parsing crictl images output: %w", err)
 	}
-	var refs []string
-	for _, img := range parsed.Images {
-		refs = append(refs, img.RepoTags...)
-	}
-	return refs, nil
-}
 
-// ImageDigests maps every known alias of every local image — its repoTags
-// (tag-form), its repoDigests (digest-pinned form), and its bare id (the
-// "image ID") — to that image's id. CRI defines id as the canonical content
-// identifier, so this plays the same role parseCtrImagesList's DIGEST
-// column does for the containerd backend: a stable value shared by every
-// alias of one piece of content, letting GC match by digest instead of by
-// whichever specific alias a running container happens to report.
-func (r crictlRuntime) ImageDigests() (map[string]string, error) {
-	out, err := runCmd("crictl", r.withEndpoint("images", "-o", "json")...)
-	if err != nil {
-		return nil, err
-	}
-	var parsed crictlImagesOutput
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return nil, fmt.Errorf("parsing crictl images output: %w", err)
-	}
+	var refs []string
 	digests := make(map[string]string)
 	for _, img := range parsed.Images {
+		refs = append(refs, img.RepoTags...)
 		if img.ID == "" {
 			continue
 		}
@@ -304,14 +305,14 @@ func (r crictlRuntime) ImageDigests() (map[string]string, error) {
 			digests[d] = img.ID
 		}
 	}
-	return digests, nil
+	return refs, digests, nil
 }
 
 // crictlPsOutput matches the shape of `crictl ps -o json`. Per the CRI
 // ContainerStatus schema, containers[].image.image is the reference the
 // container was created with (usually tag-form), while containers[].imageRef
 // is that image's resolved digest. We return both — GC resolves whichever
-// one actually matches through ImageDigests(), so it doesn't matter which
+// one actually matches through LocalImages(), so it doesn't matter which
 // alias form ends up being the one that's directly comparable.
 type crictlPsOutput struct {
 	Containers []struct {
@@ -378,14 +379,6 @@ func (r dockerRuntime) PullImage(image string) error {
 	return err
 }
 
-func (dockerRuntime) ListLocalImages() ([]string, error) {
-	out, err := runCmd("docker", "images", "--format", "{{.Repository}}:{{.Tag}}")
-	if err != nil {
-		return nil, err
-	}
-	return splitNonEmptyLines(out), nil
-}
-
 func (dockerRuntime) ListRunningImages() ([]string, error) {
 	out, err := runCmd("docker", "ps", "--format", "{{.Image}}")
 	if err != nil {
@@ -394,19 +387,23 @@ func (dockerRuntime) ListRunningImages() ([]string, error) {
 	return splitNonEmptyLines(out), nil
 }
 
-// ImageDigests maps each tag-form ref to its image ID. Docker's naming is
-// far less alias-prone than containerd's — one tag generally maps to one
-// image ID with no separate @digest/bare-digest rows the way `ctr images
-// list` produces — but this still lets GC compare by digest for
-// consistency, and protects against `docker ps --format {{.Image}}`
-// occasionally reporting a container's original image by ID instead of tag
-// (e.g. after the tag has been moved or removed since the container
-// started).
-func (dockerRuntime) ImageDigests() (map[string]string, error) {
+// LocalImages runs `docker images` exactly once (asking for both the
+// tag-form ref and the ID in one --format string) and derives both the ref
+// list and the digest map from that single parse — the ref-only list used
+// to come from a second, separately-formatted `docker images` invocation.
+// Docker's naming is far less alias-prone than containerd's — one tag
+// generally maps to one image ID with no separate @digest/bare-digest rows
+// the way `ctr images list` produces — but mapping by ID still lets GC
+// compare by digest for consistency, and protects against `docker ps
+// --format {{.Image}}` occasionally reporting a container's original image
+// by ID instead of tag (e.g. after the tag has been moved or removed since
+// the container started).
+func (dockerRuntime) LocalImages() ([]string, map[string]string, error) {
 	out, err := runCmd("docker", "images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var refs []string
 	digests := make(map[string]string)
 	for _, line := range splitNonEmptyLines(out) {
 		fields := strings.Fields(line)
@@ -414,10 +411,11 @@ func (dockerRuntime) ImageDigests() (map[string]string, error) {
 			continue
 		}
 		ref, id := fields[0], fields[1]
+		refs = append(refs, ref)
 		digests[ref] = id
 		digests[id] = id
 	}
-	return digests, nil
+	return refs, digests, nil
 }
 
 func (dockerRuntime) RemoveImage(image string) error {

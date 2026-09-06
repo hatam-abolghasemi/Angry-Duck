@@ -16,7 +16,7 @@ import (
 // pulled — a deliberate operator choice to have Angry Duck manage disk
 // space for the whole node, not just its own preheating overhead. This is
 // safe only because the "is this running?" check compares images by their
-// canonical content digest (via runtime.ImageDigests()), not by raw
+// canonical content digest (via runtime.LocalImages()), not by raw
 // reference string. Two confirmed production bugs motivated this:
 //
 //  1. ListRunningImages() originally used a substring marker that never
@@ -98,23 +98,27 @@ func (g *GC) tick() {
 		logging.Debugf("angryduck-worker-gc: pruned %d expired pull-order record(s) from the puller's grace-period tracker", pruned)
 	}
 
-	local, err := g.runtime.ListLocalImages()
+	// One call for both the local ref list and the digest map — these used
+	// to be two separate Runtime calls (ListLocalImages + ImageDigests)
+	// that each independently shelled out to and parsed the exact same
+	// underlying command (e.g. `crictl images -o json`), doubling that
+	// work every tick for no benefit. See Runtime.LocalImages doc comment.
+	local, digests, err := g.runtime.LocalImages()
 	if err != nil {
 		logging.Errorf("angryduck-worker-gc: failed to list local images: %v", err)
 		return
+	}
+	if digests == nil {
+		// Not fatal: fall back to raw-string matching only. Log loudly
+		// since this silently re-exposes the alias-mismatch bug — better
+		// to know GC is running degraded than to wonder why.
+		logging.Errorf("angryduck-worker-gc: runtime returned no digest map, falling back to raw reference matching only (this re-exposes the alias-mismatch bug for this tick)")
+		digests = map[string]string{}
 	}
 	running, err := g.runtime.ListRunningImages()
 	if err != nil {
 		logging.Errorf("angryduck-worker-gc: failed to list running images: %v", err)
 		return
-	}
-	digests, err := g.runtime.ImageDigests()
-	if err != nil {
-		// Not fatal: fall back to raw-string matching only. Log loudly
-		// since this silently re-exposes the alias-mismatch bug — better
-		// to know GC is running degraded than to wonder why.
-		logging.Errorf("angryduck-worker-gc: failed to resolve image digests, falling back to raw reference matching only (this re-exposes the alias-mismatch bug for this tick): %v", err)
-		digests = map[string]string{}
 	}
 
 	runningSet := make(map[string]bool, len(running))

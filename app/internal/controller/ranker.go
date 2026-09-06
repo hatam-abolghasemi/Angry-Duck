@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"angryduck/internal/logging"
@@ -16,18 +17,31 @@ import (
 // OrderNow for the webhook handler to trigger an immediate order without
 // waiting for the next tick.
 type Ranker struct {
-	registry   *Registry
-	topN       int
-	interval   time.Duration
-	httpClient *http.Client
+	registry          *Registry
+	topN              int
+	interval          time.Duration
+	excludeSubstrings []string
+	httpClient        *http.Client
 }
 
-// NewRanker builds a ranker bound to the given registry.
-func NewRanker(registry *Registry, topN int, interval time.Duration) *Ranker {
+// NewRanker builds a ranker bound to the given registry. excludeSubstrings
+// is a list of case-sensitive substrings (e.g. "master", "control-plane");
+// any worker whose NodeID contains one is still tracked and still runs its
+// own local GC loop as normal — it's simply never selected as a preheat
+// target. This exists because master/control-plane nodes still need
+// Angry Duck's worker running on them for disk GC, but pass nil here (or
+// an empty slice) to disable the behavior entirely.
+//
+// Matching is done here, at selection time, rather than by keeping masters
+// out of the registry or off the DaemonSet: excluding them from scheduling
+// entirely would mean nobody GCs their disk, which is a real regression —
+// the constraint is "never pick them as a target," not "never run there."
+func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string) *Ranker {
 	return &Ranker{
-		registry: registry,
-		topN:     topN,
-		interval: interval,
+		registry:          registry,
+		topN:              topN,
+		interval:          interval,
+		excludeSubstrings: excludeSubstrings,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -63,23 +77,32 @@ func (rk *Ranker) OrderNow(image string) []string {
 	return rk.orderLowestN(image)
 }
 
-// orderLowestN ranks fresh workers, picks the lowest topN by utilization,
-// and fires off pull orders to each concurrently. Returns the node IDs
-// ordered (for logging / API responses).
+// orderLowestN ranks fresh, eligible workers, picks the lowest topN by
+// utilization, and fires off pull orders to each concurrently. Returns the
+// node IDs ordered (for logging / API responses).
 func (rk *Ranker) orderLowestN(image string) []string {
 	fresh := rk.registry.FreshWorkers()
 	if len(fresh) == 0 {
 		logging.Warnf("angryduck-controller: cannot order preheat for image=%s: zero fresh workers", image)
 		return nil
 	}
-	n := rk.topN
-	if n > len(fresh) {
-		n = len(fresh)
-	}
-	chosen := fresh[:n]
 
-	logging.Debugf("angryduck-controller: ranked %d fresh worker(s), choosing lowest %d by utilization for image=%s", len(fresh), n, image)
-	for _, w := range fresh {
+	eligible := rk.excludeMatching(fresh)
+	if len(eligible) == 0 {
+		logging.Warnf("angryduck-controller: cannot order preheat for image=%s: %d fresh worker(s) reported, but all matched an excluded-node substring (%v)",
+			image, len(fresh), rk.excludeSubstrings)
+		return nil
+	}
+
+	n := rk.topN
+	if n > len(eligible) {
+		n = len(eligible)
+	}
+	chosen := eligible[:n]
+
+	logging.Debugf("angryduck-controller: ranked %d fresh worker(s) (%d eligible after exclusions), choosing lowest %d by utilization for image=%s",
+		len(fresh), len(eligible), n, image)
+	for _, w := range eligible {
 		logging.Debugf("angryduck-controller: candidate node=%s utilization=%.1f%%", w.NodeID, w.Utilization*100)
 	}
 
@@ -89,6 +112,34 @@ func (rk *Ranker) orderLowestN(image string) []string {
 		go rk.sendPullOrder(w.NodeID, w.Address, image)
 	}
 	return ordered
+}
+
+// excludeMatching drops any worker whose NodeID contains one of
+// rk.excludeSubstrings, preserving the input's utilization ordering.
+// Excluded workers are still fresh, still reporting, and still running
+// their own local GC — they're just never handed a pull order, since
+// master/control-plane nodes will never actually have a real pod
+// scheduled onto them to benefit from the pre-pull.
+func (rk *Ranker) excludeMatching(workers []*workerEntry) []*workerEntry {
+	if len(rk.excludeSubstrings) == 0 {
+		return workers
+	}
+	kept := make([]*workerEntry, 0, len(workers))
+	for _, w := range workers {
+		excluded := false
+		for _, sub := range rk.excludeSubstrings {
+			if sub != "" && strings.Contains(w.NodeID, sub) {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			logging.Debugf("angryduck-controller: excluding node=%s from preheat selection (matches excluded-node substring)", w.NodeID)
+			continue
+		}
+		kept = append(kept, w)
+	}
+	return kept
 }
 
 func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {

@@ -12,6 +12,9 @@ data:
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
   RANK_TOP_N: "2"
+  # See stg/configmap.yaml — adjust the substring(s) if this cluster's
+  # master node names don't contain "master".
+  RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
 
   WORKER_LISTEN_ADDR: ":18081"
   NODE_EXPORTER_URL: "http://localhost:9100/metrics"
