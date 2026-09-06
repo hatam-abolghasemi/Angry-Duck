@@ -59,6 +59,7 @@ func main() {
 	gcInterval := config.Duration("GC_CHECK_INTERVAL_S", 60)
 	gcMissThreshold := config.Int("GC_MISS_THRESHOLD", 5)
 	gracePeriod := config.Duration("GC_GRACE_PERIOD_S", 60)
+	gcExcludeSubstrings := config.StringSlice("GC_EXCLUDE_IMAGE_SUBSTRINGS", nil)
 	// crictl is the default: unlike ctr, it lists every running
 	// container's image in one call instead of one subprocess per
 	// container — see the comment on NewRuntime for why this matters.
@@ -88,12 +89,12 @@ func main() {
 		log.Printf("angryduck-worker: loaded credentials for %d registr(y/ies) from %s", creds.Count(), credsPath)
 	}
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings)
 
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint)
 	puller := worker.NewPuller(rt, gracePeriod)
-	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun)
+	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())

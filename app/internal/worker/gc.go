@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"angryduck/internal/logging"
@@ -41,6 +42,17 @@ import (
 // operation (calico, kube-proxy, coredns, the pause image every pod
 // sandbox depends on, etc.).
 //
+// One image in particular can NEVER be proven "running" by digest matching
+// no matter how correct that matching is: the pause image. containerd/CRI
+// tracks the container backing a pod sandbox as a PodSandbox, not as a
+// regular Container — so `crictl ps` (which lists Containers) will never
+// report it, and ListRunningImages() will never see it, even though every
+// running pod on the node depends on it. excludeSubstrings exists for
+// exactly this case: an explicit "never eligible for removal regardless of
+// observed running-state" allowlist, matched by substring against the
+// image reference, for images GC should never even ask "is this running?"
+// about — pause and node-exporter being the two seen in practice.
+//
 // Every decision GC makes is logged, at a level matching its consequence:
 //   - DEBUG: routine, expected-to-be-boring per-image facts (this image is
 //     running, this image is in its grace period) — high volume, off by
@@ -52,27 +64,44 @@ import (
 //   - ERROR: something GC could not even evaluate (a runtime command
 //     failed).
 type GC struct {
-	runtime       Runtime
-	puller        *Puller
-	interval      time.Duration
-	missThreshold int
-	missCounts    map[string]int
-	dryRun        bool
+	runtime           Runtime
+	puller            *Puller
+	interval          time.Duration
+	missThreshold     int
+	missCounts        map[string]int
+	dryRun            bool
+	excludeSubstrings []string
 }
 
 // NewGC builds a GC loop. When dryRun is true, GC logs exactly what it would
 // remove and why, but never actually calls RemoveImage — use this to watch
 // the matching logic decide against real production data before trusting it
 // to delete anything, especially right after a matching-logic change.
-func NewGC(runtime Runtime, puller *Puller, interval time.Duration, missThreshold int, dryRun bool) *GC {
+// excludeSubstrings is a list of case-sensitive substrings matched against
+// each local image reference; any match is spared unconditionally, without
+// ever being asked whether it's running — see the pause-image note above
+// for why that distinction matters. Pass nil to exclude nothing.
+func NewGC(runtime Runtime, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string) *GC {
 	return &GC{
-		runtime:       runtime,
-		puller:        puller,
-		interval:      interval,
-		missThreshold: missThreshold,
-		missCounts:    make(map[string]int),
-		dryRun:        dryRun,
+		runtime:           runtime,
+		puller:            puller,
+		interval:          interval,
+		missThreshold:     missThreshold,
+		missCounts:        make(map[string]int),
+		dryRun:            dryRun,
+		excludeSubstrings: excludeSubstrings,
 	}
+}
+
+// isExcluded reports whether image matches one of the configured
+// always-spare substrings.
+func (g *GC) isExcluded(image string) bool {
+	for _, sub := range g.excludeSubstrings {
+		if sub != "" && strings.Contains(image, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // Run blocks, running a GC pass on every tick until ctx is done.
@@ -137,12 +166,23 @@ func (g *GC) tick() {
 		len(local), len(runningSet), len(g.missCounts))
 
 	seen := make(map[string]bool, len(local))
-	removedCount, sparedRunning, sparedGrace, trackedCount := 0, 0, 0, 0
+	removedCount, sparedRunning, sparedGrace, sparedExcluded, trackedCount := 0, 0, 0, 0, 0
 	for _, img := range local {
 		if img == "" {
 			continue
 		}
 		seen[img] = true
+
+		if g.isExcluded(img) {
+			if g.missCounts[img] > 0 {
+				logging.Infof("angryduck-worker-gc: image=%s now matches an excluded image pattern, resetting miss count from %d to 0", img, g.missCounts[img])
+			} else {
+				logging.Debugf("angryduck-worker-gc: image=%s matches an excluded image pattern, never eligible for removal regardless of running-state", img)
+			}
+			delete(g.missCounts, img)
+			sparedExcluded++
+			continue
+		}
 
 		inUse := runningSet[img]
 		matchedVia := "direct reference match"
@@ -202,6 +242,6 @@ func (g *GC) tick() {
 		}
 	}
 
-	logging.Infof("angryduck-worker-gc: tick done in %s: %d spared (running), %d spared (grace period), %d tracked below threshold, %d removed",
-		time.Since(tickStart).Round(time.Millisecond), sparedRunning, sparedGrace, trackedCount, removedCount)
+	logging.Infof("angryduck-worker-gc: tick done in %s: %d spared (running), %d spared (grace period), %d spared (excluded by config), %d tracked below threshold, %d removed",
+		time.Since(tickStart).Round(time.Millisecond), sparedRunning, sparedGrace, sparedExcluded, trackedCount, removedCount)
 }

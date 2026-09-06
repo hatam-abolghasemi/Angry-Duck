@@ -110,6 +110,7 @@ Every interval, threshold, and count lives in one place — see
 | `GC_CHECK_INTERVAL_S` | 60 | how often a worker checks for unused images |
 | `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before removal |
 | `GC_GRACE_PERIOD_S` | 60 | protection window after a controller-ordered pull |
+| `GC_EXCLUDE_IMAGE_SUBSTRINGS` | (empty) | comma-separated substrings; any matching local image is spared unconditionally, without ever checking running-state — see [Images GC should never touch](#images-gc-should-never-touch) |
 | `GC_DRY_RUN` | true | log removal decisions without deleting anything |
 | `CONTAINER_RUNTIME` | crictl | `crictl`, `containerd` (`ctr`), or `docker` — see note below |
 | `CONTAINER_RUNTIME_ENDPOINT` | `unix:///run/containerd/containerd.sock` | CRI socket, only used by the crictl backend |
@@ -129,6 +130,29 @@ its own to push a 200m-limit worker pod to 2-3x its own CPU limit
 sustained — confirmed in production. Only pick `containerd` if crictl
 genuinely isn't available on your nodes; the worker logs a loud warning on
 startup if you do.
+
+## Images GC should never touch
+
+Digest-based matching (see `internal/worker/gc.go`) proves an image is
+running by finding it in the currently-running set. That check has one
+real gap that no amount of correct matching can close: containerd/CRI
+tracks each pod's sandbox container separately from its regular
+containers, so `crictl ps` — GC's source of truth for "what's running" —
+never reports the pause image, no matter how long that pod has been up.
+GC will therefore always see pause as unused and, left alone, remove and
+implicitly re-pull it forever. node-exporter is the other case seen in
+practice, when it runs outside the normal container lifecycle GC observes.
+
+`GC_EXCLUDE_IMAGE_SUBSTRINGS` is a separate, stronger allowlist for exactly
+this: any local image reference containing one of the given comma-separated
+substrings is spared unconditionally — GC doesn't check whether it's
+running, and its miss counter never advances. This is orthogonal to the
+running-state check, so it's the right tool for "I know this is needed
+even though nothing will ever prove it to GC," not a replacement for
+digest matching in general. `deploy/stg/configmap.yaml` sets this to
+`pause,node-exporter`; add more substrings there for anything else you see
+cycling through GC that you know is always needed regardless of observed
+state.
 
 ## Excluding nodes from preheat selection
 
@@ -249,14 +273,14 @@ curl http://localhost:8080/status
 
 1. Build and push both images. Tag/registry convention:
    ```bash
-   sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.9 -f Dockerfile.controller .
-   sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.9 -f Dockerfile.worker .
+   sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.10 -f Dockerfile.controller .
+   sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.10 -f Dockerfile.worker .
 
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.9
-   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.9
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.10
+   sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.10
    ```
    `deploy/stg/controller.yaml` and `deploy/stg/worker-daemonset.yaml` already
-   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.9`
+   point at `registry.internal-registry.example.com/devops/generic/angry-duck-{controller,worker}:1.0.10`
    — bump the tag there too when you cut a new version.
 2. Apply the manifests:
    ```bash

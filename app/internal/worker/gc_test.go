@@ -123,7 +123,7 @@ func TestGCRemovesAnyUnusedImageAfterThreshold(t *testing.T) {
 	rt.local["some-system-image:v1"] = true // never ordered via Angry Duck's puller
 
 	puller := NewPuller(rt, 0) // zero grace period
-	gc := NewGC(rt, puller, time.Millisecond, 3, false)
+	gc := NewGC(rt, puller, time.Millisecond, 3, false, nil)
 
 	for i := 0; i < 2; i++ {
 		gc.tick()
@@ -167,7 +167,7 @@ func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
 	rt.running[image] = true // what ListRunningImages() would now correctly report
 
 	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
 
 	for i := 0; i < 10; i++ {
 		gc.tick()
@@ -215,7 +215,7 @@ func TestGCSparesEveryAliasOfARunningImage(t *testing.T) {
 	rt.running[pauseTag] = true
 
 	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
 
 	for i := 0; i < 5; i++ {
 		gc.tick()
@@ -239,7 +239,7 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 	rt.digests["something-else:v1"] = "sha256:cafef00d"
 
 	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
 
 	for i := 0; i < 3; i++ {
 		gc.tick()
@@ -253,7 +253,7 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 func TestGCSparesRunningImage(t *testing.T) {
 	rt := newFakeRuntime()
 	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 	rt.mu.Lock()
@@ -272,7 +272,7 @@ func TestGCSparesRunningImage(t *testing.T) {
 func TestGCSparesImageInGracePeriod(t *testing.T) {
 	rt := newFakeRuntime()
 	puller := NewPuller(rt, time.Hour) // long grace period
-	gc := NewGC(rt, puller, time.Millisecond, 1, false)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 
@@ -285,6 +285,79 @@ func TestGCSparesImageInGracePeriod(t *testing.T) {
 	}
 }
 
+// TestGCNeverRemovesExcludedImageEvenWhenNeverObservedRunning is the
+// regression test for the pause-image gap: pause backs every pod sandbox
+// on the node, but containerd/CRI tracks sandboxes separately from regular
+// containers, so ListRunningImages() (backed by `crictl ps`) can never see
+// it as running — no digest-matching fix can change that, since the image
+// genuinely never appears in the running set. excludeSubstrings must spare
+// it unconditionally, without ever incrementing its miss counter.
+func TestGCNeverRemovesExcludedImageEvenWhenNeverObservedRunning(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
+	// Deliberately never added to rt.running — simulates crictl ps never
+	// reporting the sandbox container, exactly as in production.
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, []string{"pause"})
+
+	for i := 0; i < 10; i++ {
+		gc.tick()
+	}
+
+	if rt.wasRemoved("repo-sahand.internal-dev.example.com/pause:3.10") {
+		t.Fatalf("GC removed an image matching an excluded substring — exclusion must be unconditional")
+	}
+}
+
+// TestGCExcludeSubstringsOnlyMatchesConfiguredPatterns proves the exclusion
+// list is scoped to what's configured — an unrelated genuinely-unused image
+// still gets removed on schedule even when some exclusion list is active.
+func TestGCExcludeSubstringsOnlyMatchesConfiguredPatterns(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
+	rt.local["registry.example.com/some-stale-app:v1"] = true
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 2, false, []string{"pause", "node-exporter"})
+
+	for i := 0; i < 3; i++ {
+		gc.tick()
+	}
+
+	if rt.wasRemoved("repo-sahand.internal-dev.example.com/pause:3.10") {
+		t.Fatalf("excluded image was removed")
+	}
+	if !rt.wasRemoved("registry.example.com/some-stale-app:v1") {
+		t.Fatalf("expected the genuinely unused, non-excluded image to still be removed")
+	}
+}
+
+// TestGCExcludedImageResetsMissCountIfPreviouslyTracked covers the edge
+// case of a config change mid-flight: an image already partway toward
+// removal that newly matches an exclusion must have its miss counter
+// cleared, not just frozen at its current value.
+func TestGCExcludedImageResetsMissCountIfPreviouslyTracked(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
+
+	puller := NewPuller(rt, 0)
+	gc := NewGC(rt, puller, time.Millisecond, 5, false, nil) // no exclusions yet
+
+	gc.tick()
+	gc.tick()
+	if gc.missCounts["repo-sahand.internal-dev.example.com/pause:3.10"] != 2 {
+		t.Fatalf("expected miss count 2 before exclusion is configured, got %d", gc.missCounts["repo-sahand.internal-dev.example.com/pause:3.10"])
+	}
+
+	gc.excludeSubstrings = []string{"pause"} // simulate the config now excluding it
+	gc.tick()
+
+	if _, tracked := gc.missCounts["repo-sahand.internal-dev.example.com/pause:3.10"]; tracked {
+		t.Fatalf("expected miss count to be cleared once the image became excluded")
+	}
+}
+
 // TestGCDryRunNeverActuallyRemoves proves dry-run mode reaches the same
 // removal decision (past miss threshold, not running, not in grace period)
 // but never calls RemoveImage — the safety valve for validating GC's
@@ -294,7 +367,7 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 	rt.local["some-image:v1"] = true
 
 	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, true) // dryRun=true
+	gc := NewGC(rt, puller, time.Millisecond, 1, true, nil) // dryRun=true
 
 	for i := 0; i < 10; i++ {
 		gc.tick()

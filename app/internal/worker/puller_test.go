@@ -72,7 +72,7 @@ func TestPruneExpiredNoOpWhenNothingExpired(t *testing.T) {
 func TestGCTickPrunesExpiredOrders(t *testing.T) {
 	rt := newFakeRuntime()
 	p := NewPuller(rt, 10*time.Millisecond)
-	gc := NewGC(rt, p, time.Hour, 5, true)
+	gc := NewGC(rt, p, time.Hour, 5, true, nil)
 
 	p.mu.Lock()
 	p.orderedAt["img:long-gone"] = time.Now().Add(-time.Hour)
