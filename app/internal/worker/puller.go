@@ -8,7 +8,20 @@ import (
 
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+)
+
+// pullsTotal counts pulls this worker has actually executed, by result.
+// This is the worker-side half of the pull story; the controller-side half
+// (orders sent, whether the worker accepted them) is
+// angryduck_controller_pull_orders_total in controller/ranker.go. A pull
+// order being accepted and a pull actually succeeding are different
+// events — this counter is the only one that tells you the latter.
+var pullsTotal = metrics.NewCounterVec(
+	"angryduck_worker_pulls_total",
+	"Total image pulls executed by this worker, by result.",
+	"node", "result",
 )
 
 // Puller receives pull orders from the controller, executes them
@@ -19,15 +32,17 @@ import (
 type Puller struct {
 	runtime     Runtime
 	gracePeriod time.Duration
+	nodeID      string
 	mu          sync.Mutex
 	orderedAt   map[string]time.Time
 }
 
-// NewPuller builds a Puller.
-func NewPuller(runtime Runtime, gracePeriod time.Duration) *Puller {
+// NewPuller builds a Puller. nodeID is only used to label metrics.
+func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string) *Puller {
 	return &Puller{
 		runtime:     runtime,
 		gracePeriod: gracePeriod,
+		nodeID:      nodeID,
 		orderedAt:   make(map[string]time.Time),
 	}
 }
@@ -67,9 +82,11 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 		logging.Infof("angryduck-worker: pulling image=%s", order.Image)
 		if err := p.runtime.PullImage(order.Image); err != nil {
 			logging.Errorf("angryduck-worker: pull failed for image=%s after %s: %v", order.Image, time.Since(start).Round(time.Millisecond), err)
+			pullsTotal.Inc(p.nodeID, "failure")
 			return
 		}
 		logging.Infof("angryduck-worker: pull succeeded for image=%s in %s", order.Image, time.Since(start).Round(time.Millisecond))
+		pullsTotal.Inc(p.nodeID, "success")
 	}()
 
 	writeJSON(w, http.StatusAccepted, model.PullAck{Accepted: true})

@@ -161,10 +161,10 @@ every image you'll preheat is public.
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.10 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.10 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.10
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.10
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.11 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.11 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.11
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.11
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. Apply the manifests

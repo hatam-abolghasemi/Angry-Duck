@@ -6,6 +6,17 @@ import (
 	"time"
 
 	"angryduck/internal/logging"
+	"angryduck/internal/metrics"
+)
+
+// imagesDeletedTotal counts images GC has actually removed on this worker.
+// Dry-run "would remove" decisions are deliberately not counted here —
+// this metric answers "how much did GC actually delete," and a dry-run
+// pass never touches disk.
+var imagesDeletedTotal = metrics.NewCounterVec(
+	"angryduck_worker_images_deleted_total",
+	"Total images actually removed by GC on this worker (excludes dry-run).",
+	"node",
 )
 
 // GC periodically compares every image present on the node against
@@ -71,6 +82,7 @@ type GC struct {
 	missCounts        map[string]int
 	dryRun            bool
 	excludeSubstrings []string
+	nodeID            string
 }
 
 // NewGC builds a GC loop. When dryRun is true, GC logs exactly what it would
@@ -81,7 +93,7 @@ type GC struct {
 // each local image reference; any match is spared unconditionally, without
 // ever being asked whether it's running — see the pause-image note above
 // for why that distinction matters. Pass nil to exclude nothing.
-func NewGC(runtime Runtime, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string) *GC {
+func NewGC(runtime Runtime, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string, nodeID string) *GC {
 	return &GC{
 		runtime:           runtime,
 		puller:            puller,
@@ -90,6 +102,7 @@ func NewGC(runtime Runtime, puller *Puller, interval time.Duration, missThreshol
 		missCounts:        make(map[string]int),
 		dryRun:            dryRun,
 		excludeSubstrings: excludeSubstrings,
+		nodeID:            nodeID,
 	}
 }
 
@@ -224,6 +237,7 @@ func (g *GC) tick() {
 					continue
 				}
 				logging.Infof("angryduck-worker-gc: image=%s removed successfully", img)
+				imagesDeletedTotal.Inc(g.nodeID)
 			}
 			delete(g.missCounts, img)
 			removedCount++

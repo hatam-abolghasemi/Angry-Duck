@@ -152,3 +152,75 @@ func TestRankerWithNoExclusionsBehavesAsBefore(t *testing.T) {
 		t.Fatalf("expected exactly one pull order with no exclusions configured, got %v", master.received())
 	}
 }
+
+// TestRankerDoesNotReorderSameImageToSameNode is the regression test for
+// the production bug this fix addresses: with RANK_INTERVAL_S well under
+// TARGET_TTL_S, utilization barely moves between ticks, so the same
+// lowest-N nodes were being re-ordered to pull the same image on every
+// tick for the whole TTL window. A node that already has an outstanding
+// order for the current target image must not receive a second one.
+func TestRankerDoesNotReorderSameImageToSameNode(t *testing.T) {
+	node := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{
+		NodeID: "sahand2-prd-k8s-worker1", Address: node.address,
+		Utilization: 0.10, Timestamp: time.Now(),
+	})
+
+	rk := NewRanker(registry, 1, time.Hour, nil)
+
+	first := rk.tickForTest("registry.example.com/app:1.0.0")
+	waitForPulls(t, node)
+	if len(first) != 1 {
+		t.Fatalf("expected the first tick to order the node, got %v", first)
+	}
+
+	// Simulate the next ranker tick, same target image still active,
+	// utilization unchanged — this used to re-fire the same order.
+	second := rk.tickForTest("registry.example.com/app:1.0.0")
+	if len(second) != 0 {
+		t.Fatalf("expected the second tick to order nobody (already ordered for this image), got %v", second)
+	}
+
+	time.Sleep(50 * time.Millisecond) // let any errant send land
+	if len(node.received()) != 1 {
+		t.Fatalf("expected exactly one /pull delivered to the node across two ticks, got %v", node.received())
+	}
+}
+
+// TestRankerReordersOnNewTargetImage proves the dedup set is scoped to one
+// target image, not permanent: once a new image is pushed, previously
+// ordered nodes are eligible again.
+func TestRankerReordersOnNewTargetImage(t *testing.T) {
+	node := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{
+		NodeID: "sahand2-prd-k8s-worker2", Address: node.address,
+		Utilization: 0.10, Timestamp: time.Now(),
+	})
+
+	rk := NewRanker(registry, 1, time.Hour, nil)
+
+	rk.tickForTest("registry.example.com/app:1.0.0")
+	waitForPulls(t, node)
+
+	second := rk.tickForTest("registry.example.com/app:2.0.0")
+	if len(second) != 1 {
+		t.Fatalf("expected the node to be re-ordered for a new target image, got %v", second)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	got := node.received()
+	if len(got) != 2 || got[0] != "registry.example.com/app:1.0.0" || got[1] != "registry.example.com/app:2.0.0" {
+		t.Fatalf("expected pulls for both images in order, got %v", got)
+	}
+}
+
+// tickForTest exposes orderLowestN for tests without making it part of the
+// package's real public API — production callers only ever go through
+// OrderNow (webhook-triggered) or the ticker inside Run.
+func (rk *Ranker) tickForTest(image string) []string {
+	return rk.orderLowestN(image)
+}

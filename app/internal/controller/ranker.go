@@ -6,22 +6,49 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"angryduck/internal/logging"
+	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+)
+
+// pullOrdersTotal counts /pull requests the controller has sent to
+// workers, split by node and whether the worker accepted it. This is the
+// controller-side half of the pull story; angryduck_worker_pulls_total
+// (see worker/puller.go) is the worker-side half.
+var pullOrdersTotal = metrics.NewCounterVec(
+	"angryduck_controller_pull_orders_total",
+	"Total pull orders sent to workers, by node and result.",
+	"node", "result",
 )
 
 // Ranker periodically re-ranks fresh workers by utilization and orders the
 // least-utilized top-N to pull the current target image. It also exposes
 // OrderNow for the webhook handler to trigger an immediate order without
 // waiting for the next tick.
+//
+// A node is only ever ordered once per target image: orderedNodes tracks
+// which nodes have already been sent a /pull for orderedForImage, and
+// resets the moment the target image changes. Without this, every tick
+// within TARGET_TTL_S re-ranks and re-fires at the same lowest-utilization
+// nodes (utilization barely moves between 10s ticks), so the same image
+// was being ordered to the same handful of nodes a dozen times over one
+// preheat window. The ranker itself never blocks waiting on a pull to
+// finish either way — sendPullOrder fires in its own goroutine and only
+// confirms the worker *accepted* the order (HTTP 2xx), never that the pull
+// itself completed.
 type Ranker struct {
 	registry          *Registry
 	topN              int
 	interval          time.Duration
 	excludeSubstrings []string
 	httpClient        *http.Client
+
+	mu              sync.Mutex
+	orderedForImage string
+	orderedNodes    map[string]bool
 }
 
 // NewRanker builds a ranker bound to the given registry. excludeSubstrings
@@ -78,8 +105,10 @@ func (rk *Ranker) OrderNow(image string) []string {
 }
 
 // orderLowestN ranks fresh, eligible workers, picks the lowest topN by
-// utilization, and fires off pull orders to each concurrently. Returns the
-// node IDs ordered (for logging / API responses).
+// utilization among those not already ordered for this image, and fires
+// off pull orders to each concurrently. Returns the node IDs newly
+// ordered (for logging / API responses) — nodes skipped because they were
+// already ordered for the current target are not included.
 func (rk *Ranker) orderLowestN(image string) []string {
 	fresh := rk.registry.FreshWorkers()
 	if len(fresh) == 0 {
@@ -94,24 +123,55 @@ func (rk *Ranker) orderLowestN(image string) []string {
 		return nil
 	}
 
-	n := rk.topN
-	if n > len(eligible) {
-		n = len(eligible)
+	candidates := rk.notYetOrdered(image, eligible)
+	if len(candidates) == 0 {
+		logging.Debugf("angryduck-controller: all %d eligible worker(s) already ordered for image=%s, nothing new this tick", len(eligible), image)
+		return nil
 	}
-	chosen := eligible[:n]
 
-	logging.Debugf("angryduck-controller: ranked %d fresh worker(s) (%d eligible after exclusions), choosing lowest %d by utilization for image=%s",
-		len(fresh), len(eligible), n, image)
+	n := rk.topN
+	if n > len(candidates) {
+		n = len(candidates)
+	}
+	chosen := candidates[:n]
+
+	logging.Debugf("angryduck-controller: ranked %d fresh worker(s) (%d eligible after exclusions, %d not yet ordered), choosing lowest %d by utilization for image=%s",
+		len(fresh), len(eligible), len(candidates), n, image)
 	for _, w := range eligible {
 		logging.Debugf("angryduck-controller: candidate node=%s utilization=%.1f%%", w.NodeID, w.Utilization*100)
 	}
 
+	rk.mu.Lock()
 	ordered := make([]string, 0, len(chosen))
 	for _, w := range chosen {
 		ordered = append(ordered, w.NodeID)
+		rk.orderedNodes[w.NodeID] = true
 		go rk.sendPullOrder(w.NodeID, w.Address, image)
 	}
+	rk.mu.Unlock()
 	return ordered
+}
+
+// notYetOrdered resets the ordered-nodes set the moment image differs from
+// the last image this ranker ordered for (a new push landed), then returns
+// the subset of eligible workers not yet recorded as ordered — preserving
+// eligible's existing ascending-utilization order.
+func (rk *Ranker) notYetOrdered(image string, eligible []*workerEntry) []*workerEntry {
+	rk.mu.Lock()
+	defer rk.mu.Unlock()
+
+	if image != rk.orderedForImage {
+		rk.orderedForImage = image
+		rk.orderedNodes = make(map[string]bool)
+	}
+
+	candidates := make([]*workerEntry, 0, len(eligible))
+	for _, w := range eligible {
+		if !rk.orderedNodes[w.NodeID] {
+			candidates = append(candidates, w)
+		}
+	}
+	return candidates
 }
 
 // excludeMatching drops any worker whose NodeID contains one of
@@ -160,12 +220,15 @@ func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
 	resp, err := rk.httpClient.Do(req)
 	if err != nil {
 		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s failed: %v", nodeID, addr, err)
+		pullOrdersTotal.Inc(nodeID, "failure")
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s rejected: status=%d", nodeID, addr, resp.StatusCode)
+		pullOrdersTotal.Inc(nodeID, "failure")
 		return
 	}
 	logging.Infof("angryduck-controller: ordered node=%s to pull image=%s", nodeID, image)
+	pullOrdersTotal.Inc(nodeID, "success")
 }

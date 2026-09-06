@@ -12,7 +12,7 @@ import (
 // lifetime of the process.
 func TestPruneExpiredDropsOnlyPastGrace(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, 50*time.Millisecond)
+	p := NewPuller(rt, 50*time.Millisecond, "test-node")
 
 	p.mu.Lock()
 	p.orderedAt["img:expired-1"] = time.Now().Add(-time.Hour)
@@ -47,7 +47,7 @@ func TestPruneExpiredDropsOnlyPastGrace(t *testing.T) {
 // everything still in grace removes nothing and reports zero.
 func TestPruneExpiredNoOpWhenNothingExpired(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, time.Hour)
+	p := NewPuller(rt, time.Hour, "test-node")
 
 	p.mu.Lock()
 	p.orderedAt["img:a"] = time.Now()
@@ -71,8 +71,8 @@ func TestPruneExpiredNoOpWhenNothingExpired(t *testing.T) {
 // changes.
 func TestGCTickPrunesExpiredOrders(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, 10*time.Millisecond)
-	gc := NewGC(rt, p, time.Hour, 5, true, nil)
+	p := NewPuller(rt, 10*time.Millisecond, "test-node")
+	gc := NewGC(rt, p, time.Hour, 5, true, nil, "test-node")
 
 	p.mu.Lock()
 	p.orderedAt["img:long-gone"] = time.Now().Add(-time.Hour)

@@ -8,6 +8,7 @@ import (
 
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 )
 
@@ -24,6 +25,7 @@ func NewServer(registry *Registry, ranker *Ranker) *Server {
 	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
 	s.mux.HandleFunc("/report", s.handleReport)
 	s.mux.HandleFunc("/status", s.handleStatus)
+	s.mux.Handle("/metrics", metrics.Handler())
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	return s
 }

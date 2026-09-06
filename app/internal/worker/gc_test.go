@@ -122,8 +122,8 @@ func TestGCRemovesAnyUnusedImageAfterThreshold(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["some-system-image:v1"] = true // never ordered via Angry Duck's puller
 
-	puller := NewPuller(rt, 0) // zero grace period
-	gc := NewGC(rt, puller, time.Millisecond, 3, false, nil)
+	puller := NewPuller(rt, 0, "test-node") // zero grace period
+	gc := NewGC(rt, puller, time.Millisecond, 3, false, nil, "test-node")
 
 	for i := 0; i < 2; i++ {
 		gc.tick()
@@ -166,8 +166,8 @@ func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
 	rt.local[image] = true
 	rt.running[image] = true // what ListRunningImages() would now correctly report
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil, "test-node")
 
 	for i := 0; i < 10; i++ {
 		gc.tick()
@@ -214,8 +214,8 @@ func TestGCSparesEveryAliasOfARunningImage(t *testing.T) {
 	rt.running[workerTag] = true
 	rt.running[pauseTag] = true
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil, "test-node")
 
 	for i := 0; i < 5; i++ {
 		gc.tick()
@@ -238,8 +238,8 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 	rt.running["something-else:v1"] = true
 	rt.digests["something-else:v1"] = "sha256:cafef00d"
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil, "test-node")
 
 	for i := 0; i < 3; i++ {
 		gc.tick()
@@ -252,8 +252,8 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 
 func TestGCSparesRunningImage(t *testing.T) {
 	rt := newFakeRuntime()
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil, "test-node")
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 	rt.mu.Lock()
@@ -271,8 +271,8 @@ func TestGCSparesRunningImage(t *testing.T) {
 
 func TestGCSparesImageInGracePeriod(t *testing.T) {
 	rt := newFakeRuntime()
-	puller := NewPuller(rt, time.Hour) // long grace period
-	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil)
+	puller := NewPuller(rt, time.Hour, "test-node") // long grace period
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, nil, "test-node")
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 
@@ -298,8 +298,8 @@ func TestGCNeverRemovesExcludedImageEvenWhenNeverObservedRunning(t *testing.T) {
 	// Deliberately never added to rt.running — simulates crictl ps never
 	// reporting the sandbox container, exactly as in production.
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, false, []string{"pause"})
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 1, false, []string{"pause"}, "test-node")
 
 	for i := 0; i < 10; i++ {
 		gc.tick()
@@ -318,8 +318,8 @@ func TestGCExcludeSubstringsOnlyMatchesConfiguredPatterns(t *testing.T) {
 	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
 	rt.local["registry.example.com/some-stale-app:v1"] = true
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 2, false, []string{"pause", "node-exporter"})
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 2, false, []string{"pause", "node-exporter"}, "test-node")
 
 	for i := 0; i < 3; i++ {
 		gc.tick()
@@ -341,8 +341,8 @@ func TestGCExcludedImageResetsMissCountIfPreviouslyTracked(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 5, false, nil) // no exclusions yet
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 5, false, nil, "test-node") // no exclusions yet
 
 	gc.tick()
 	gc.tick()
@@ -366,8 +366,8 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["some-image:v1"] = true
 
-	puller := NewPuller(rt, 0)
-	gc := NewGC(rt, puller, time.Millisecond, 1, true, nil) // dryRun=true
+	puller := NewPuller(rt, 0, "test-node")
+	gc := NewGC(rt, puller, time.Millisecond, 1, true, nil, "test-node") // dryRun=true
 
 	for i := 0; i < 10; i++ {
 		gc.tick()

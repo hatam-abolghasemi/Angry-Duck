@@ -93,8 +93,8 @@ func main() {
 		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings)
 
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint)
-	puller := worker.NewPuller(rt, gracePeriod)
-	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings)
+	puller := worker.NewPuller(rt, gracePeriod, nodeID)
+	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval)
 
 	ctx, cancel := context.WithCancel(context.Background())
