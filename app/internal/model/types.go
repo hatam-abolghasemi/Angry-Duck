@@ -6,12 +6,22 @@ import "time"
 
 // WorkerReport is pushed periodically (default every 15s) by every worker to
 // the controller. It carries just enough information for the controller to
-// rank nodes by disk utilization and to know how to reach the worker back.
+// rank nodes by disk utilization and image locality, and to know how to
+// reach the worker back.
 type WorkerReport struct {
-	NodeID      string    `json:"node_id"`
-	Address     string    `json:"address"`     // host:port the controller can reach this worker's HTTP API on
-	Utilization float64   `json:"utilization"` // 0.0-1.0, root filesystem usage ratio
-	Timestamp   time.Time `json:"timestamp"`
+	NodeID      string  `json:"node_id"`
+	Address     string  `json:"address"`     // host:port the controller can reach this worker's HTTP API on
+	Utilization float64 `json:"utilization"` // 0.0-1.0, root filesystem usage ratio
+	// Repos is the deduplicated set of bare repository identities (see
+	// imageref.Repo) present locally on this node, across every tag and
+	// alias form the runtime reports. It lets the controller prefer
+	// pre-pulling a newly-pushed tag onto a node that already has some
+	// older tag of the same repo, since most layers are typically shared
+	// between tags of the same image. Omitted (nil/empty) is always safe
+	// — the ranker just falls back to utilization-only ranking for that
+	// node, identical to its behavior before this field existed.
+	Repos     []string  `json:"repos,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // ReportAck is returned to a worker after it submits a report.
@@ -54,6 +64,7 @@ type WorkerStatus struct {
 	NodeID      string    `json:"node_id"`
 	Address     string    `json:"address"`
 	Utilization float64   `json:"utilization"`
+	Repos       []string  `json:"repos,omitempty"`
 	LastSeen    time.Time `json:"last_seen"`
 	Fresh       bool      `json:"fresh"`
 }

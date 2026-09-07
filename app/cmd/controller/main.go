@@ -1,7 +1,9 @@
 // Command angryduck-controller runs the Angry Duck control plane: it
 // receives the post-`docker push` webhook, tracks worker disk-utilization
-// reports, and orders the least-utilized nodes to pre-pull the new image so
-// Spegel can fan it out peer-to-peer once ArgoCD syncs.
+// and image-inventory reports, and orders nodes to pre-pull the new image —
+// preferring nodes that already have some tag of the same repo locally,
+// then falling back to the least-utilized nodes — so Spegel can fan it out
+// peer-to-peer once ArgoCD syncs.
 package main
 
 import (
@@ -31,12 +33,17 @@ func main() {
 	rankInterval := config.Duration("RANK_INTERVAL_S", 10)
 	topN := config.Int("RANK_TOP_N", 2)
 	excludeNodeSubstrings := config.StringSlice("RANK_EXCLUDE_NODE_SUBSTRINGS", nil)
+	// Defaults to true: prefer pre-pulling onto a node that already has
+	// some tag of the target image's repo before falling back to
+	// utilization-only ranking. Set to false to restore the old
+	// utilization-only behavior if this ever needs a quick rollback.
+	preferImageLocality := config.Bool("RANK_PREFER_IMAGE_LOCALITY", true)
 
-	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v",
-		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings)
+	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v",
+		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality)
 
 	registry := controller.NewRegistry(staleAfter, targetTTL)
-	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings)
+	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality)
 	server := controller.NewServer(registry, ranker)
 
 	ctx, cancel := context.WithCancel(context.Background())

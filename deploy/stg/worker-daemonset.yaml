@@ -21,7 +21,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.11
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.12
           env:
             - name: NODE_ID
               valueFrom:

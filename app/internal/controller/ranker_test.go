@@ -84,7 +84,7 @@ func TestRankerExcludesMatchingNodesFromSelection(t *testing.T) {
 		Utilization: 0.40, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 2, time.Hour, []string{"master", "control-plane"})
+	rk := NewRanker(registry, 2, time.Hour, []string{"master", "control-plane"}, true)
 	ordered := rk.OrderNow("registry.example.com/app:1.0.0")
 
 	waitForPulls(t, master, worker)
@@ -115,7 +115,7 @@ func TestRankerFallsBackWhenAllFreshWorkersAreExcluded(t *testing.T) {
 		Utilization: 0.01, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 2, time.Hour, []string{"master"})
+	rk := NewRanker(registry, 2, time.Hour, []string{"master"}, true)
 	ordered := rk.OrderNow("registry.example.com/app:1.0.0")
 
 	if ordered != nil {
@@ -140,7 +140,7 @@ func TestRankerWithNoExclusionsBehavesAsBefore(t *testing.T) {
 		Utilization: 0.01, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil) // no exclusions
+	rk := NewRanker(registry, 1, time.Hour, nil, true) // no exclusions
 	ordered := rk.OrderNow("registry.example.com/app:1.0.0")
 
 	waitForPulls(t, master)
@@ -168,7 +168,7 @@ func TestRankerDoesNotReorderSameImageToSameNode(t *testing.T) {
 		Utilization: 0.10, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil)
+	rk := NewRanker(registry, 1, time.Hour, nil, true)
 
 	first := rk.tickForTest("registry.example.com/app:1.0.0")
 	waitForPulls(t, node)
@@ -201,7 +201,7 @@ func TestRankerReordersOnNewTargetImage(t *testing.T) {
 		Utilization: 0.10, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil)
+	rk := NewRanker(registry, 1, time.Hour, nil, true)
 
 	rk.tickForTest("registry.example.com/app:1.0.0")
 	waitForPulls(t, node)
@@ -215,6 +215,105 @@ func TestRankerReordersOnNewTargetImage(t *testing.T) {
 	got := node.received()
 	if len(got) != 2 || got[0] != "registry.example.com/app:1.0.0" || got[1] != "registry.example.com/app:2.0.0" {
 		t.Fatalf("expected pulls for both images in order, got %v", got)
+	}
+}
+
+// TestRankerPrefersNodeWithRepoOverLowerUtilization proves the core preheat
+// locality behavior: a node that already has the target image's repo
+// present locally (any tag) is chosen ahead of an emptier node that
+// doesn't have it at all, even though the empty node would win on raw
+// utilization alone.
+func TestRankerPrefersNodeWithRepoOverLowerUtilization(t *testing.T) {
+	hasRepo := newPullOrderRecorder(t)
+	empty := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{
+		NodeID: "node-has-repo", Address: hasRepo.address,
+		Utilization: 0.70, // much fuller...
+		Repos:       []string{"registry.example.com/app"},
+		Timestamp:   time.Now(),
+	})
+	registry.Update(model.WorkerReport{
+		NodeID: "node-empty", Address: empty.address,
+		Utilization: 0.05, // ...than this nearly-empty node
+		Timestamp:   time.Now(),
+	})
+
+	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
+
+	waitForPulls(t, hasRepo, empty)
+
+	if len(ordered) != 1 || ordered[0] != "node-has-repo" {
+		t.Fatalf("expected the node with the repo already present to be chosen despite higher utilization, got %v", ordered)
+	}
+	if len(hasRepo.received()) != 1 {
+		t.Fatalf("expected exactly one pull order to node-has-repo, got %v", hasRepo.received())
+	}
+	if len(empty.received()) != 0 {
+		t.Fatalf("expected no pull order to the emptier node without the repo, got %v", empty.received())
+	}
+}
+
+// TestRankerFallsBackToUtilizationWhenLocalityDisabled proves
+// preferImageLocality=false restores the old behavior exactly, even when a
+// node happens to have the repo already.
+func TestRankerFallsBackToUtilizationWhenLocalityDisabled(t *testing.T) {
+	hasRepo := newPullOrderRecorder(t)
+	empty := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{
+		NodeID: "node-has-repo", Address: hasRepo.address,
+		Utilization: 0.70,
+		Repos:       []string{"registry.example.com/app"},
+		Timestamp:   time.Now(),
+	})
+	registry.Update(model.WorkerReport{
+		NodeID: "node-empty", Address: empty.address,
+		Utilization: 0.05,
+		Timestamp:   time.Now(),
+	})
+
+	rk := NewRanker(registry, 1, time.Hour, nil, false)
+	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
+
+	waitForPulls(t, hasRepo, empty)
+
+	if len(ordered) != 1 || ordered[0] != "node-empty" {
+		t.Fatalf("expected utilization-only ranking to pick the emptier node, got %v", ordered)
+	}
+}
+
+// TestRankerLocalityMatchesByRepoNotTag proves the match is repo-level: a
+// node holding an OLDER tag of the same repo still counts as "has it",
+// while a node holding a DIFFERENT repo entirely does not.
+func TestRankerLocalityMatchesByRepoNotTag(t *testing.T) {
+	oldTag := newPullOrderRecorder(t)
+	otherRepo := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{
+		NodeID: "node-old-tag", Address: oldTag.address,
+		Utilization: 0.50,
+		Repos:       []string{"registry.example.com/app"}, // same repo, was holding 1.0.0
+		Timestamp:   time.Now(),
+	})
+	registry.Update(model.WorkerReport{
+		NodeID: "node-other-repo", Address: otherRepo.address,
+		Utilization: 0.10, // emptier, but wrong repo entirely
+		Repos:       []string{"registry.example.com/unrelated-service"},
+		Timestamp:   time.Now(),
+	})
+
+	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
+
+	waitForPulls(t, oldTag, otherRepo)
+
+	if len(ordered) != 1 || ordered[0] != "node-old-tag" {
+		t.Fatalf("expected the node holding an older tag of the same repo to win over an emptier node with an unrelated repo, got %v", ordered)
 	}
 }
 

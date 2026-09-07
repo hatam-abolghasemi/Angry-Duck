@@ -23,9 +23,12 @@ pulls, right when the registry is least equipped to enjoy that.
   completely untouched — Angry Duck never gates or blocks it, it just
   wins the race to have the image ready first.
 - **Picks targets based on real signal, not guesses.** Nodes report disk
-  utilization every few seconds; the controller orders the least-loaded
-  fresh nodes to pull, and flatly refuses to preheat anything if it has
-  no recent view of any node's disk state rather than picking blind.
+  utilization *and* their local image inventory every few seconds. Given
+  those, the controller prefers a node that already has some older tag of
+  the same repo (usually a small delta to pull) over an emptier node
+  starting cold, and falls back to the least-utilized fresh nodes when no
+  node has the repo at all. It flatly refuses to preheat anything if it
+  has no recent view of any node's state rather than picking blind.
 - **Manages the whole node's disk, not just its own mess.** Every
   worker's GC loop scans and reclaims *any* image that's fallen out of
   use on that node — not only images Angry Duck itself pulled — so image
@@ -84,14 +87,14 @@ of three separate problems nobody owns.
 CI/CD pipeline                     Angry Duck controller               Angry Duck worker (DaemonSet, 1/node)
 ─────────────────                  ───────────────────────             ──────────────────────────────────────
 docker push  ──POST /webhook/──►   - tracks worker freshness           - every REPORT_INTERVAL_S: scrape
-             preheat {image}       - rejects if 0 fresh workers          node-exporter, POST /report
-                                    - ranks fresh, eligible workers      {node_id, address, utilization}
-                                      by utilization (ascending)
-                                    - every RANK_INTERVAL_S, orders     - on POST /pull {image}: pull the
-                                      lowest RANK_TOP_N workers to        image asynchronously; remember the
-                                      pull the current target image       order time for GC grace-period
-                                      (POST worker's /pull)                protection
-                                                                        - every GC_CHECK_INTERVAL_S: reclaim
+             preheat {image}       - rejects if 0 fresh workers          node-exporter + list local images,
+                                    - ranks fresh, eligible workers      POST /report {node_id, address,
+                                      by repo locality, then             utilization, repos}
+                                      utilization (ascending)           - on POST /pull {image}: pull the
+                                    - every RANK_INTERVAL_S, orders       image asynchronously; remember the
+                                      top RANK_TOP_N workers to pull      order time for GC grace-period
+                                      the current target image            protection
+                                      (POST worker's /pull)             - every GC_CHECK_INTERVAL_S: reclaim
                                                                           any local image unused for
                                                                           GC_MISS_THRESHOLD checks, unless
                                                                           still in its grace period or on the
@@ -130,7 +133,8 @@ for the full annotated list. The highlights:
 
 | Variable | Default | What it controls |
 |---|---|---|
-| `RANK_TOP_N` | 2 | how many low-utilization nodes get ordered per rank |
+| `RANK_TOP_N` | 2 | how many nodes get ordered per rank |
+| `RANK_PREFER_IMAGE_LOCALITY` | true | prefer a node that already has some tag of the target repo over an emptier node that doesn't |
 | `RANK_EXCLUDE_NODE_SUBSTRINGS` | (empty) | node names (substrings) to never pick as preheat targets — e.g. `master,control-plane` |
 | `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before an image is removed |
 | `GC_GRACE_PERIOD_S` | 60 | protects a freshly-preheated image until Argo actually needs it |
@@ -161,10 +165,10 @@ every image you'll preheat is public.
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.11 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.11 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.11
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.11
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.12 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.12 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.12
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.12
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. Apply the manifests

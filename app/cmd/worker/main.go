@@ -95,7 +95,7 @@ func main() {
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint)
 	puller := worker.NewPuller(rt, gracePeriod, nodeID)
 	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID)
-	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval)
+	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, rt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

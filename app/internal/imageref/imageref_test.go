@@ -57,3 +57,32 @@ func TestHost(t *testing.T) {
 		}
 	}
 }
+
+func TestRepo(t *testing.T) {
+	cases := map[string]string{
+		// Same repo, different tags -> same repo identity.
+		"registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2": "registry.internal-registry.example.com/devops/generic/angry-duck-worker",
+		"registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.9": "registry.internal-registry.example.com/devops/generic/angry-duck-worker",
+
+		// Digest-pinned form -> everything before "@".
+		"registry.internal-registry.example.com/devops/generic/angry-duck-worker@sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36": "registry.internal-registry.example.com/devops/generic/angry-duck-worker",
+
+		// Bare content digest ("image ID" alias) carries no repo name.
+		"sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36abdcea77152208e4a79b4": "",
+
+		// Host with an explicit port must not be mistaken for a tag.
+		"localhost:5000/foo:tag": "localhost:5000/foo",
+		"localhost:5000/foo":     "localhost:5000/foo",
+
+		// No tag at all -> the whole thing is already the repo.
+		"docker.io/library/nginx": "docker.io/library/nginx",
+
+		// Unqualified short form (raw runtime output, not Normalize()d).
+		"nginx:latest": "nginx",
+	}
+	for input, want := range cases {
+		if got := Repo(input); got != want {
+			t.Errorf("Repo(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

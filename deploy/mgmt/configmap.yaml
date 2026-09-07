@@ -12,6 +12,10 @@ data:
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
   RANK_TOP_N: "5"
+  # See stg/configmap.yaml — prefer a node that already has some tag of
+  # the target repo locally over an emptier node without it. Set to
+  # "false" to fall back to plain utilization-only ranking.
+  RANK_PREFER_IMAGE_LOCALITY: "true"
   # See stg/configmap.yaml — adjust the substring(s) if this cluster's
   # master node names don't contain "master".
   RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"

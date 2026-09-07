@@ -12,6 +12,13 @@ data:
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
   RANK_TOP_N: "5"
+  # Prefer a node that already has some older tag of the same repo locally
+  # over an emptier node that doesn't — most layers are usually shared
+  # between tags of the same repo, so that pull is typically much cheaper
+  # than a cold one. Nodes are still ranked by lowest utilization within
+  # each of those two groups. Set to "false" to fall back to plain
+  # utilization-only ranking if this ever needs a quick rollback.
+  RANK_PREFER_IMAGE_LOCALITY: "true"
   # Node names in this cluster follow "sahand-k8s-stg-master{N}-...", so
   # "master" alone is enough; "control-plane" is included too in case the
   # taint/role naming ever changes without the node name changing.

@@ -13,7 +13,23 @@ type workerEntry struct {
 	NodeID      string
 	Address     string
 	Utilization float64
-	LastSeen    time.Time
+	// Repos is the set of bare repo identities (imageref.Repo) this node
+	// last reported having locally, any tag. A map (rather than a slice)
+	// because the ranker's only use of it is an O(1) "does this node
+	// already have repo X" membership check per candidate, per preheat —
+	// never iteration over the full list.
+	Repos    map[string]struct{}
+	LastSeen time.Time
+}
+
+// HasRepo reports whether this worker last reported having repo present
+// locally under any tag.
+func (w *workerEntry) HasRepo(repo string) bool {
+	if repo == "" {
+		return false
+	}
+	_, ok := w.Repos[repo]
+	return ok
 }
 
 // Registry tracks all workers the controller has heard from, and the
@@ -48,6 +64,21 @@ func (r *Registry) Update(rep model.WorkerReport) {
 	w.Address = rep.Address
 	w.Utilization = rep.Utilization
 	w.LastSeen = rep.Timestamp
+
+	// Rebuild rather than mutate the existing map in place: a worker that
+	// removed a repo since its last report (GC'd it) must stop showing up
+	// as having it, and a fresh map per report is the simplest way to
+	// guarantee that without diffing old vs new. A previously-taken
+	// FreshWorkers() snapshot still holds a reference to the OLD map, so
+	// replacing it here is safe and never mutates data a caller is
+	// concurrently reading.
+	repos := make(map[string]struct{}, len(rep.Repos))
+	for _, repo := range rep.Repos {
+		if repo != "" {
+			repos[repo] = struct{}{}
+		}
+	}
+	w.Repos = repos
 }
 
 // isFresh reports whether a worker has reported within staleAfter of now.
@@ -112,10 +143,19 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 	now := time.Now()
 	var out []model.WorkerStatus
 	for _, w := range r.workers {
+		var repos []string
+		if len(w.Repos) > 0 {
+			repos = make([]string, 0, len(w.Repos))
+			for repo := range w.Repos {
+				repos = append(repos, repo)
+			}
+			sort.Strings(repos)
+		}
 		out = append(out, model.WorkerStatus{
 			NodeID:      w.NodeID,
 			Address:     w.Address,
 			Utilization: w.Utilization,
+			Repos:       repos,
 			LastSeen:    w.LastSeen,
 			Fresh:       r.isFresh(w, now),
 		})

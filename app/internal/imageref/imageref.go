@@ -105,3 +105,41 @@ func Host(ref string) string {
 	}
 	return ref
 }
+
+// Repo strips the tag or digest suffix off ref, returning the bare
+// repository identity (registry host + path) that's shared by every tag
+// ever pushed under that name. This is the identity the preheat ranker
+// matches on: pulling a newly-pushed tag onto a node that already has ANY
+// older tag of the same repo is usually much cheaper than a cold pull,
+// because most of an image's layers (base image, language runtime,
+// dependencies) are typically unchanged between tags of the same repo —
+// only the top application layer usually moves. Repo() is deliberately
+// this coarse (no attempt to check actual layer overlap via a registry
+// manifest call) so the controller can make a same-repo decision from
+// data it already has in memory, with zero extra network calls, keeping
+// the preheat decision fast enough to matter against the ArgoCD sync
+// window it's racing.
+//
+//   - A digest reference ("repo@sha256:...") -> everything before "@".
+//   - A bare content digest with no repo name at all ("sha256:...", the
+//     "image ID" alias containerd/crictl report alongside tag and @digest
+//     forms) -> "", since there's no repository identity to extract; the
+//     caller should skip it rather than treat the mangled digest text as
+//     a fake repo name.
+//   - Anything else -> everything before the last ":" that appears after
+//     the final "/", the same tag-boundary rule ensureTag uses, so a
+//     registry host's own ":port" is never mistaken for a tag separator.
+func Repo(ref string) string {
+	if idx := strings.Index(ref, "@sha256:"); idx >= 0 {
+		return ref[:idx]
+	}
+	if strings.HasPrefix(ref, "sha256:") {
+		return ""
+	}
+	lastSlash := strings.LastIndex(ref, "/")
+	afterSlash := ref[lastSlash+1:]
+	if colon := strings.Index(afterSlash, ":"); colon >= 0 {
+		return ref[:lastSlash+1+colon]
+	}
+	return ref
+}

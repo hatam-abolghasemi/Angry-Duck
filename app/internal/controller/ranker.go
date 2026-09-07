@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
@@ -40,11 +41,12 @@ var pullOrdersTotal = metrics.NewCounterVec(
 // confirms the worker *accepted* the order (HTTP 2xx), never that the pull
 // itself completed.
 type Ranker struct {
-	registry          *Registry
-	topN              int
-	interval          time.Duration
-	excludeSubstrings []string
-	httpClient        *http.Client
+	registry            *Registry
+	topN                int
+	interval            time.Duration
+	excludeSubstrings   []string
+	preferImageLocality bool
+	httpClient          *http.Client
 
 	mu              sync.Mutex
 	orderedForImage string
@@ -63,12 +65,19 @@ type Ranker struct {
 // out of the registry or off the DaemonSet: excluding them from scheduling
 // entirely would mean nobody GCs their disk, which is a real regression —
 // the constraint is "never pick them as a target," not "never run there."
-func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string) *Ranker {
+//
+// preferImageLocality controls whether candidates that already have the
+// target image's repo present locally (any tag) are ranked ahead of ones
+// that don't, before either group is sorted by utilization — see
+// rankByLocality. Pass false (RANK_PREFER_IMAGE_LOCALITY=false) to fall
+// back to the old utilization-only ordering.
+func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string, preferImageLocality bool) *Ranker {
 	return &Ranker{
-		registry:          registry,
-		topN:              topN,
-		interval:          interval,
-		excludeSubstrings: excludeSubstrings,
+		registry:            registry,
+		topN:                topN,
+		interval:            interval,
+		excludeSubstrings:   excludeSubstrings,
+		preferImageLocality: preferImageLocality,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -129,13 +138,15 @@ func (rk *Ranker) orderLowestN(image string) []string {
 		return nil
 	}
 
-	n := rk.topN
-	if n > len(candidates) {
-		n = len(candidates)
-	}
-	chosen := candidates[:n]
+	ranked := rk.rankByLocality(image, candidates)
 
-	logging.Debugf("angryduck-controller: ranked %d fresh worker(s) (%d eligible after exclusions, %d not yet ordered), choosing lowest %d by utilization for image=%s",
+	n := rk.topN
+	if n > len(ranked) {
+		n = len(ranked)
+	}
+	chosen := ranked[:n]
+
+	logging.Debugf("angryduck-controller: ranked %d fresh worker(s) (%d eligible after exclusions, %d not yet ordered), choosing top %d (image locality, then utilization) for image=%s",
 		len(fresh), len(eligible), len(candidates), n, image)
 	for _, w := range eligible {
 		logging.Debugf("angryduck-controller: candidate node=%s utilization=%.1f%%", w.NodeID, w.Utilization*100)
@@ -172,6 +183,48 @@ func (rk *Ranker) notYetOrdered(image string, eligible []*workerEntry) []*worker
 		}
 	}
 	return candidates
+}
+
+// rankByLocality reorders candidates — already sorted ascending by
+// utilization via FreshWorkers() — so that nodes which already have the
+// target image's repo present locally (any tag) come first, ahead of
+// nodes that don't, regardless of raw utilization. Pulling a new tag onto
+// a node that already has an older tag of the same repo is typically a
+// small delta (usually just the top application layer changed), so it
+// beats even a much emptier node paying for a fully cold pull. Ordering
+// within each of the two groups is preserved from the input, so the
+// existing ascending-utilization tiebreak still applies inside each
+// group.
+//
+// This is a repo-level heuristic, not a real layer-diff calculation:
+// checking actual shared-layer overlap would mean a registry manifest
+// call per candidate, and the entire point of preheat is to beat ArgoCD's
+// sync loop, so a network round trip per decision isn't worth it. "Same
+// repo, any tag" is assumed close enough in practice.
+func (rk *Ranker) rankByLocality(image string, candidates []*workerEntry) []*workerEntry {
+	if !rk.preferImageLocality {
+		return candidates
+	}
+	repo := imageref.Repo(image)
+	if repo == "" {
+		return candidates
+	}
+
+	withRepo := make([]*workerEntry, 0, len(candidates))
+	without := make([]*workerEntry, 0, len(candidates))
+	for _, w := range candidates {
+		if w.HasRepo(repo) {
+			withRepo = append(withRepo, w)
+		} else {
+			without = append(without, w)
+		}
+	}
+	if len(withRepo) == 0 {
+		return without
+	}
+	logging.Debugf("angryduck-controller: %d of %d candidate(s) already have repo=%s locally (any tag), prioritizing them for image=%s",
+		len(withRepo), len(candidates), repo, image)
+	return append(withRepo, without...)
 }
 
 // excludeMatching drops any worker whose NodeID contains one of
