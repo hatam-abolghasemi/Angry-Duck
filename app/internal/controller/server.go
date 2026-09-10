@@ -20,6 +20,15 @@ var peerLookupsTotal = metrics.NewCounterVec(
 	"result",
 )
 
+// resolveLookupsTotal counts /resolve answers: found means the fleet has
+// ever observed a digest for the asked tag (regardless of how stale),
+// none means the worker has nothing to fall back to at all.
+var resolveLookupsTotal = metrics.NewCounterVec(
+	"angryduck_controller_resolve_lookups_total",
+	"Tag-fallback resolve lookups answered, by result.",
+	"result",
+)
+
 // Server wires the registry + ranker up to HTTP handlers.
 type Server struct {
 	registry       *Registry
@@ -35,6 +44,7 @@ func NewServer(registry *Registry, ranker *Ranker, peerCandidates int) *Server {
 	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
 	s.mux.HandleFunc("/report", s.handleReport)
 	s.mux.HandleFunc("/peers", s.handlePeers)
+	s.mux.HandleFunc("/resolve", s.handleResolve)
 	s.mux.HandleFunc("/announce", s.handleAnnounce)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.Handle("/metrics", metrics.Handler())
@@ -123,8 +133,41 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		rep.Timestamp = time.Now()
 	}
 	s.registry.Update(rep)
-	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%%", rep.NodeID, rep.Address, rep.Utilization*100)
+	s.registry.UpdateTags(rep.Tags)
+	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%% tags=%d", rep.NodeID, rep.Address, rep.Utilization*100, len(rep.Tags))
 	writeJSON(w, http.StatusOK, model.ReportAck{Accepted: true})
+}
+
+// handleResolve answers "what digest does this tag currently mean,
+// fleet-wide" — the tag-fallback lookup a worker makes only when origin
+// itself couldn't resolve a tag (see internal/worker's
+// Mirror.FallbackImport). Deliberately does not filter by freshness the
+// way /peers does: a mapping observed by a now-stale worker is still a
+// real fact worth returning, and PeersFor already re-checks freshness
+// the moment the caller asks who can actually serve the resulting
+// digest — staleness there fails safely (empty peer list), so filtering
+// here too would only hide information for no added safety.
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tag := r.URL.Query().Get("tag")
+	if tag == "" {
+		http.Error(w, "tag required", http.StatusBadRequest)
+		return
+	}
+	digest, observedAt, ok := s.registry.ResolveTag(tag)
+	if !ok {
+		resolveLookupsTotal.Inc("none")
+		logging.Debugf("angryduck-controller: node=%s asked to resolve tag=%s, nobody has ever reported it", r.URL.Query().Get("node"), tag)
+		http.NotFound(w, r)
+		return
+	}
+	resolveLookupsTotal.Inc("found")
+	logging.Infof("angryduck-controller: node=%s resolved tag=%s to digest=%s (age=%s, fleet-observed, not origin-confirmed)",
+		r.URL.Query().Get("node"), tag, digest, time.Since(observedAt).Round(time.Second))
+	writeJSON(w, http.StatusOK, model.ResolveResponse{Digest: digest, ObservedAt: observedAt})
 }
 
 // handlePeers tells a worker's mirror which nodes can export a digest.
@@ -139,13 +182,15 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "digest required", http.StatusBadRequest)
 		return
 	}
-	peers := s.registry.PeersFor(digest, r.URL.Query().Get("node"), s.peerCandidates)
+	asker := r.URL.Query().Get("node")
+	peers := s.registry.PeersFor(digest, asker, s.peerCandidates)
 	if len(peers) == 0 {
 		peerLookupsTotal.Inc("none")
+		logging.Infof("angryduck-controller: node=%s asked for peers of %s, found none — it'll go to origin", asker, digest)
 	} else {
 		peerLookupsTotal.Inc("found")
+		logging.Infof("angryduck-controller: node=%s asked for peers of %s, offered %d: %v", asker, digest, len(peers), peers)
 	}
-	logging.Debugf("angryduck-controller: peers for %s (asked by %s): %v", digest, r.URL.Query().Get("node"), peers)
 	writeJSON(w, http.StatusOK, model.PeersResponse{Peers: peers})
 }
 
@@ -160,7 +205,14 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node_id and digest required", http.StatusBadRequest)
 		return
 	}
-	s.registry.Announce(a.NodeID, a.Digest)
+	if ok := s.registry.Announce(a.NodeID, a.Digest); ok {
+		logging.Infof("angryduck-controller: node=%s announced it now holds %s", a.NodeID, a.Digest)
+	} else {
+		// Node isn't in the registry yet (no /report has landed for it
+		// yet) — its own next report will cover this digest anyway, so
+		// this is informational, not an error.
+		logging.Debugf("angryduck-controller: ignored announce from unknown node=%s for %s (no report from it yet)", a.NodeID, a.Digest)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

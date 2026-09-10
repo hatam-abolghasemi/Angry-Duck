@@ -25,8 +25,16 @@ type WorkerReport struct {
 	// exportable — the exact identity containerd asks a registry mirror
 	// for. The controller answers /peers from this. Omitted is safe: the
 	// node just never gets chosen as a transfer source.
-	Digests   []string  `json:"digests,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	Digests []string `json:"digests,omitempty"`
+	// Tags maps every tag-form local reference (e.g.
+	// "repo-afra.internal-dev.example.com/rich-ubuntu:22.04") this node currently
+	// holds to its manifest digest. Unlike Digests (an unordered set),
+	// this preserves the name a pod's spec actually asks for, which is
+	// exactly what /resolve needs to answer "what does this tag mean"
+	// when origin itself can't be asked. Omitted is safe: this node's
+	// tags simply never become a fallback answer for anyone.
+	Tags      map[string]string `json:"tags,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
 }
 
 // PeersResponse is the controller's answer to GET /peers?digest=...:
@@ -34,6 +42,19 @@ type WorkerReport struct {
 // shuffled so concurrent requesters spread across sources.
 type PeersResponse struct {
 	Peers []string `json:"peers"`
+}
+
+// ResolveResponse is the controller's answer to GET /resolve?tag=...: the
+// fleet's current best-known digest for that tag, and how long that
+// digest has been the answer. Used only by a worker's tag-fallback
+// importer (see internal/worker's Mirror.FallbackImport), when a pod is
+// stuck in ImagePullBackOff and origin itself cannot resolve the tag the
+// normal way. ObservedAt is the age signal callers must log/surface —
+// this is a trust decision, not a confirmation, and staleness is the
+// whole risk.
+type ResolveResponse struct {
+	Digest     string    `json:"digest,omitempty"`
+	ObservedAt time.Time `json:"observed_at,omitempty"`
 }
 
 // Announce is sent by a worker right after an image lands via peer

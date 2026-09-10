@@ -147,6 +147,45 @@ func (inv *Inventory) MarkUnexportable(digest string) {
 	inv.mu.Unlock()
 }
 
+// Tags returns every local tag-form reference mapped to its manifest
+// digest, derived from the same cached listing GC and the mirror already
+// use — no extra runtime call. This is what the report sends so the
+// controller can answer /resolve (see internal/controller's
+// Registry.ResolveTag) for a pod stuck in ImagePullBackOff on some other
+// node, when origin itself can't resolve the tag.
+//
+// The join is: find every digest-pinned alias ("repo@sha256:D") to build
+// canonical-id -> manifest-digest, then look up each tag-form alias's
+// canonical id in that map. digests' values are the runtime's own
+// canonical id (crictl's image "id", or ctr's DIGEST column) — NOT
+// itself the manifest digest crictl's id can be a config digest rather
+// than a manifest digest — so this must go through the digest-pinned
+// alias the same way byDigest does in replace(), rather than trusting
+// the raw value directly.
+func (inv *Inventory) Tags() map[string]string {
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	if !inv.haveData || len(inv.digests) == 0 {
+		return nil
+	}
+	idToManifest := make(map[string]string, len(inv.digests))
+	for alias, id := range inv.digests {
+		if at := strings.Index(alias, "@sha256:"); at > 0 {
+			idToManifest[id] = alias[at+1:]
+		}
+	}
+	tags := make(map[string]string)
+	for alias, id := range inv.digests {
+		if strings.HasPrefix(alias, "sha256:") || strings.Contains(alias, "@sha256:") {
+			continue // bare digest or digest-pinned alias, not a tag
+		}
+		if d, ok := idToManifest[id]; ok {
+			tags[alias] = d
+		}
+	}
+	return tags
+}
+
 // Digests returns every advertisable manifest digest, for the report.
 func (inv *Inventory) Digests() []string {
 	inv.mu.RLock()

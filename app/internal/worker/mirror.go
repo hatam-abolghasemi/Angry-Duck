@@ -176,6 +176,7 @@ func (m *Mirror) ServeRegistry(w http.ResponseWriter, r *http.Request) {
 // on one node needing the same image cause exactly one transfer.
 func (m *Mirror) await(reqCtx context.Context, digest, image string) string {
 	if m.inv.Has(digest) {
+		logging.Debugf("angryduck-worker-mirror: %s already local, no transfer needed", image)
 		return "local"
 	}
 	m.mu.Lock()
@@ -183,7 +184,10 @@ func (m *Mirror) await(reqCtx context.Context, digest, image string) string {
 	if !joined {
 		f = &flight{done: make(chan struct{})}
 		m.flights[digest] = f
+		logging.Debugf("angryduck-worker-mirror: holding containerd's manifest request for %s, starting a transfer", image)
 		go m.fly(f, digest, image)
+	} else {
+		logging.Debugf("angryduck-worker-mirror: joining in-flight transfer already running for %s", image)
 	}
 	m.mu.Unlock()
 
@@ -197,6 +201,7 @@ func (m *Mirror) await(reqCtx context.Context, digest, image string) string {
 		// containerd gave up (pod deleted, kubelet cancelled). The
 		// transfer carries on to completion or HoldTimeout: a retry will
 		// join it or find the image already local.
+		logging.Debugf("angryduck-worker-mirror: containerd cancelled its wait for %s; transfer keeps running for anyone else waiting on it", image)
 		return "cancelled"
 	}
 }
@@ -222,41 +227,50 @@ func (m *Mirror) transfer(ctx context.Context, digest, image string) string {
 	if !acquire(ctx, m.importSlots, m.cfg.QueueWait) {
 		// Every import slot on this node is busy. Don't queue behind
 		// them for the whole hold window — origin is faster than that.
+		logging.Warnf("angryduck-worker-mirror: all %d import slot(s) busy on this node, giving up on %s and letting containerd go to origin", m.cfg.MaxImports, image)
 		return "busy"
 	}
 	defer func() { <-m.importSlots }()
 
+	round := 0
 	for {
+		round++
 		peers, err := m.peers(ctx, digest)
 		if err != nil {
 			logging.Warnf("angryduck-worker-mirror: peer lookup for %s failed, letting containerd go to origin: %v", image, err)
 			return "miss"
 		}
 		if len(peers) == 0 {
+			logging.Debugf("angryduck-worker-mirror: no fresh peer holds %s, letting containerd go to origin", image)
 			return "miss"
 		}
+		logging.Debugf("angryduck-worker-mirror: round %d: %d candidate peer(s) for %s: %v", round, len(peers), image, peers)
 		sawBusy := false
 		for _, peer := range peers {
-			switch m.importFrom(ctx, peer, digest, image) {
+			switch m.importFrom(ctx, peer, digest, image, false) {
 			case outcomeOK:
 				return "hit"
 			case outcomeBusy:
 				sawBusy = true
 			}
 			if ctx.Err() != nil {
+				logging.Warnf("angryduck-worker-mirror: hold timeout reached mid-transfer for %s, letting containerd go to origin", image)
 				return "timeout"
 			}
 		}
 		if !sawBusy {
+			logging.Warnf("angryduck-worker-mirror: all %d candidate peer(s) for %s failed (dial/decline/import error), letting containerd go to origin", len(peers), image)
 			return "failed"
 		}
 		// Every source was mid-export. Sources multiply as nodes finish
 		// importing and announce themselves, so ask the controller again
 		// in a second rather than queueing on the same saturated seeds.
+		logging.Debugf("angryduck-worker-mirror: every candidate peer for %s was busy exporting, asking the controller again in 1s", image)
 		t := time.NewTimer(time.Second)
 		select {
 		case <-ctx.Done():
 			t.Stop()
+			logging.Warnf("angryduck-worker-mirror: hold timeout reached while waiting out busy peers for %s, letting containerd go to origin", image)
 			return "timeout"
 		case <-t.C:
 		}
@@ -272,8 +286,14 @@ const (
 )
 
 // importFrom orders peer to export digest and pipes the socket into the
-// node's `ctr images import`.
-func (m *Mirror) importFrom(ctx context.Context, peer, digest, image string) outcome {
+// node's `ctr images import`. unpack controls --no-unpack: false (the
+// mirror's own path) avoids the unpack-lock deadlock described above,
+// since containerd's own pull is concurrently unpacking the same digest;
+// true (FallbackImport's path) is safe specifically because there is no
+// concurrent pull to deadlock against — the pull that would have started
+// one already gave up before ever reaching this worker.
+func (m *Mirror) importFrom(ctx context.Context, peer, digest, image string, unpack bool) outcome {
+	logging.Debugf("angryduck-worker-mirror: trying peer %s for %s", peer, image)
 	d := net.Dialer{Timeout: 2 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", peer)
 	if err != nil {
@@ -316,7 +336,12 @@ func (m *Mirror) importFrom(ctx context.Context, peer, digest, image string) out
 	// blocked in Unpacker.lockBlobDescriptor with every byte received.)
 	// Landing blobs only in the content store touches no unpack lock, and
 	// the pull unpacks them once, exactly as it would after any download.
-	cmd, err := m.hx.Command(ctx, "ctr", "-a", m.cfg.ContainerdAddress, "-n", m.cfg.Namespace, "images", "import", "--no-unpack", "-")
+	args := []string{"-a", m.cfg.ContainerdAddress, "-n", m.cfg.Namespace, "images", "import"}
+	if !unpack {
+		args = append(args, "--no-unpack")
+	}
+	args = append(args, "-")
+	cmd, err := m.hx.Command(ctx, "ctr", args...)
 	if err != nil {
 		logging.Errorf("angryduck-worker-mirror: %v", err)
 		return outcomeFailed
@@ -366,6 +391,127 @@ func (m *Mirror) peers(ctx context.Context, digest string) ([]string, error) {
 	return pr.Peers, nil
 }
 
+// resolveTag asks the controller for the fleet's current best-known
+// digest for a tag reference — the fallback path used when origin itself
+// can't resolve it (see FallbackImport). ok=false with err=nil means the
+// controller genuinely has no record of this tag from anyone, ever.
+func (m *Mirror) resolveTag(ctx context.Context, tag string) (digest string, observedAt time.Time, ok bool, err error) {
+	u := m.cfg.ControllerURL + "/resolve?" + url.Values{"tag": {tag}, "node": {m.cfg.NodeID}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", time.Time{}, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", time.Time{}, false, fmt.Errorf("controller status %d", resp.StatusCode)
+	}
+	var rr model.ResolveResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
+		return "", time.Time{}, false, err
+	}
+	return rr.Digest, rr.ObservedAt, true, nil
+}
+
+// tagFallbackTotal counts FallbackImport attempts by outcome. Kept
+// separate from mirrorTransfersTotal: that one measures the normal,
+// containerd-driven path (origin always confirms the tag first); this
+// one measures the rescue path taken specifically because origin
+// couldn't be asked, so mixing them would hide how often the fleet is
+// operating on trust instead of confirmation.
+var tagFallbackTotal = metrics.NewCounterVec(
+	"angryduck_worker_tag_fallback_total",
+	"Attempts to fix a pod stuck in ImagePullBackOff by importing its image from a peer under its exact tag, by result. Every hit trusts a peer-observed digest instead of origin — see the WARN log line for its age.",
+	"node", "result",
+)
+
+// FallbackImport is the pod-watch rescue path (see podwatch.go). Unlike
+// the mirror above, there is no containerd pull in flight to intercept
+// here — that pull already gave up before ever reaching this worker,
+// because tag resolution against origin itself failed. So this resolves
+// the tag against the CONTROLLER's last fleet-observed mapping instead,
+// imports fully (unpacked — no concurrent pull holds the unpack lock to
+// finish that for us the way the mirror path relies on), and tags the
+// result under the exact reference the stuck pod is waiting on, so
+// kubelet's own ImageStatus check finds it present on its next retry
+// without Angry Duck touching the pod at all.
+//
+// Deliberately no allowlist: any resolvable tag is fair game. The
+// safeguard here is visibility, not restriction — every call logs the
+// digest's age at WARN whether or not the fix succeeds, since a stale
+// fallback digest silently becoming the permanent answer for a tag is
+// the actual danger, not the mechanism itself.
+func (m *Mirror) FallbackImport(ctx context.Context, image string) error {
+	digest, observedAt, ok, err := m.resolveTag(ctx, image)
+	if err != nil {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "resolve_error")
+		return fmt.Errorf("resolving %s against the fleet: %w", image, err)
+	}
+	if !ok {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "no_digest")
+		return fmt.Errorf("no node in the fleet has ever reported a digest for %s", image)
+	}
+	age := time.Since(observedAt).Round(time.Second)
+	logging.Warnf("angryduck-worker-podwatch: falling back to a fleet-observed digest for %s: digest=%s age=%s (origin could not resolve this tag) — this is trust, not confirmation", image, digest, age)
+
+	if m.inv.Has(digest) {
+		if err := m.tagLocally(digest, image); err != nil {
+			tagFallbackTotal.Inc(m.cfg.NodeID, "tag_failed")
+			return err
+		}
+		tagFallbackTotal.Inc(m.cfg.NodeID, "hit_local")
+		logging.Warnf("angryduck-worker-podwatch: recovered %s from this node's own content using a %s-old fallback digest", image, age)
+		return nil
+	}
+
+	peers, err := m.peers(ctx, digest)
+	if err != nil {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "peer_lookup_failed")
+		return fmt.Errorf("peer lookup for %s: %w", digest, err)
+	}
+	if len(peers) == 0 {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "no_peer")
+		return fmt.Errorf("resolved %s to %s but no fresh peer currently holds it", image, digest)
+	}
+
+	for _, peer := range peers {
+		if m.importFrom(ctx, peer, digest, image, true) == outcomeOK {
+			if err := m.tagLocally(digest, image); err != nil {
+				tagFallbackTotal.Inc(m.cfg.NodeID, "tag_failed")
+				return err
+			}
+			tagFallbackTotal.Inc(m.cfg.NodeID, "hit")
+			logging.Warnf("angryduck-worker-podwatch: recovered %s from %s using a %s-old fallback digest", image, peer, age)
+			return nil
+		}
+	}
+	tagFallbackTotal.Inc(m.cfg.NodeID, "import_failed")
+	return fmt.Errorf("every candidate peer for %s failed", digest)
+}
+
+// tagLocally aliases an already-imported digest under the exact
+// reference a stuck pod is waiting on. This, not the import itself, is
+// what actually resolves the pod: kubelet's CRI ImageStatus check for a
+// non-":latest" tag finds it present locally and skips pulling.
+func (m *Mirror) tagLocally(digest, image string) error {
+	ref, ok := m.inv.Lookup(digest)
+	if !ok {
+		return fmt.Errorf("imported %s but it is not in local inventory yet", digest)
+	}
+	if _, err := m.hx.Run("ctr", "-a", m.cfg.ContainerdAddress, "-n", m.cfg.Namespace, "images", "tag", ref, image); err != nil {
+		return fmt.Errorf("tagging %s as %s: %w", ref, image, err)
+	}
+	m.inv.Add(digest, image)
+	logging.Infof("angryduck-worker-podwatch: tagged %s as %s — the stuck pod's next retry should find it present", ref, image)
+	return nil
+}
+
 func (m *Mirror) announce(digest string) {
 	body, _ := json.Marshal(model.Announce{NodeID: m.cfg.NodeID, Digest: digest})
 	resp, err := m.client.Post(m.cfg.ControllerURL+"/announce", "application/json", bytes.NewReader(body))
@@ -389,6 +535,7 @@ func (m *Mirror) ServeExport(w http.ResponseWriter, r *http.Request) {
 	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get(tokenHeader)), []byte(m.cfg.Token)) != 1 {
 		mirrorExportsTotal.Inc(m.cfg.NodeID, "unauthorized")
+		logging.Warnf("angryduck-worker-mirror: rejected export request from %s: bad or missing token", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -400,11 +547,13 @@ func (m *Mirror) ServeExport(w http.ResponseWriter, r *http.Request) {
 	ref, ok := m.inv.Lookup(digest)
 	if !ok {
 		mirrorExportsTotal.Inc(m.cfg.NodeID, "not_found")
+		logging.Debugf("angryduck-worker-mirror: peer %s asked for %s, not here (stale announce, or GC'd/unexportable since)", r.RemoteAddr, digest)
 		http.Error(w, "not here", http.StatusNotFound)
 		return
 	}
 	if !acquire(r.Context(), m.exportSlots, m.cfg.QueueWait) {
 		mirrorExportsTotal.Inc(m.cfg.NodeID, "busy")
+		logging.Debugf("angryduck-worker-mirror: all %d export slot(s) busy, telling peer %s to try elsewhere for %s", m.cfg.MaxExports, r.RemoteAddr, ref)
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
 	}

@@ -106,6 +106,7 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		Utilization: result.Utilization,
 		Repos:       repos,
 		Digests:     rp.inventory.Digests(),
+		Tags:        rp.inventory.Tags(),
 		Timestamp:   time.Now(),
 	}
 	body, err := json.Marshal(report)

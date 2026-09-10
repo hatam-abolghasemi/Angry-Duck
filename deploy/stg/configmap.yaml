@@ -76,3 +76,14 @@ data:
   MIRROR_HOSTS_DIR: "/etc/containerd/certs.d"
   MIRROR_PEER_CANDIDATES: "3"
   # MIRROR_PEER_TOKEN comes from the angryduck-mirror Secret, not here.
+
+  # --- Pod-watch (see .env.example for the full story) ---
+  # Fixes a pod stuck in ImagePullBackOff by importing its image from a
+  # peer under its exact tag, for the case the mirror above can't help
+  # with: tag resolution against origin itself failing, so the pull never
+  # reaches this worker at all. Needs the RBAC in rbac.yaml. No allowlist
+  # gates it — watch angryduck_worker_tag_fallback_total and the WARN logs
+  # for the digest age each time it fires.
+  POD_WATCH_ENABLED: "true"
+  POD_WATCH_INTERVAL_S: "30"
+  POD_WATCH_RETRY_BACKOFF_S: "300"

@@ -37,6 +37,17 @@ func (w *workerEntry) HasRepo(repo string) bool {
 	return ok
 }
 
+// tagRecord is the fleet's current answer for one tag reference: which
+// digest it currently means, and since when. observedAt is deliberately
+// NOT refreshed every time a node re-reports the same (tag, digest) pair
+// — only when the digest actually changes — so its age reflects how long
+// this has genuinely been unconfirmed against origin, not how recently
+// some node happened to heartbeat. See UpdateTags.
+type tagRecord struct {
+	digest     string
+	observedAt time.Time
+}
+
 // Registry tracks all workers the controller has heard from, and the
 // currently active "preheat" target image (if any).
 type Registry struct {
@@ -46,6 +57,12 @@ type Registry struct {
 	targetImage string
 	targetSetAt time.Time
 	targetTTL   time.Duration
+	// tags is fleet-wide, not per-worker: it answers "what digest does
+	// this tag currently mean, anywhere," independent of which node last
+	// reported it. Sourcing an actual peer for that digest is still
+	// PeersFor's job (which does check freshness) — this index only ever
+	// answers the tag->digest question.
+	tags map[string]tagRecord
 }
 
 // NewRegistry builds an empty worker registry.
@@ -54,6 +71,7 @@ func NewRegistry(staleAfter, targetTTL time.Duration) *Registry {
 		workers:    make(map[string]*workerEntry),
 		staleAfter: staleAfter,
 		targetTTL:  targetTTL,
+		tags:       make(map[string]tagRecord),
 	}
 }
 
@@ -92,6 +110,48 @@ func (r *Registry) Update(rep model.WorkerReport) {
 		}
 	}
 	w.Digests = digests
+}
+
+// UpdateTags folds a worker's reported tag->digest observations into the
+// fleet-wide index ResolveTag answers from. Called separately from
+// Update (not nested inside it) since both take the same lock and
+// sync.Mutex isn't reentrant.
+//
+// A tag's observedAt only moves forward when the digest it maps to
+// actually changes. Without that, a node that resolved a tag against
+// origin once and simply keeps re-reporting the same cached mapping on
+// every heartbeat would make an arbitrarily old fact look freshly
+// confirmed — exactly the illusion of freshness this index exists to
+// avoid, since its entire purpose is telling a caller how much to trust
+// it when origin itself is unreachable.
+func (r *Registry) UpdateTags(tags map[string]string) {
+	if len(tags) == 0 {
+		return
+	}
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for tag, digest := range tags {
+		if tag == "" || digest == "" {
+			continue
+		}
+		if cur, ok := r.tags[tag]; !ok || cur.digest != digest {
+			r.tags[tag] = tagRecord{digest: digest, observedAt: now}
+		}
+	}
+}
+
+// ResolveTag returns the fleet's current best-known digest for a tag
+// reference and how long it's been the answer. ok=false means nobody in
+// the fleet has ever reported this tag.
+func (r *Registry) ResolveTag(tag string) (digest string, observedAt time.Time, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, found := r.tags[tag]
+	if !found {
+		return "", time.Time{}, false
+	}
+	return rec.digest, rec.observedAt, true
 }
 
 // Announce adds one digest to a known worker between reports. Unknown

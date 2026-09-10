@@ -1,112 +1,193 @@
 # Angry Duck
 
-Angry Duck kills the "40 replicas, 40 origin pulls" problem. It pre-pulls
-a freshly-pushed image onto a couple of low-utilization nodes the moment
-CI pushes it, and then — sitting in front of the origin registry as each
-node's containerd mirror — hands that image to every other node that asks
-for it, whole, peer-to-peer, instead of every one of them hitting the
-origin registry at once.
+Angry Duck kills the "40 replicas, 40 origin pulls" problem: a rollout
+where every node that gets scheduled a new pod pulls the same fresh image
+independently, straight from the origin registry, all at once.
 
-## The problem
+It does four things:
 
-A normal rollout looks like this: ArgoCD syncs, and every node that just
-got scheduled a new pod pulls the new image — independently, at the same
-moment, straight from the origin registry. Spegel is sitting right there
-ready to serve peers, but on a fresh deploy nobody has the image yet, so
-there's no peer to serve from. 40 replicas means 40 simultaneous origin
-pulls, right when the registry is least equipped to enjoy that.
+1. **Preheat** — the moment CI pushes an image, order a couple of
+   low-utilization nodes to pull it from origin *before* ArgoCD schedules
+   anything.
+2. **Peer-to-peer mirror** — every other node that needs the image gets it
+   from a node that already has it, over the LAN, instead of from origin.
+3. **Garbage collection** — every node's disk is continuously cleaned of
+   images nobody's using, so none of the above accumulates forever.
+4. **Pod-watch** — a pod stuck in `ImagePullBackOff` for a reason the
+   mirror can never see (origin itself unreachable for that tag) gets
+   rescued by importing its image from a peer under its exact tag.
 
-Spegel's answer is to serve individual layers out of every node's content
-store. Angry Duck's is coarser and simpler: when containerd on a node
-needs an image, the node's worker asks the controller who already has that
-exact digest, orders that node to export it, imports it locally, and lets
-containerd finish the pull against a content store that already has every
-layer. Whole images, identified by name and digest; no per-layer lookups,
-no layer serving.
+One controller pod tracks fleet state and makes the preheat decision. One
+worker pod (a DaemonSet, one per node) does everything node-local: it runs
+the mirror, runs GC, runs pod-watch, and executes preheat pulls.
 
-## What Angry Duck does about it
+## 1. Preheat
 
-- **Gets ahead of the deploy, not in its way.** One `curl` call right
-  after `docker push` is all a pipeline needs to add. ArgoCD's sync is
-  completely untouched — Angry Duck never gates or blocks it, it just
-  wins the race to have the image ready first.
-- **Picks targets based on real signal, not guesses.** Nodes report disk
-  utilization *and* their local image inventory every few seconds. Given
-  those, the controller prefers a node that already has some older tag of
+**What it does:** the instant a pipeline pushes an image, `RANK_TOP_N`
+nodes (default 2) pull it from origin — before any pod actually needs it.
+
+**How:**
+- The pipeline calls `POST /webhook/preheat {"image": "..."}` right after
+  `docker push`. Nothing else in the deploy path changes; ArgoCD's sync is
+  untouched.
+- Every worker reports its disk utilization and local image inventory to
+  the controller every `REPORT_INTERVAL_S`. The controller ranks fresh
+  workers by that report: it prefers a node that already has *some* tag of
   the same repo (usually a small delta to pull) over an emptier node
-  starting cold, and falls back to the least-utilized fresh nodes when no
-  node has the repo at all. It flatly refuses to preheat anything if it
-  has no recent view of any node's state rather than picking blind.
-- **Manages the whole node's disk, not just its own mess.** Every
-  worker's GC loop scans and reclaims *any* image that's fallen out of
-  use on that node — not only images Angry Duck itself pulled — so image
-  disk usage stays flat over time instead of accumulating with every tag
-  a pipeline ever pushes.
-- **Doesn't guess wrong about what's "in use."** Images are matched by
-  their canonical content digest, not by raw name — the same content can
-  legitimately show up locally under a tag, a digest-pinned reference,
-  and a bare digest, and only comparing by digest keeps GC from treating
-  those as separate, disposable images.
-- **Knows what it can't know.** A small always-safe allowlist
-  (`GC_EXCLUDE_IMAGE_SUBSTRINGS`) covers images like `pause` that
-  Kubernetes runs as pod sandboxes rather than regular containers — no
-  amount of "is this running?" logic will ever see them as running, so
-  they get an explicit pass instead of being cycled through GC forever.
-- **Doesn't waste a preheat slot on a node nothing will ever use.**
-  Master/control-plane nodes never get scheduled a real workload pod, so
-  they always look artificially idle. `RANK_EXCLUDE_NODE_SUBSTRINGS` keeps
-  them out of the *ranking*, while they keep running their own GC — the
-  disk still gets managed, the preheat slot just goes somewhere useful.
-- **Ships safe by default.** GC starts in dry-run, logging exactly what
-  it would remove and why, until you've watched it decide correctly
-  against your own nodes and flip it on.
-- **Pulls from peers, whole.** With the mirror on, containerd asks the
-  local worker before origin. If any fresh node has the exact digest, the
-  worker orders it to `ctr images export` and pipes the stream into this
-  node's `ctr images import`; containerd then gets the tiny manifest from
-  origin and finds every layer already local. Nobody has it? The worker
-  says so instantly and it's an ordinary origin pull. See
-  [The peer mirror](#the-peer-mirror).
-- **Stays out of the data path, even for its own transfers.** The source
-  node's `ctr export` writes straight into the TCP socket, and on the
-  receiving node that same socket *is* `ctr import`'s stdin. Image bytes
-  never pass through Angry Duck's process — it wires two file descriptors
-  together and waits for exit codes.
-- **Carries no container tooling of its own.** crictl and ctr are the
-  node's binaries — whatever apt or Kubespray installed — run chrooted into
-  the node's root. The worker image is a single static binary. See
-  [Node binaries](#node-binaries-not-image-binaries).
-- **Costs almost nothing to run.** Pure Go, stdlib only — no dependencies
-  to audit, no `go mod download`, small static binaries, small images.
-  The worker process itself sits at ~6 MiB; see
-  [Resource usage](#resource-usage) for what a peer transfer costs.
+  starting fully cold, then breaks ties by lowest utilization.
+- The controller orders the top `RANK_TOP_N` nodes to `POST /pull`
+  (`CONTAINER_RUNTIME`, e.g. `crictl`, run directly on the node) and stops.
+  It won't order anything if it has no fresh view of the fleet, and it
+  never re-preheats the same image once its seed slots are filled — only
+  a failed order gets replaced.
+- Master/control-plane nodes are excluded from preheat targeting
+  (`RANK_EXCLUDE_NODE_SUBSTRINGS`) since no real workload ever schedules
+  onto them, but they still run GC.
 
-## Why this combo — preheat + peer mirror + your pipeline — actually adds up
+Preheat only covers the first few nodes. Everything else — the other 38
+nodes in that rollout, a 3am HPA scale-out, a node that joins later — is
+covered by the mirror below.
 
-Each piece is solving a different stage of the same lifecycle, and
-together they cover it end to end:
+## 2. Peer-to-peer mirror
 
-- **At push time**, Angry Duck turns "N nodes about to ask the registry
-  for the same layers" into a single, controlled origin pull on 1–3
-  nodes — the registry sees one request instead of a stampede, no matter
-  how large the fleet is.
-- **At rollout time**, the peer mirror turns that one pull into
-  cluster-wide availability: every other node ArgoCD schedules onto pulls
-  the image from a peer over the LAN instead of the origin, and every node
-  that finishes becomes a source for the next — so rollouts finish faster
-  and registry egress stays flat regardless of replica count. The same
-  path covers what preheat can't see coming: a 3am HPA scale-out, a node
-  that joins later, a rescheduled pod.
-- **At steady state**, Angry Duck's node-wide GC keeps disk usage from
-  quietly climbing forever as your pipeline pushes new tags every day —
-  the same system that got the image onto the node in the first place is
-  the one making sure old ones don't just pile up.
+**What it does:** when containerd on any node needs an image, it asks that
+node's Angry Duck worker before origin. If a fresh peer already has the
+exact digest, the worker pulls the whole image from that peer over the
+LAN; containerd never touches origin for the layers.
 
-None of that requires touching ArgoCD or your pipeline's deploy logic —
-Angry Duck adds one webhook call, and one `hosts.toml` per registry that
-it writes itself and removes when it stops. Origin bandwidth, rollout latency, and
-node disk pressure end up being managed as one connected system instead
-of three separate problems nobody owns.
+**How:**
+```
+node B (needs image)                                    node A (has it)
+─────────────────────                                    ────────────────
+containerd:
+ 1. HEAD manifests/<tag> ──────────► origin  (tag → digest, ~300 bytes)
+ 2. GET manifests/<digest> → 127.0.0.1:18081 (B's worker)  ── held ──┐
+                                                                      │
+B's worker:  GET controller/peers?digest=  → [A, …]                  │
+             GET A:18081/export?digest=  ───────────────────────────►A's worker:
+                                                                      │ token ok,
+             socket fd ─► ctr images import --no-unpack -  ◄══ TCP ══│ ctr images
+                          (node's ctr, chrooted)                     │ export -
+             exit 0 → POST controller/announce                       │ (chrooted)
+                                                                      │
+ ◄────────────────────────────────────────────── 404 ────────────────┘
+ 3. GET manifests/<digest> ─────────► origin  (small; blobs already local)
+ 4. every layer already in content store → no fetch → unpack → done
+```
+
+- containerd resolves the **tag** against origin itself — the mirror is
+  registered `capabilities = ["pull"]` only, no `resolve` — so a moved tag
+  can never make a node import a stale image.
+- Only the **manifest-by-digest** request is intercepted and held. The
+  worker asks the controller who holds that digest (an in-memory lookup,
+  no fan-out), orders one to export it, and pipes the TCP socket directly
+  into `ctr images import --no-unpack` — image bytes go kernel-socket to
+  kernel-socket, the worker process never reads them.
+- The import step is `--no-unpack` on purpose: containerd's own pull holds
+  an unpack lock on that same digest before fetching it, so an import that
+  unpacked would deadlock against the pull it's serving. Unpacking still
+  happens once, inside containerd's normal pull, right after.
+- Every hold ends in a 404 — success, failure, or nobody has it — so
+  containerd always falls through to origin on its own. A dead or wedged
+  worker costs a `dial_timeout = "200ms"` connection-refused, not a failed
+  pull. A transfer that outruns `MIRROR_HOLD_TIMEOUT_S` is abandoned the
+  same way, keeping whatever blobs already landed.
+- Multiple pods on one node needing the same digest share one transfer.
+  Sources multiply as nodes finish importing and announce themselves; a
+  busy source (`MIRROR_MAX_EXPORTS` slots full) answers 503 and the
+  requester tries the next candidate.
+- The **whole image** crosses the LAN even if the node already has some of
+  its layers — no per-layer lookups, no layer serving. That's the
+  trade-off for the mechanism being this simple.
+
+Node binaries, not image ones: the worker image contains no `crictl`/`ctr`
+of its own. It runs the node's own copies, chrooted into the node's real
+root (`HOST_ROOT`, `/proc/1/root` by default) — so whatever apt or
+Kubespray installed is exactly what runs, statically or dynamically
+linked, always the current version, with no files copied onto or mounted
+over the node.
+
+## 3. Garbage collection
+
+**What it does:** every `GC_CHECK_INTERVAL_S`, each worker scans *every*
+image on its node — not just ones Angry Duck itself pulled — and removes
+any that's gone unused for `GC_MISS_THRESHOLD` consecutive checks.
+
+**How:**
+- "In use" is decided by **canonical content digest**, not by raw
+  reference string. One piece of content can show up locally under a tag,
+  a digest-pinned ref, and a bare digest — a running container's reported
+  image is only ever one of those aliases, so comparing by digest is what
+  keeps the others from being wrongly treated as separate, removable
+  images.
+- A small always-safe allowlist (`GC_EXCLUDE_IMAGE_SUBSTRINGS`) covers
+  images like `pause`, which Kubernetes runs as a pod sandbox rather than
+  a regular container — no "is this running?" check will ever see it as
+  running, so it's excluded outright instead of being cycled through GC
+  forever.
+- A freshly preheated or pulled image gets a `GC_GRACE_PERIOD_S` window
+  before it's even eligible, so GC can never race a pod that hasn't
+  started yet.
+- `GC_DRY_RUN` defaults to `true`: GC logs exactly what it would remove
+  and why, without deleting anything, until you've watched it decide
+  correctly against your own fleet.
+
+## 4. Pod-watch
+
+**What it does:** every `POD_WATCH_INTERVAL_S`, each worker checks its own
+node's pods for any container stuck in `ImagePullBackOff`/`ErrImagePull`,
+and tries to fix it by importing the image from a peer under its exact
+tag — no containerd pull involved at all.
+
+**Why this is a different problem from the mirror above:** containerd
+resolves a **tag** against origin *before* it ever asks the local mirror
+anything (see [Peer-to-peer mirror](#2-peer-to-peer-mirror)). If that
+resolution itself fails — DNS, network, auth, or just that specific
+registry being unreachable from that specific node — the pull backs off
+right there. It never reaches this worker, so the mirror never gets a
+turn, no matter how many peers already have the image. `crictl`/GC can't
+see this either: kubelet holds a pod in `Init:ImagePullBackOff` before
+ever calling `CreateContainer`, so it's invisible to every other
+mechanism Angry Duck has.
+
+**How:**
+- Needs the RBAC in `deploy/*/rbac.yaml` (`get`/`list` on `pods`,
+  cluster-wide — a stuck pod can be in any namespace). It only ever acts
+  on pods on its own node, enforced by a `fieldSelector` in the request,
+  not by RBAC (Kubernetes has no per-node RBAC scope for pods).
+- For each stuck container's image, it asks the controller
+  `GET /resolve?tag=...` — "what digest has anyone in the fleet most
+  recently observed this tag to mean?" Every worker reports its own local
+  tag→digest mappings alongside the digest set it already reports; the
+  controller keeps whichever digest was most recently *newly* observed
+  for that tag (not just most recently re-reported — see below).
+- If a peer has that digest, the worker imports it (fully unpacked — no
+  containerd pull is holding an unpack lock to finish it for us the way
+  the mirror path relies on) and runs `ctr images tag` to alias it under
+  the *exact* reference the stuck pod is waiting on. kubelet's own
+  `ImageStatus` check then finds it present on its next retry and never
+  calls origin — no need to touch the pod at all.
+- **This is a trust decision, not a confirmation.** Every other path in
+  Angry Duck ultimately defers to origin for what a tag means; this one
+  can't, by construction — origin is exactly what's unreachable. There is
+  deliberately no allowlist restricting which images this applies to.
+  Instead, every fallback attempt logs the digest's age at `WARN`
+  regardless of outcome, and two metrics exist specifically so this
+  doesn't go unnoticed: `angryduck_worker_pod_image_pull_failures_total{node}`
+  (every stuck-pull observation, independent of whether the fix works —
+  "is this node having pull problems at all") and
+  `angryduck_worker_tag_fallback_total{node,result}` (the rescue
+  attempt's own outcome). Watch both.
+- The controller's tag index only advances a digest's "observed" age when
+  the digest for that tag actually *changes* — a node re-reporting the
+  same cached mapping on every heartbeat does not make an old fact look
+  freshly confirmed. This matters because it's the only signal telling
+  you how much to trust a fallback when you can't ask origin.
+- Fails soft: with `MIRROR_ENABLED=false` there's no import mechanism
+  available, so pod-watch still runs and still counts/logs stuck pulls,
+  it just can't repair anything. A retry backoff
+  (`POD_WATCH_RETRY_BACKOFF_S`) keeps a genuinely unfixable image from
+  being retried every poll interval.
 
 ## Architecture
 
@@ -123,85 +204,68 @@ docker push                     - tracks worker freshness            - every REP
                                   who has it (from memory,             images unused for GC_MISS_THRESHOLD
                                   shuffled)                            checks
                                 - POST /announce: a node just        - /v2/ (mirror, loopback only) and
-                                  became a source                      /export (peers, token) — below
+                                  became a source                      /export (peers, token)
 ```
 
-### The peer mirror
+Only `POST /webhook/preheat` is meant to be reachable from outside the
+cluster (`deploy/stg/ingress.yaml` allowlists it alone). `/report`,
+`/peers`, `/announce`, `/status` and every worker endpoint stay on the pod
+network.
 
-```
- node B (needs image)                                              node A (has it)
- ─────────────────────                                             ────────────────
- kubelet → containerd
-   1. HEAD manifests/<tag> ─────────────────► origin   (tag → digest, ~300 bytes)
-   2. GET manifests/<digest> → 127.0.0.1:18081 (B's worker)   ── held ──┐
-                                                                         │
- B's worker:  GET controller/peers?digest=  → [A, …]                     │
-              GET A:18081/export?digest=  ─────────────────────────────► A's worker: token ok,
-                                                                         │  export slot free →
-              socket fd ──► ctr images import --no-unpack -  ◄═══ TCP ═══ ctr images export - <ref>
-                            (node's ctr, chrooted)                       │   (node's ctr, chrooted)
-              exit 0 → POST controller/announce                          │
-                                                                         │
-   ◄──────────────────────────────────────────────── 404 ───────────────┘
-   3. GET manifests/<digest> ───────────────► origin   (small; blobs already local)
-   4. every layer: already in content store → no fetch → unpack → done
-```
+## Requirements
 
-A few properties fall out of this shape:
+**To run at all:**
+- A node binary the worker can shell out to for image listing/pulls:
+  `crictl` (recommended — one `crictl ps -o json` call lists every running
+  container's image; `ctr` needs one subprocess per container) or
+  `docker`.
+- `hostPID: true` and a privileged security context on the worker
+  DaemonSet, so it can chroot into `/proc/1/root` and run the node's own
+  binaries.
+- `NODE_EXPORTER_URL` reachable — the worker reads disk/utilization from
+  node-exporter, so it needs `hostNetwork: true` and node-exporter running
+  the same way.
+- The worker running on **every** node, masters included — GC manages
+  disk everywhere, even on nodes that never receive a preheat order.
+- A `dockerconfigjson` mounted and `REGISTRY_CREDENTIALS_PATH` pointed at
+  it, for any registry that isn't public. The worker pulls by shelling out
+  to the runtime CLI directly, bypassing kubelet's CRI plumbing — so a
+  Pod's own `imagePullSecrets` do nothing for images the worker decides to
+  pull on its own.
 
-- **The mirror only ever sees digests.** `hosts.toml` gives it
-  `capabilities = ["pull"]` — no `resolve` — so containerd resolves tags
-  against origin itself. A moved tag can never make a node import a stale
-  image, and origin's answer is always the one that wins.
-- **Preheat seeds, the mirror spreads.** A push preheats exactly
-  `RANK_TOP_N` nodes from origin and stops; a node that needs the image
-  later gets it from one of them, or from any node that got it since.
-- **Every answer is a 404.** After a successful import, after a failed one,
-  and instantly when nobody has the image. containerd falls through to
-  origin on any mirror error, so a dead or wedged worker costs a
-  connection-refused, not a failed pull (`dial_timeout = "200ms"`).
-- **One transfer per image per node.** Ten pods on one node needing the
-  same image hold ten requests on one transfer.
-- **Sources multiply.** A node that finishes importing announces itself,
-  so the next requester can pick it. Sources that are busy (every
-  `MIRROR_MAX_EXPORTS` slot taken for `MIRROR_QUEUE_WAIT_S`) answer 503 and
-  the requester tries the next candidate, then re-asks the controller a
-  second later.
-- **`--no-unpack` is load-bearing.** containerd's pull takes an unpack lock
-  on the manifest digest *before* fetching it — the fetch we are holding.
-  An import that unpacked would wait for that lock: pull waits on us, we
-  wait on the import, the import waits on the pull. (Found against a real
-  containerd; the import sat in `Unpacker.lockBlobDescriptor` with every
-  byte received.) Landing blobs only, and letting the pull unpack them
-  once, avoids the lock and is the same unpack work any pull does anyway.
-- **Bounded, never duplicated.** At `MIRROR_HOLD_TIMEOUT_S` the transfer is
-  killed and containerd goes to origin, keeping whatever blobs already
-  landed — peer and origin never download the same bytes.
-- **The whole image crosses the LAN**, even if the receiving node already
-  has some of its layers. That's the trade for having no layer lookups at
-  all; LAN bytes are cheap next to origin bytes.
+**To also run the peer-to-peer mirror** (`MIRROR_ENABLED=true`):
+- `ctr` present on the node (crictl has no export/import verbs) — every
+  containerd node already has it.
+- containerd's CRI registry `config_path` set to `/etc/containerd/certs.d`
+  (needs one containerd restart if it isn't already — Spegel requires the
+  same setting, so clusters running Spegel already have it). The worker
+  warns at startup if it isn't set; without it, every `hosts.toml` it
+  writes is dead text.
+- **`discard_unpacked_layers` must be `false`** in containerd's config.
+  When `true`, containerd deletes a layer's compressed blob from the
+  content store right after unpacking it — which is exactly what the
+  mirror needs to still be there to serve to a peer later. With it left
+  `true`, exports silently start failing "not found" for images that are
+  otherwise running fine. This is a node-level containerd setting, not
+  per-tool, so fixing it for Spegel fixes it for Angry Duck too.
+- The `angryduck-mirror` Secret (`MIRROR_PEER_TOKEN`) created **before**
+  the DaemonSet — workers exit and CrashLoop without it, and pick it up
+  cleanly on their next restart once it exists.
+- No other tool (Spegel, an Ansible role) already owning a
+  `certs.d/<registry>/hosts.toml` for a registry you want Angry Duck to
+  cover — containerd uses a registry's own directory *instead of*
+  `_default`, so such a file silently shadows the mirror for that
+  registry. The worker warns at startup for each one it finds; it never
+  touches a file it didn't write.
 
-### Node binaries, not image binaries
-
-The worker image contains the worker and nothing else. crictl, ctr (and
-docker, if you use that backend) are the node's own, run with each child
-process chrooted into the node's root — `HOST_ROOT=/proc/1/root` by
-default, which with `hostPID: true` is the node's real root with every
-live mount under it.
-
-- **Whatever the node has is what runs.** Kubespray's `/usr/local/bin/ctr`
-  or apt's `/usr/bin/ctr`, static or dynamically linked — the child uses
-  the node's loader and libc. (apt's ctr *is* dynamic; a copy in a
-  distroless image could never run it.)
-- **apt works as is.** Nothing is copied onto, mounted over, or pinned from
-  the node. A single-file bind mount would keep running the old inode after
-  an upgrade; here the next exec simply runs the new file.
-- **The node's config applies.** The child reads the node's
-  `/etc/crictl.yaml` and sees the node's socket path; it gets a minimal
-  environment so the pod's env vars can't override the node's config.
-- **Missing binary = loud failure.** The worker exits at startup if the
-  node lacks the CLI `CONTAINER_RUNTIME` needs. ctr missing only disables
-  the mirror, with a log line saying so.
+**To also run pod-watch** (`POD_WATCH_ENABLED=true`, the default):
+- The RBAC in `deploy/*/rbac.yaml` applied — a `ServiceAccount` bound to
+  a `ClusterRole` granting `get`/`list` on `pods`, and the DaemonSet's
+  `serviceAccountName` set to it. Without this, pod-watch logs why it
+  can't start and the worker otherwise runs normally.
+- Meaningfully useful only alongside the mirror (`MIRROR_ENABLED=true`):
+  without it, pod-watch still polls and logs/counts stuck pulls, but has
+  no import mechanism to actually fix anything.
 
 ## Quick start
 
@@ -250,35 +314,21 @@ for the full annotated list. The highlights:
 | `MIRROR_PEER_TOKEN` | (empty) | shared secret for `/export`; required, from the `angryduck-mirror` Secret |
 | `MIRROR_HOLD_TIMEOUT_S` | 60 | longest a containerd pull waits on a peer transfer |
 | `MIRROR_MAX_EXPORTS` / `MIRROR_MAX_IMPORTS` | 2 / 2 | concurrent ctr transfer processes per node |
+| `POD_WATCH_ENABLED` | true | rescue pods stuck in ImagePullBackOff by importing their image from a peer under its exact tag |
+| `POD_WATCH_INTERVAL_S` | 30 | how often to poll this node's pods for stuck pulls |
+| `POD_WATCH_RETRY_BACKOFF_S` | 300 | how long to wait before retrying a fix that just failed |
 
 Real environment variables (a k8s ConfigMap, in practice — see
 `deploy/stg/configmap.yaml`) always win over `.env` file values.
-
-**On `CONTAINER_RUNTIME`:** stick with `crictl`. The mirror uses `ctr`
-for export/import either way (crictl has no such verbs), so a node needs
-both — which every containerd node already has. It lists every running
-container's image in one `crictl ps -o json` call; the `containerd`
-backend has to shell out to `ctr containers info <id>` once *per
-container*, which is enough subprocess overhead on a busy node to blow
-past a worker's own CPU limit. Only use `containerd` if `crictl` genuinely
-isn't available.
-
-**On registry credentials:** the worker pulls by shelling out to the
-runtime CLI directly, which bypasses kubelet's CRI plumbing entirely — so
-a Pod's `imagePullSecrets` (which only kubelet honors) does nothing for
-images the worker decides to pull on its own. Mount the same
-`dockerconfigjson` secret and point `REGISTRY_CREDENTIALS_PATH` at it;
-`deploy/stg/worker-daemonset.yaml` already does this. Leave it unset if
-every image you'll preheat is public.
 
 ## Deploying
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.1 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.1 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.1
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.1
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.3 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.3 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.3
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.3
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. The peer-transfer token — BEFORE the DaemonSet (once per cluster).
@@ -297,41 +347,9 @@ sudo kubectl apply -f deploy/stg/worker-daemonset.yaml
 sudo kubectl apply -f deploy/stg/ingress.yaml
 ```
 
-Then point the pipeline at it, right after `docker push`:
-
-```bash
-curl -X POST https://angryduck-webhook.internal-registry.example.com/webhook/preheat \
-  -H 'Content-Type: application/json' \
-  -d "{\"image\":\"$IMAGE_REF\"}"
-```
-
-`/report`, `/peers`, `/announce`, `/status`, and `/healthz` are deliberately **not** in the
-Ingress's path rules — only `/webhook/preheat` is reachable from outside
-the cluster, and only from the allowlisted IP range. Worker-to-controller
-traffic never leaves the pod network.
-
-A few things worth knowing about the worker DaemonSet: it needs
-`hostNetwork: true`, `hostPID: true` and a privileged security context —
-that is what lets it run the node's binaries through `/proc/1/root`, so no
-socket or binary volumes are mounted; `NODE_EXPORTER_URL` assumes
-node-exporter also runs `hostNetwork` on each node; and it should run on
-every node, master/control-plane included, since GC needs to manage disk
-everywhere even where preheat targets are never chosen.
-
-For the mirror, containerd's CRI registry `config_path` must point at
-`/etc/containerd/certs.d` (the worker warns at startup if not). With
-`MIRROR_REGISTRIES: "*"` the worker writes `certs.d/_default/hosts.toml` on
-start and deletes it on stop, which covers every registry that has no
-`certs.d/<host>/` directory of its own. containerd reads a registry's own
-directory *instead of* `_default`, so any such directory — Kubespray's
-`containerd_registries_mirrors`, or leftovers from Spegel — means that
-registry bypasses the mirror; the worker names each one in a WARN at
-startup. It never modifies a `hosts.toml` it didn't write, including a
-foreign `_default`.
-
-To turn the mirror off on a cluster: `MIRROR_ENABLED: "false"` and roll the
-DaemonSet. Each worker deletes its `hosts.toml` as it stops, and
-containerd goes straight to origin from the next pull on.
+To turn the mirror off on a running cluster: set `MIRROR_ENABLED=false`
+and roll the DaemonSet. Each worker deletes its `hosts.toml` as it stops,
+and containerd goes straight to origin from the next pull on.
 
 ## API summary
 
@@ -341,6 +359,10 @@ containerd goes straight to origin from the next pull on.
 - `POST /report` — workers call this themselves.
 - `GET /peers?digest=sha256:…&node=<asker>` — up to `MIRROR_PEER_CANDIDATES`
   fresh workers holding that digest, shuffled.
+- `GET /resolve?tag=<name:tag>&node=<asker>` — the fleet's most recently
+  observed digest for that tag, and how long it's been the answer. `404`
+  if nobody's ever reported it. Used only by pod-watch's fallback path,
+  when origin itself can't resolve a tag.
 - `POST /announce` — `{"node_id","digest"}`, a worker just imported it.
 - `GET /status` — every known worker plus the active target.
 - `GET /healthz` — liveness/readiness.
@@ -369,33 +391,23 @@ running from a distroless-style root:
 | `ctr images export` (new, source node) | ~30 MiB | 0.72 s / 150 MiB | per peer served |
 | `ctr images import --no-unpack` (new, receiving node) | ~34 MiB | 0.76 s / 150 MiB | per peer import |
 
-What that means:
-
-- **Idle cost is lower than before.** The mirror adds no timers and no
-  runtime calls of its own — it reads the image listing the reporter
-  already takes, and GC now reuses that same listing instead of running
-  its own (`crictl images` 5→4 times a minute).
-- **A transfer costs ~30–35 MiB and ~5 ms of CPU per MiB on each end, only
-  while it runs.** Those `ctr` children live in the worker pod's cgroup,
-  which is why the DaemonSet limits moved: memory 64Mi→192Mi (worst case
-  ≈ 6 + 2×31 + 2×34 + 20 + 25 ≈ 181 MiB with the default 2 exports + 2
-  imports) and CPU 200m→1 (at 200m a 150 MiB image needs ≥3.8 s of
-  throttled CPU per side, ~40 MiB/s — slower than the LAN). Requests are
-  unchanged; limits reserve nothing. Setting `MIRROR_MAX_EXPORTS=1` and
-  `MIRROR_MAX_IMPORTS=1` brings the memory worst case to ~115 MiB (128Mi
-  limit) at the cost of slower fan-out.
-- **Decompression and unpacking don't move.** They happen inside
-  containerd, exactly as for any pull.
-- **The controller** holds one digest set per node (a few KB each) and
-  answers `/peers` from memory.
+A transfer costs ~30–35 MiB and ~5 ms of CPU per MiB on each end, only
+while it runs — which is why the DaemonSet limits are memory 192Mi (worst
+case ≈ 6 + 2×31 + 2×34 + 20 + 25 ≈ 181 MiB with the default 2 exports + 2
+imports) and CPU 1 core (at 200m a 150 MiB image needs ≥3.8 s of throttled
+CPU per side, ~40 MiB/s — slower than the LAN). Setting
+`MIRROR_MAX_EXPORTS=1` and `MIRROR_MAX_IMPORTS=1` brings the memory worst
+case to ~115 MiB at the cost of slower fan-out. Decompression and
+unpacking don't move — they happen inside containerd, exactly as for any
+pull. The controller holds one digest set per node (a few KB each) and
+answers `/peers` from memory.
 
 containerd 1.7's `ctr` runs import client-side rather than through the
 transfer service, so expect the same order of magnitude but not identical
-numbers — `container_memory_working_set_bytes` for the worker pods during a
-stg rollout is the real check.
-
-In that test the peer-assisted pull took 4.7 s end to end, and origin saw
-exactly one `HEAD` (tag) and one manifest `GET` — zero layer downloads.
+numbers — `container_memory_working_set_bytes` for the worker pods during
+a stg rollout is the real check. In that 150 MiB test the peer-assisted
+pull took 4.7 s end to end, and origin saw exactly one `HEAD` (tag) and
+one manifest `GET` — zero layer downloads.
 
 ## Metrics
 
@@ -405,17 +417,32 @@ Worker (`:18081/metrics`): `angryduck_worker_mirror_transfers_total{result}`
 `angryduck_worker_mirror_exports_total{result}`, and
 `angryduck_worker_mirror_bytes_total{direction}` — `in` is origin traffic
 avoided, read from the socket's `TCP_INFO` since the worker never sees the
-bytes. Controller: `angryduck_controller_peer_lookups_total{result}`.
+bytes. Pod-watch: `angryduck_worker_pod_image_pull_failures_total{node}`
+(every stuck-pull observation on this node, regardless of whether a fix
+was attempted or succeeded) and `angryduck_worker_tag_fallback_total{node,result}`
+(the rescue attempt's own outcome — `hit`, `hit_local`, `no_digest`,
+`no_peer`, `import_failed`, `tag_failed`, `resolve_error`,
+`peer_lookup_failed`). Controller: `angryduck_controller_peer_lookups_total{result}`
+and `angryduck_controller_resolve_lookups_total{result}`.
 
 ## Logging
 
 Every line is tagged `[DEBUG]`/`[INFO]`/`[WARN]`/`[ERROR]`, filtered by
-`LOG_LEVEL`. `info` (the default) already shows GC's reasoning — tick
-summaries, miss-count progress, what got removed and why — without the
-per-image "yes, this is fine" noise that `debug` adds on top.
+`LOG_LEVEL`. At `info` (the default) you'll see, per peer-transfer
+attempt: the controller offering (or failing to find) peers for a digest,
+the worker's own transfer outcome (`hit`/`miss`/`failed`/`busy`/`timeout`)
+with timing, and every actual import/export as it happens — plus GC's
+tick summaries and what it removed and why. Switch to `debug` for the
+full play-by-play of one transfer: the manifest request being held, which
+candidate peers were tried and in what order, busy-peer retries, and
+local/joined/cancelled outcomes that `info` doesn't surface individually.
 
 ## Testing
 
 ```bash
 go test ./...
 ```
+
+`internal/worker`'s tests include one (`TestHostExec_RealChrootExecution`)
+that performs an actual `chroot(2)` against a fake host root — it needs
+`CAP_SYS_CHROOT` and is skipped, not failed, when not running as root.

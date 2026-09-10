@@ -69,3 +69,8 @@ data:
   MIRROR_HOSTS_DIR: "/etc/containerd/certs.d"
   MIRROR_PEER_CANDIDATES: "3"
   # MIRROR_PEER_TOKEN comes from the angryduck-mirror Secret, not here.
+
+  # --- Pod-watch (see .env.example for the full story) ---
+  POD_WATCH_ENABLED: "true"
+  POD_WATCH_INTERVAL_S: "30"
+  POD_WATCH_RETRY_BACKOFF_S: "300"

@@ -104,8 +104,16 @@ func main() {
 	mirrorRegistries := config.StringSlice("MIRROR_REGISTRIES", []string{"*"})
 	mirrorToken := config.String("MIRROR_PEER_TOKEN", "")
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s mirror=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, mirrorEnabled)
+	// Defaults to true: a pod stuck in ImagePullBackOff because origin
+	// itself can't resolve the tag is invisible to everything else Angry
+	// Duck does (GC and the mirror both only ever see containerd/CRI
+	// state, which a pod this stuck never reaches). See podwatch.go.
+	podWatchEnabled := config.Bool("POD_WATCH_ENABLED", true)
+	podWatchInterval := config.Duration("POD_WATCH_INTERVAL_S", 30)
+	podWatchBackoff := config.Duration("POD_WATCH_RETRY_BACKOFF_S", 300)
+
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s mirror=%v pod_watch=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, mirrorEnabled, podWatchEnabled)
 
 	hx, err := worker.NewHostExec(hostRoot)
 	if err != nil {
@@ -138,6 +146,29 @@ func main() {
 
 	go reporter.Run(ctx)
 	go gc.Run(ctx)
+
+	// Pod-watch: fixes a pod stuck in ImagePullBackOff by importing its
+	// image from a peer under its exact tag, for the case the mirror
+	// above can never help with — tag resolution against origin itself
+	// failing, so containerd's pull never even reaches this worker. See
+	// internal/worker/podwatch.go. Runs by default; the fix mechanism
+	// itself (Mirror.FallbackImport) needs the mirror, so with
+	// MIRROR_ENABLED=false pod-watch still runs and still counts failed
+	// pulls for visibility, it just can't repair anything.
+	if podWatchEnabled {
+		if k8sClient, err := worker.NewInClusterK8sClient(); err != nil {
+			log.Printf("angryduck-worker[%s]: POD_WATCH_ENABLED=true but not usable: %v — pod-watch disabled", nodeID, err)
+		} else {
+			var fix func(context.Context, string) error
+			if mirror != nil {
+				fix = mirror.FallbackImport
+			} else {
+				log.Printf("angryduck-worker[%s]: pod-watch running without a fix mechanism (MIRROR_ENABLED=false) — it will only count and log stuck pulls", nodeID)
+			}
+			pw := worker.NewPodWatch(nodeID, k8sClient, podWatchInterval, podWatchBackoff, fix)
+			go pw.Run(ctx)
+		}
+	}
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
