@@ -20,8 +20,28 @@ type WorkerReport struct {
 	// between tags of the same image. Omitted (nil/empty) is always safe
 	// — the ranker just falls back to utilization-only ranking for that
 	// node, identical to its behavior before this field existed.
-	Repos     []string  `json:"repos,omitempty"`
+	Repos []string `json:"repos,omitempty"`
+	// Digests is every manifest (or index) digest present locally and
+	// exportable — the exact identity containerd asks a registry mirror
+	// for. The controller answers /peers from this. Omitted is safe: the
+	// node just never gets chosen as a transfer source.
+	Digests   []string  `json:"digests,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// PeersResponse is the controller's answer to GET /peers?digest=...:
+// addresses of fresh workers that reported having that digest, already
+// shuffled so concurrent requesters spread across sources.
+type PeersResponse struct {
+	Peers []string `json:"peers"`
+}
+
+// Announce is sent by a worker right after an image lands via peer
+// transfer, so it becomes a source for others at once instead of at its
+// next periodic report.
+type Announce struct {
+	NodeID string `json:"node_id"`
+	Digest string `json:"digest"`
 }
 
 // ReportAck is returned to a worker after it submits a report.
@@ -65,6 +85,7 @@ type WorkerStatus struct {
 	Address     string    `json:"address"`
 	Utilization float64   `json:"utilization"`
 	Repos       []string  `json:"repos,omitempty"`
+	DigestCount int       `json:"digest_count"`
 	LastSeen    time.Time `json:"last_seen"`
 	Fresh       bool      `json:"fresh"`
 }

@@ -76,6 +76,8 @@ var imagesDeletedTotal = metrics.NewCounterVec(
 //     failed).
 type GC struct {
 	runtime           Runtime
+	inventory         *Inventory
+	listMaxAge        time.Duration
 	puller            *Puller
 	interval          time.Duration
 	missThreshold     int
@@ -93,9 +95,15 @@ type GC struct {
 // each local image reference; any match is spared unconditionally, without
 // ever being asked whether it's running — see the pause-image note above
 // for why that distinction matters. Pass nil to exclude nothing.
-func NewGC(runtime Runtime, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string, nodeID string) *GC {
+//
+// inventory supplies the local image listing; a listing no older than
+// listMaxAge (the report interval, in practice) is reused instead of
+// running the runtime's image listing again — see Inventory.
+func NewGC(runtime Runtime, inventory *Inventory, listMaxAge time.Duration, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string, nodeID string) *GC {
 	return &GC{
 		runtime:           runtime,
+		inventory:         inventory,
+		listMaxAge:        listMaxAge,
 		puller:            puller,
 		interval:          interval,
 		missThreshold:     missThreshold,
@@ -140,12 +148,13 @@ func (g *GC) tick() {
 		logging.Debugf("angryduck-worker-gc: pruned %d expired pull-order record(s) from the puller's grace-period tracker", pruned)
 	}
 
-	// One call for both the local ref list and the digest map — these used
-	// to be two separate Runtime calls (ListLocalImages + ImageDigests)
-	// that each independently shelled out to and parsed the exact same
-	// underlying command (e.g. `crictl images -o json`), doubling that
-	// work every tick for no benefit. See Runtime.LocalImages doc comment.
-	local, digests, err := g.runtime.LocalImages()
+	// One listing for both the local ref list and the digest map, and
+	// usually not even a fresh one: the reporter refreshes the shared
+	// inventory every REPORT_INTERVAL_S, so GC reuses that listing rather
+	// than running `crictl images -o json` a second time for the same
+	// answer. Only if the reporter hasn't listed recently (node-exporter
+	// down, say) does GC list for itself.
+	local, digests, err := g.inventory.Get(g.listMaxAge)
 	if err != nil {
 		logging.Errorf("angryduck-worker-gc: failed to list local images: %v", err)
 		return

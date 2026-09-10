@@ -12,23 +12,30 @@ import (
 	"angryduck/internal/model"
 )
 
+// peerLookupsTotal counts /peers answers: found means at least one node
+// could serve the digest, none means the requester went to origin.
+var peerLookupsTotal = metrics.NewCounterVec(
+	"angryduck_controller_peer_lookups_total",
+	"Peer lookups answered for worker mirrors, by result.",
+	"result",
+)
+
 // Server wires the registry + ranker up to HTTP handlers.
 type Server struct {
-	registry             *Registry
-	ranker               *Ranker
-	peerSourceCandidates int
-	mux                  *http.ServeMux
+	registry       *Registry
+	ranker         *Ranker
+	peerCandidates int
+	mux            *http.ServeMux
 }
 
-// NewServer builds a Server with routes registered.
-func NewServer(registry *Registry, ranker *Ranker, peerSourceCandidates int) *Server {
-	if peerSourceCandidates < 1 {
-		peerSourceCandidates = 1
-	}
-	s := &Server{registry: registry, ranker: ranker, peerSourceCandidates: peerSourceCandidates, mux: http.NewServeMux()}
+// NewServer builds a Server with routes registered. peerCandidates caps
+// how many sources one /peers answer lists.
+func NewServer(registry *Registry, ranker *Ranker, peerCandidates int) *Server {
+	s := &Server{registry: registry, ranker: ranker, peerCandidates: peerCandidates, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
 	s.mux.HandleFunc("/report", s.handleReport)
-	s.mux.HandleFunc("/peer/source", s.handlePeerSource)
+	s.mux.HandleFunc("/peers", s.handlePeers)
+	s.mux.HandleFunc("/announce", s.handleAnnounce)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.Handle("/metrics", metrics.Handler())
 	s.mux.HandleFunc("/healthz", s.handleHealth)
@@ -97,28 +104,6 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePeerSource returns a very small candidate set based only on the
-// controller's repo-level inventory. Exact image presence and digest are
-// verified directly by the candidate worker before any bytes move.
-func (s *Server) handlePeerSource(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req model.PeerSourceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
-		return
-	}
-	image := imageref.Normalize(strings.TrimSpace(req.Image))
-	if image == "" || req.TargetNode == "" {
-		writeJSON(w, http.StatusBadRequest, model.PeerSourceResponse{})
-		return
-	}
-	candidates := s.registry.PeerCandidates(image, req.TargetNode, s.peerSourceCandidates)
-	writeJSON(w, http.StatusOK, model.PeerSourceResponse{Candidates: candidates})
-}
-
 // handleReport ingests periodic disk-utilization reports from workers.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -140,6 +125,43 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	s.registry.Update(rep)
 	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%%", rep.NodeID, rep.Address, rep.Utilization*100)
 	writeJSON(w, http.StatusOK, model.ReportAck{Accepted: true})
+}
+
+// handlePeers tells a worker's mirror which nodes can export a digest.
+// Answered entirely from memory: no fan-out, no calls to workers.
+func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	digest := r.URL.Query().Get("digest")
+	if !strings.HasPrefix(digest, "sha256:") {
+		http.Error(w, "digest required", http.StatusBadRequest)
+		return
+	}
+	peers := s.registry.PeersFor(digest, r.URL.Query().Get("node"), s.peerCandidates)
+	if len(peers) == 0 {
+		peerLookupsTotal.Inc("none")
+	} else {
+		peerLookupsTotal.Inc("found")
+	}
+	logging.Debugf("angryduck-controller: peers for %s (asked by %s): %v", digest, r.URL.Query().Get("node"), peers)
+	writeJSON(w, http.StatusOK, model.PeersResponse{Peers: peers})
+}
+
+// handleAnnounce records a digest a worker just imported from a peer.
+func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var a model.Announce
+	if err := json.NewDecoder(r.Body).Decode(&a); err != nil || a.NodeID == "" || a.Digest == "" {
+		http.Error(w, "node_id and digest required", http.StatusBadRequest)
+		return
+	}
+	s.registry.Announce(a.NodeID, a.Digest)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleStatus is a debug endpoint showing the full worker registry and

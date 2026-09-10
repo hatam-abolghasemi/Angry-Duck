@@ -323,20 +323,3 @@ func TestRankerLocalityMatchesByRepoNotTag(t *testing.T) {
 func (rk *Ranker) tickForTest(image string) []string {
 	return rk.orderLowestN(image)
 }
-
-func TestRegistryPeerCandidates(t *testing.T) {
-	r := NewRegistry(time.Minute, time.Minute)
-	now := time.Now()
-	r.Update(model.WorkerReport{NodeID: "target", Address: "target:18081", Utilization: 0.1, Repos: []string{"registry.example.com/app"}, Timestamp: now})
-	r.Update(model.WorkerReport{NodeID: "source-low", Address: "source-low:18081", Utilization: 0.2, Repos: []string{"registry.example.com/app"}, Timestamp: now})
-	r.Update(model.WorkerReport{NodeID: "source-high", Address: "source-high:18081", Utilization: 0.8, Repos: []string{"registry.example.com/app"}, Timestamp: now})
-	r.Update(model.WorkerReport{NodeID: "other", Address: "other:18081", Utilization: 0.01, Repos: []string{"registry.example.com/other"}, Timestamp: now})
-
-	got := r.PeerCandidates("registry.example.com/app:1.2.3", "target", 2)
-	if len(got) != 2 {
-		t.Fatalf("got %d candidates, want 2: %v", len(got), got)
-	}
-	if got[0].NodeID != "source-low" || got[1].NodeID != "source-high" {
-		t.Fatalf("unexpected candidate ordering: %v", got)
-	}
-}

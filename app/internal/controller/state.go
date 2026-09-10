@@ -1,11 +1,10 @@
 package controller
 
 import (
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
-
-	"angryduck/internal/imageref"
 
 	"angryduck/internal/model"
 )
@@ -20,7 +19,11 @@ type workerEntry struct {
 	// because the ranker's only use of it is an O(1) "does this node
 	// already have repo X" membership check per candidate, per preheat —
 	// never iteration over the full list.
-	Repos    map[string]struct{}
+	Repos map[string]struct{}
+	// Digests is the set of manifest digests this node can export to a
+	// peer. Replaced wholesale by each report; extended between reports
+	// by /announce as peer transfers land.
+	Digests  map[string]struct{}
 	LastSeen time.Time
 }
 
@@ -81,6 +84,59 @@ func (r *Registry) Update(rep model.WorkerReport) {
 		}
 	}
 	w.Repos = repos
+
+	digests := make(map[string]struct{}, len(rep.Digests))
+	for _, d := range rep.Digests {
+		if d != "" {
+			digests[d] = struct{}{}
+		}
+	}
+	w.Digests = digests
+}
+
+// Announce adds one digest to a known worker between reports. Unknown
+// workers are ignored — they'll show up with their first report.
+func (r *Registry) Announce(nodeID, digest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workers[nodeID]
+	if !ok || digest == "" {
+		return false
+	}
+	// Copy-on-write, same reasoning as Update: never mutate a map a
+	// FreshWorkers() snapshot may be reading.
+	next := make(map[string]struct{}, len(w.Digests)+1)
+	for d := range w.Digests {
+		next[d] = struct{}{}
+	}
+	next[digest] = struct{}{}
+	w.Digests = next
+	return true
+}
+
+// PeersFor returns up to limit addresses of fresh workers holding digest,
+// excluding the asking node, in random order. Random rather than ranked:
+// during a rollout dozens of nodes ask at once, and a shuffle spreads
+// them over every source without the controller tracking who is busy —
+// sources that are busy say so themselves (503) and requesters move on.
+func (r *Registry) PeersFor(digest, excludeNode string, limit int) []string {
+	r.mu.RLock()
+	now := time.Now()
+	var out []string
+	for id, w := range r.workers {
+		if id == excludeNode || !r.isFresh(w, now) {
+			continue
+		}
+		if _, ok := w.Digests[digest]; ok {
+			out = append(out, w.Address)
+		}
+	}
+	r.mu.RUnlock()
+	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // isFresh reports whether a worker has reported within staleAfter of now.
@@ -139,30 +195,6 @@ func (r *Registry) CurrentTarget() (image string, setAt time.Time, active bool) 
 	return r.targetImage, r.targetSetAt, true
 }
 
-// PeerCandidates returns fresh workers that report the target image's repo,
-// excluding the requesting node. The controller intentionally does not need
-// exact tag/digest state here; the target probes candidates directly before
-// starting a transfer. Results retain the existing utilization ordering.
-func (r *Registry) PeerCandidates(image, targetNode string, limit int) []model.PeerSourceCandidate {
-	repo := imageref.Repo(image)
-	if repo == "" || limit <= 0 {
-		return nil
-	}
-
-	fresh := r.FreshWorkers()
-	out := make([]model.PeerSourceCandidate, 0, limit)
-	for _, w := range fresh {
-		if w.NodeID == targetNode || !w.HasRepo(repo) || w.Address == "" {
-			continue
-		}
-		out = append(out, model.PeerSourceCandidate{NodeID: w.NodeID, Address: w.Address})
-		if len(out) >= limit {
-			break
-		}
-	}
-	return out
-}
-
 // Snapshot builds the full debug view served at /status.
 func (r *Registry) Snapshot() model.ControllerStatus {
 	r.mu.RLock()
@@ -182,6 +214,7 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 			Address:     w.Address,
 			Utilization: w.Utilization,
 			Repos:       repos,
+			DigestCount: len(w.Digests),
 			LastSeen:    w.LastSeen,
 			Fresh:       r.isFresh(w, now),
 		})

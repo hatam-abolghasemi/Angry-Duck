@@ -3,35 +3,17 @@ WORKDIR /src
 COPY go.mod ./
 COPY internal ./internal
 COPY cmd/worker ./cmd/worker
-RUN CGO_ENABLED=0 go build -o /out/angryduck-worker ./cmd/worker
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/angryduck-worker ./cmd/worker
 
-# The worker shells out to a CLI for image operations — crictl by default
-# (CONTAINER_RUNTIME=crictl), with ctr available as a fallback
-# (CONTAINER_RUNTIME=containerd; see the comment on worker.NewRuntime for
-# why crictl is preferred: it lists every running container's image in one
-# call, where ctr needs one subprocess per container). Rather than
-# installing the full containerd daemon package or a Python/glibc cri-tools
-# build just to get two CLI binaries, pull both straight from their
-# official *static* release tarballs — no glibc dependency for either,
-# verified with `ldd` (reports "not a dynamic executable" for both) —
-# letting the final image stay on distroless/static instead of needing a
-# glibc-based distroless variant. (docker's CLI, unlike these two, *is*
-# glibc-dynamic — if you switch to CONTAINER_RUNTIME=docker you'll need
-# distroless/base or distroless/cc instead.)
-FROM alpine:3.24.1 AS cli-fetch
-ARG CONTAINERD_VERSION=2.3.4
-ARG CRICTL_VERSION=1.37.0
-ARG TARGETARCH=amd64
-RUN apk add --no-cache curl && \
-    curl -fsSL -o /tmp/containerd.tgz \
-      "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-static-${CONTAINERD_VERSION}-linux-${TARGETARCH}.tar.gz" && \
-    tar -C /tmp -xzf /tmp/containerd.tgz bin/ctr && \
-    curl -fsSL -o /tmp/crictl.tgz \
-      "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${CRICTL_VERSION}/crictl-v${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz" && \
-    tar -C /tmp -xzf /tmp/crictl.tgz crictl
-
+# No crictl, ctr or docker in here. The worker runs the node's own copies,
+# chrooted into the node's root filesystem (HOST_ROOT, default
+# /proc/1/root — see internal/worker/hostexec.go), so:
+#   - the node's version always runs: whatever apt or Kubespray installed,
+#     static or dynamically linked (apt's ctr is dynamic — a copy in this
+#     image could never have run it);
+#   - apt keeps sole ownership of those files; nothing here pins, shadows
+#     or replaces them, and an upgrade takes effect on the next exec;
+#   - this image is one static binary on distroless/static.
 FROM gcr.io/distroless/static-debian13
 COPY --from=build /out/angryduck-worker /angryduck-worker
-COPY --from=cli-fetch /tmp/bin/ctr /usr/local/bin/ctr
-COPY --from=cli-fetch /tmp/crictl /usr/local/bin/crictl
 ENTRYPOINT ["/angryduck-worker"]

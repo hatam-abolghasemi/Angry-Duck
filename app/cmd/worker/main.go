@@ -3,7 +3,11 @@
 // pull orders the controller sends it, and garbage-collects images that
 // have fallen out of use — while protecting freshly-ordered images with a
 // short grace period so they don't get GC'd before Argo ever schedules a
-// pod that needs them.
+// pod that needs them. With MIRROR_ENABLED it also sits in front of the
+// origin registry for containerd and satisfies pulls from peer nodes.
+//
+// It carries no container CLIs of its own: crictl/ctr/docker are the
+// node's binaries, run chrooted into HOST_ROOT (see worker.HostExec).
 package main
 
 import (
@@ -39,7 +43,6 @@ func main() {
 		nodeID = hostname
 	}
 
-	nodeIP := config.String("NODE_IP", "")
 	selfAddress := config.String("SELF_ADDRESS", "")
 	if selfAddress == "" {
 		log.Fatalf("angryduck-worker: SELF_ADDRESS must be set to a controller-reachable host or host:port (e.g. pod IP via downward API)")
@@ -61,7 +64,6 @@ func main() {
 	gcMissThreshold := config.Int("GC_MISS_THRESHOLD", 5)
 	gracePeriod := config.Duration("GC_GRACE_PERIOD_S", 60)
 	gcExcludeSubstrings := config.StringSlice("GC_EXCLUDE_IMAGE_SUBSTRINGS", nil)
-	// Kubespray installs its node-managed binaries under /usr/local/bin by default.
 	// crictl is the default: unlike ctr, it lists every running
 	// container's image in one call instead of one subprocess per
 	// container — see the comment on NewRuntime for why this matters.
@@ -74,17 +76,6 @@ func main() {
 	// matching logic, watch what GC decides via logs before letting it
 	// actually delete anything. Set GC_DRY_RUN=false to enable real removal.
 	gcDryRun := config.Bool("GC_DRY_RUN", true)
-	ctrPath := resolveToolPath(config.String("CTR_PATH", "/host/usr/local/bin/ctr"), "/usr/local/bin/ctr")
-	crictlPath := resolveToolPath(config.String("CRICTL_PATH", "/host/usr/local/bin/crictl"), "/usr/local/bin/crictl")
-	registryEnabled := config.Bool("REGISTRY_MIRROR_ENABLED", true)
-	registryListenAddr := config.String("REGISTRY_LISTEN_ADDR", ":5000")
-	registryMaxStreams := config.Int("REGISTRY_MAX_CONCURRENT_STREAMS", 4)
-	registryCandidateLimit := config.Int("P2P_SOURCE_CANDIDATES", 3)
-	registryCandidateCacheTTL := config.Duration("REGISTRY_CANDIDATE_CACHE_S", 1)
-	inventoryCacheTTL := config.Duration("IMAGE_INVENTORY_CACHE_S", 10)
-	containerdCertsDir := config.String("CONTAINERD_CERTS_DIR", "/host/etc/containerd/certs.d")
-	containerdPath := config.String("CONTAINERD_PATH", "/host/usr/local/bin/containerd")
-	containerdConfigPath := config.String("CONTAINERD_CONFIG_PATH", "/host/etc/containerd/config.toml")
 
 	// The worker pulls images by shelling out directly to the container
 	// runtime CLI, bypassing kubelet's CRI plumbing entirely — so
@@ -102,72 +93,127 @@ func main() {
 		log.Printf("angryduck-worker: loaded credentials for %d registr(y/ies) from %s", creds.Count(), credsPath)
 	}
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s registry_listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v ctr_path=%s crictl_path=%s containerd_path=%s containerd_config=%s registry_enabled=%v registry_max_streams=%d registry_candidate_limit=%d registry_candidate_ttl=%s inventory_cache_ttl=%s",
-		nodeID, listenAddr, registryListenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, ctrPath, crictlPath, containerdPath, containerdConfigPath, registryEnabled, registryMaxStreams, registryCandidateLimit, registryCandidateCacheTTL, inventoryCacheTTL)
+	// Where the node's filesystem is visible from inside this container.
+	// /proc/1/root is the node's real root (with hostPID: true), live
+	// mounts included, and needs no hostPath volume. Set to "/" for local
+	// runs outside Kubernetes.
+	hostRoot := config.String("HOST_ROOT", "/proc/1/root")
 
-	if registryEnabled {
-		if err := worker.CheckContainerdMirrorCompatibility(containerdPath, containerdConfigPath); err != nil {
-			log.Printf("angryduck-worker[%s]: WARNING: %v", nodeID, err)
-		}
-		if err := worker.EnsureContainerdMirrorConfig(containerdCertsDir, nodeIP, registryListenAddr, true); err != nil {
-			log.Printf("angryduck-worker[%s]: warning: containerd mirror config was not installed: %v", nodeID, err)
-		} else {
-			log.Printf("angryduck-worker[%s]: containerd _default mirror configured at %s for node=%s", nodeID, containerdCertsDir, nodeIP)
-		}
+	mirrorEnabled := config.Bool("MIRROR_ENABLED", false)
+	mirrorRegistries := config.StringSlice("MIRROR_REGISTRIES", nil)
+	mirrorToken := config.String("MIRROR_PEER_TOKEN", "")
+
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s mirror=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, mirrorEnabled)
+
+	hx, err := worker.NewHostExec(hostRoot)
+	if err != nil {
+		log.Fatalf("angryduck-worker[%s]: %v", nodeID, err)
 	}
+	// Fail fast: a worker that can't find its runtime CLI on the node can
+	// neither GC nor preheat, and a crash loop is louder than a log line.
+	bin := worker.RuntimeBinary(runtimeKind)
+	binPath, err := hx.Resolve(bin)
+	if err != nil {
+		log.Fatalf("angryduck-worker[%s]: CONTAINER_RUNTIME=%s needs %s on the node: %v", nodeID, runtimeKind, bin, err)
+	}
+	log.Printf("angryduck-worker[%s]: using node binary %s", nodeID, binPath)
 
-	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, ctrPath, crictlPath)
-	rt = worker.NewCachedRuntime(rt, inventoryCacheTTL)
-	registry := worker.NewRegistryMirror(ctrPath, controllerURL, nodeID, registryEnabled, registryCandidateLimit, registryMaxStreams, inventoryCacheTTL, registryCandidateCacheTTL)
+	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, hx)
+	inv := worker.NewInventory(rt)
 	puller := worker.NewPuller(rt, gracePeriod, nodeID)
-	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID)
-	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, rt)
+	gc := worker.NewGC(rt, inv, reportInterval, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID)
+	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, inv)
+	puller.OnSuccess(reporter.Kick)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	var mirror *worker.Mirror
+	var hosts *worker.HostsTOML
+	if mirrorEnabled {
+		mirror, hosts = setupMirror(nodeID, hx, inv, controllerURL, runtimeKind, runtimeEndpoint, listenAddr, mirrorRegistries, mirrorToken)
+	}
+
 	go reporter.Run(ctx)
 	go gc.Run(ctx)
 
-	httpServer := &http.Server{Addr: listenAddr, Handler: worker.NewServer(puller, nil)}
-	registryServer := &http.Server{Addr: registryListenAddr, Handler: worker.NewRegistryServer(registry)}
+	httpServer := &http.Server{
+		Addr:    listenAddr,
+		Handler: worker.NewServer(puller, mirror),
+	}
 
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("angryduck-worker[%s]: control http server failed: %v", nodeID, err)
+			log.Fatalf("angryduck-worker[%s]: http server failed: %v", nodeID, err)
 		}
 	}()
-	go func() {
-		if err := registryServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("angryduck-worker[%s]: registry http server failed: %v", nodeID, err)
-		}
-	}()
+	// Register with containerd only once something is listening.
+	if hosts != nil {
+		go hosts.Run(ctx, 30*time.Second)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	log.Printf("angryduck-worker[%s]: shutting down", nodeID)
 
+	// Unregister from containerd first, so no new pull is routed at a
+	// worker that is about to stop listening.
+	if hosts != nil {
+		hosts.Remove()
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
-	_ = registryServer.Shutdown(shutdownCtx)
 	cancel()
 }
 
-// resolveToolPath prefers the node-mounted runtime binary, but keeps
-// compatibility with legacy worker images that bundled ctr/crictl under
-// /usr/local/bin.
-func resolveToolPath(configured, fallback string) string {
-	if configured != "" {
-		if _, err := os.Stat(configured); err == nil {
-			return configured
-		}
+// setupMirror validates mirror config and builds its pieces. Any problem
+// disables the mirror with a loud log instead of killing the worker:
+// preheat and GC are still worth running without it.
+func setupMirror(nodeID string, hx *worker.HostExec, inv *worker.Inventory, controllerURL, runtimeKind, runtimeEndpoint, listenAddr string, registries []string, token string) (*worker.Mirror, *worker.HostsTOML) {
+	fail := func(format string, args ...interface{}) (*worker.Mirror, *worker.HostsTOML) {
+		log.Printf("angryduck-worker[%s]: MIRROR DISABLED: "+format, append([]interface{}{nodeID}, args...)...)
+		return nil, nil
 	}
-	if _, err := os.Stat(fallback); err == nil {
-		logging.Warnf("angryduck-worker: runtime tool %q is unavailable; falling back to %q", configured, fallback)
-		return fallback
+	if strings.EqualFold(runtimeKind, "docker") {
+		return fail("peer transfer needs containerd; CONTAINER_RUNTIME=docker")
 	}
-	return configured
+	if len(registries) == 0 {
+		return fail("MIRROR_REGISTRIES is empty")
+	}
+	// /export streams any image on this node to whoever asks, and the
+	// worker is hostNetwork — without a shared secret that is every
+	// private image readable by anything that can route to the node.
+	if len(token) < 16 {
+		return fail("MIRROR_PEER_TOKEN must be set (16+ chars) — see the angryduck-mirror Secret")
+	}
+	if _, err := hx.Resolve("ctr"); err != nil {
+		return fail("%v", err)
+	}
+	addr := strings.TrimPrefix(runtimeEndpoint, "unix://")
+	cfg := worker.MirrorConfig{
+		NodeID:            nodeID,
+		ControllerURL:     controllerURL,
+		Token:             token,
+		ContainerdAddress: addr,
+		Namespace:         "k8s.io",
+		HoldTimeout:       config.Duration("MIRROR_HOLD_TIMEOUT_S", 60),
+		QueueWait:         config.Duration("MIRROR_QUEUE_WAIT_S", 3),
+		MaxExports:        config.Int("MIRROR_MAX_EXPORTS", 2),
+		MaxImports:        config.Int("MIRROR_MAX_IMPORTS", 2),
+	}
+	endpoint := "http://127.0.0.1:" + listenPort(listenAddr)
+	var hosts *worker.HostsTOML
+	if config.Bool("MIRROR_MANAGE_HOSTS_TOML", true) {
+		hosts = worker.NewHostsTOML(hx, config.String("MIRROR_HOSTS_DIR", "/etc/containerd/certs.d"), registries, endpoint)
+		hosts.Check()
+	}
+	log.Printf("angryduck-worker[%s]: mirror enabled: registries=%v endpoint=%s containerd=%s hold=%s queue_wait=%s max_exports=%d max_imports=%d",
+		nodeID, registries, endpoint, addr, cfg.HoldTimeout, cfg.QueueWait, cfg.MaxExports, cfg.MaxImports)
+	return worker.NewMirror(cfg, hx, inv), hosts
 }
 
 // listenPort extracts the port from a listen address like ":18081" or

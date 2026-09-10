@@ -1,11 +1,8 @@
 package worker
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os/exec"
 	"strings"
 
 	"angryduck/internal/imageref"
@@ -79,35 +76,37 @@ type Runtime interface {
 // hundred subprocess spawns every single GC tick, which is enough to push
 // a 200m-limit worker pod's CPU usage 2-3x over its own limit in
 // production. crictl exposes the same information via one `crictl ps -o
-// json` call for the whole node. Both `ctr` and `crictl` ship as fully
-// static Go binaries (verified: neither is a dynamic executable), so this
-// choice has no effect on the base image — distroless/static works for
-// either.
-func NewRuntime(kind string, creds *registryauth.Store, endpoint, ctrPath, crictlPath string) Runtime {
+// json` call for the whole node.
+//
+// None of these binaries ship in the worker image. hx runs the node's own
+// copies (see HostExec), so whatever version apt or Kubespray installed on
+// the node is the version that runs — static or dynamically linked alike.
+func NewRuntime(kind string, creds *registryauth.Store, endpoint string, hx *HostExec) Runtime {
 	switch strings.ToLower(kind) {
 	case "docker":
-		return dockerRuntime{creds: creds}
+		return dockerRuntime{creds: creds, hx: hx}
 	case "containerd":
 		logging.Warnf("angryduck-worker: CONTAINER_RUNTIME=containerd shells out once PER running container on the node every GC tick (ctr has no bulk-list-with-image equivalent to crictl's `ps -o json`) — this is known to spike CPU well past the container's own limit on busy nodes; prefer crictl unless you have a specific reason not to")
-		return containerdRuntime{creds: creds, path: ctrPath}
+		return containerdRuntime{creds: creds, hx: hx}
 	default:
 		if kind != "" && strings.ToLower(kind) != "crictl" {
 			logging.Warnf("angryduck-worker: unrecognized CONTAINER_RUNTIME=%q, defaulting to crictl", kind)
 		}
-		return crictlRuntime{creds: creds, endpoint: endpoint, path: crictlPath}
+		return crictlRuntime{creds: creds, endpoint: endpoint, hx: hx}
 	}
 }
 
-func runCmd(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+// RuntimeBinary is the node CLI a given CONTAINER_RUNTIME needs, so main
+// can fail fast at startup if the node doesn't have it.
+func RuntimeBinary(kind string) string {
+	switch strings.ToLower(kind) {
+	case "docker":
+		return "docker"
+	case "containerd":
+		return "ctr"
+	default:
+		return "crictl"
 	}
-	return stdout.String(), nil
 }
 
 func splitNonEmptyLines(s string) []string {
@@ -125,7 +124,7 @@ func splitNonEmptyLines(s string) []string {
 
 type containerdRuntime struct {
 	creds *registryauth.Store
-	path  string
+	hx    *HostExec
 }
 
 func (r containerdRuntime) PullImage(image string) error {
@@ -134,7 +133,7 @@ func (r containerdRuntime) PullImage(image string) error {
 		args = append(args, "--user", userpass)
 	}
 	args = append(args, image)
-	_, err := runCmd(r.path, args...)
+	_, err := r.hx.Run("ctr", args...)
 	return err
 }
 
@@ -144,7 +143,7 @@ func (r containerdRuntime) PullImage(image string) error {
 // separate `-q` invocation, doubling the subprocess spawns for no reason,
 // since every ref `-q` would return is already a key in the table's parse.
 func (r containerdRuntime) LocalImages() ([]string, map[string]string, error) {
-	out, err := runCmd(r.path, "-n", "k8s.io", "images", "list")
+	out, err := r.hx.Run("ctr", "-n", "k8s.io", "images", "list")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -199,14 +198,14 @@ type ctrContainerInfo struct {
 }
 
 func (r containerdRuntime) ListRunningImages() ([]string, error) {
-	out, err := runCmd(r.path, "-n", "k8s.io", "containers", "list", "-q")
+	out, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "list", "-q")
 	if err != nil {
 		return nil, err
 	}
 	ids := splitNonEmptyLines(out)
 	var images []string
 	for _, id := range ids {
-		info, err := runCmd(r.path, "-n", "k8s.io", "containers", "info", id)
+		info, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "info", id)
 		if err != nil {
 			continue
 		}
@@ -222,35 +221,8 @@ func (r containerdRuntime) ListRunningImages() ([]string, error) {
 }
 
 func (r containerdRuntime) RemoveImage(image string) error {
-	_, err := runCmd(r.path, "-n", "k8s.io", "images", "remove", image)
+	_, err := r.hx.Run("ctr", "-n", "k8s.io", "images", "remove", image)
 	return err
-}
-
-// ExportImage streams a complete containerd image archive without buffering
-// it in AngryDuck memory. It is intentionally containerd-specific because
-// crictl has no image archive export/import command.
-func (r containerdRuntime) ExportImage(dst io.Writer, image string) error {
-	cmd := exec.Command(r.path, "-n", "k8s.io", "images", "export", "-", image)
-	cmd.Stdout = dst
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s -n k8s.io images export - %s: %w: %s", r.path, image, err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
-// ImportImage streams a complete containerd image archive directly into
-// containerd; no temporary file or in-memory tar buffer is required.
-func (r containerdRuntime) ImportImage(src io.Reader) error {
-	cmd := exec.Command(r.path, "-n", "k8s.io", "images", "import", "-")
-	cmd.Stdin = src
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s -n k8s.io images import -: %w: %s", r.path, err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
 }
 
 // --- crictl ---
@@ -258,7 +230,7 @@ func (r containerdRuntime) ImportImage(src io.Reader) error {
 type crictlRuntime struct {
 	creds    *registryauth.Store
 	endpoint string
-	path     string
+	hx       *HostExec
 }
 
 // withEndpoint prepends `-r <endpoint>` when one is configured, so crictl
@@ -279,7 +251,7 @@ func (r crictlRuntime) PullImage(image string) error {
 		args = append(args, "--creds", userpass)
 	}
 	args = append(args, image)
-	_, err := runCmd(r.path, r.withEndpoint(args...)...)
+	_, err := r.hx.Run("crictl", r.withEndpoint(args...)...)
 	return err
 }
 
@@ -311,7 +283,7 @@ type crictlImagesOutput struct {
 // match by digest instead of by whichever specific alias a running
 // container happens to report.
 func (r crictlRuntime) LocalImages() ([]string, map[string]string, error) {
-	out, err := runCmd(r.path, r.withEndpoint("images", "-o", "json")...)
+	out, err := r.hx.Run("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -354,7 +326,7 @@ type crictlPsOutput struct {
 }
 
 func (r crictlRuntime) ListRunningImages() ([]string, error) {
-	out, err := runCmd(r.path, r.withEndpoint("ps", "-o", "json")...)
+	out, err := r.hx.Run("crictl", r.withEndpoint("ps", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +347,7 @@ func (r crictlRuntime) ListRunningImages() ([]string, error) {
 }
 
 func (r crictlRuntime) RemoveImage(image string) error {
-	_, err := runCmd(r.path, r.withEndpoint("rmi", image)...)
+	_, err := r.hx.Run("crictl", r.withEndpoint("rmi", image)...)
 	return err
 }
 
@@ -383,6 +355,7 @@ func (r crictlRuntime) RemoveImage(image string) error {
 
 type dockerRuntime struct {
 	creds *registryauth.Store
+	hx    *HostExec
 }
 
 // PullImage logs in to the target registry first if credentials are
@@ -396,21 +369,17 @@ func (r dockerRuntime) PullImage(image string) error {
 	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
 		user, pass, found := strings.Cut(userpass, ":")
 		if found {
-			cmd := exec.Command("docker", "login", imageref.Host(image), "-u", user, "--password-stdin")
-			cmd.Stdin = strings.NewReader(pass)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("docker login to %s failed: %w: %s", imageref.Host(image), err, strings.TrimSpace(stderr.String()))
+			if _, err := r.hx.RunInput([]byte(pass), "docker", "login", imageref.Host(image), "-u", user, "--password-stdin"); err != nil {
+				return fmt.Errorf("docker login to %s failed: %w", imageref.Host(image), err)
 			}
 		}
 	}
-	_, err := runCmd("docker", "pull", image)
+	_, err := r.hx.Run("docker", "pull", image)
 	return err
 }
 
-func (dockerRuntime) ListRunningImages() ([]string, error) {
-	out, err := runCmd("docker", "ps", "--format", "{{.Image}}")
+func (r dockerRuntime) ListRunningImages() ([]string, error) {
+	out, err := r.hx.Run("docker", "ps", "--format", "{{.Image}}")
 	if err != nil {
 		return nil, err
 	}
@@ -428,8 +397,8 @@ func (dockerRuntime) ListRunningImages() ([]string, error) {
 // --format {{.Image}}` occasionally reporting a container's original image
 // by ID instead of tag (e.g. after the tag has been moved or removed since
 // the container started).
-func (dockerRuntime) LocalImages() ([]string, map[string]string, error) {
-	out, err := runCmd("docker", "images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}")
+func (r dockerRuntime) LocalImages() ([]string, map[string]string, error) {
+	out, err := r.hx.Run("docker", "images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -448,7 +417,7 @@ func (dockerRuntime) LocalImages() ([]string, map[string]string, error) {
 	return refs, digests, nil
 }
 
-func (dockerRuntime) RemoveImage(image string) error {
-	_, err := runCmd("docker", "rmi", image)
+func (r dockerRuntime) RemoveImage(image string) error {
+	_, err := r.hx.Run("docker", "rmi", image)
 	return err
 }

@@ -21,32 +21,25 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.13
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.0
           env:
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
             - name: SELF_ADDRESS
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: CTR_PATH
-              value: /host/usr/local/bin/ctr
-            - name: CRICTL_PATH
-              value: /host/usr/local/bin/crictl
-            - name: CONTAINERD_PATH
-              value: /host/usr/local/bin/containerd
-            - name: CONTAINERD_CONFIG_PATH
-              value: /host/etc/containerd/config.toml
-            - name: CONTAINERD_CERTS_DIR
-              value: /host/etc/containerd/certs.d
-            - name: REGISTRY_LISTEN_ADDR
-              value: :5000
+            # Shared by every worker; peers present it to each other's
+            # /export. optional: the worker starts without it and just
+            # logs "MIRROR DISABLED" until the Secret exists.
+            - name: MIRROR_PEER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: angryduck-mirror
+                  key: token
+                  optional: true
           envFrom:
             - configMapRef:
                 name: angryduck-config
@@ -54,16 +47,8 @@ spec:
             - containerPort: 18081
               name: http
           volumeMounts:
-            - name: containerd-sock
-              mountPath: /run/containerd/containerd.sock
-            - name: containerd-certs-d
-              mountPath: /host/etc/containerd/certs.d
-            - name: containerd-config
-              mountPath: /host/etc/containerd/config.toml
-              readOnly: true
-            - name: host-usr-local-bin
-              mountPath: /host/usr/local/bin
-              readOnly: true
+            # No containerd socket or binary mounts: crictl/ctr run
+            # chrooted into /proc/1/root and see the node's own socket.
             - name: registry-creds
               mountPath: /etc/angryduck/registry-creds
               readOnly: true
@@ -80,35 +65,25 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
+            # Idle usage is unchanged: the worker itself is ~6 MiB, and the
+            # periodic crictl call (~20 MiB, a child in this cgroup) is
+            # what the old ~20-40Mi observation mostly was.
+            # Limits are for peer transfers: each ctr export/import child
+            # peaks at ~30-35 MiB and needs ~5 ms CPU per MiB moved.
+            # Worst case = worker 6 + 2 exports 62 + 2 imports 68 + crictl
+            # listing 20 + preheat crictl pull 25 ~= 181 MiB. At the old
+            # 200m CPU a 150 MiB image took >=3.8 s of throttled CPU per
+            # side (~40 MiB/s) — slower than the LAN it rides on.
+            # Requests stay low: limits reserve nothing.
             requests:
               cpu: 50m
               memory: 32Mi
             limits:
-              cpu: 200m
-              # Was 128Mi: observed steady usage is ~20-30Mi (max ~40Mi
-              # over 12h), so 128Mi was ~4-5x actual need. 64Mi keeps a
-              # healthy ~2x safety margin over the observed max while
-              # freeing up schedulable memory across the fleet.
-              memory: 64Mi
+              cpu: "1"
+              memory: 192Mi
           securityContext:
             privileged: true
       volumes:
-        - name: containerd-sock
-          hostPath:
-            path: /run/containerd/containerd.sock
-            type: Socket
-        - name: containerd-certs-d
-          hostPath:
-            path: /etc/containerd/certs.d
-            type: DirectoryOrCreate
-        - name: containerd-config
-          hostPath:
-            path: /etc/containerd/config.toml
-            type: File
-        - name: host-usr-local-bin
-          hostPath:
-            path: /usr/local/bin
-            type: Directory
         - name: registry-creds
           secret:
             secretName: gitlab-registry-pull

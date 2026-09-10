@@ -19,7 +19,6 @@ data:
   # See stg/configmap.yaml — adjust the substring(s) if this cluster's
   # master node names don't contain "master".
   RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
-  P2P_SOURCE_CANDIDATES: "3"
 
   WORKER_LISTEN_ADDR: ":18081"
   NODE_EXPORTER_URL: "http://localhost:9100/metrics"
@@ -38,20 +37,30 @@ data:
   # subprocess per container, which is what was pushing worker pods 2-3x
   # over their own CPU limit on busy nodes. See worker.NewRuntime.
   CONTAINER_RUNTIME: "crictl"
+  # Node path of the containerd socket (resolved inside the node's root,
+  # so no hostPath mount is needed for it).
   CONTAINER_RUNTIME_ENDPOINT: "unix:///run/containerd/containerd.sock"
-  CTR_PATH: "/host/usr/local/bin/ctr"
-  CRICTL_PATH: "/host/usr/local/bin/crictl"
-  CONTAINERD_CERTS_DIR: "/host/etc/containerd/certs.d"
-  CONTAINERD_PATH: "/host/usr/local/bin/containerd"
-  CONTAINERD_CONFIG_PATH: "/host/etc/containerd/config.toml"
-  REGISTRY_MIRROR_ENABLED: "true"
-  REGISTRY_LISTEN_ADDR: ":5000"
-  REGISTRY_MAX_CONCURRENT_STREAMS: "4"
-  REGISTRY_CANDIDATE_CACHE_S: "1"
-  IMAGE_INVENTORY_CACHE_S: "10"
+  # crictl/ctr are the node's own binaries, run chrooted into the node's
+  # root. /proc/1/root works with hostPID + privileged; no volume needed.
+  HOST_ROOT: "/proc/1/root"
   # Path to a mounted dockerconfigjson secret (same format imagePullSecrets
   # uses) so preheat pulls can authenticate to private registries — the
   # worker's own pull mechanism bypasses kubelet's CRI plumbing entirely,
   # so kubelet's imagePullSecrets never apply to it otherwise. Leave unset
   # to pull anonymously (fine for public images only).
   REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"
+
+  # --- Peer mirror (see .env.example for the full story) ---
+  # Off until stg has run with it — flip after checking stg's
+  # angryduck_worker_mirror_transfers_total{result="hit"} and the worker
+  # pods' memory under real rollouts.
+  MIRROR_ENABLED: "false"
+  MIRROR_REGISTRIES: "registry.internal-registry.example.com"
+  MIRROR_HOLD_TIMEOUT_S: "60"
+  MIRROR_QUEUE_WAIT_S: "3"
+  MIRROR_MAX_EXPORTS: "2"
+  MIRROR_MAX_IMPORTS: "2"
+  MIRROR_MANAGE_HOSTS_TOML: "true"
+  MIRROR_HOSTS_DIR: "/etc/containerd/certs.d"
+  MIRROR_PEER_CANDIDATES: "3"
+  # MIRROR_PEER_TOKEN comes from the angryduck-mirror Secret, not here.

@@ -2,8 +2,9 @@
 // receives the post-`docker push` webhook, tracks worker disk-utilization
 // and image-inventory reports, and orders nodes to pre-pull the new image —
 // preferring nodes that already have some tag of the same repo locally,
-// then falling back to the least-utilized nodes — so Spegel can fan it out
-// peer-to-peer once ArgoCD syncs.
+// then falling back to the least-utilized nodes. It also answers workers'
+// "who has this digest?" lookups so their mirrors can pull whole images
+// from peers instead of origin.
 package main
 
 import (
@@ -38,14 +39,17 @@ func main() {
 	// utilization-only ranking. Set to false to restore the old
 	// utilization-only behavior if this ever needs a quick rollback.
 	preferImageLocality := config.Bool("RANK_PREFER_IMAGE_LOCALITY", true)
-	peerSourceCandidates := config.Int("P2P_SOURCE_CANDIDATES", 3)
+	// How many sources one /peers answer lists. A requester tries them in
+	// order until one isn't busy; 3 is enough to route around a busy or
+	// dying node without handing out the whole fleet.
+	peerCandidates := config.Int("MIRROR_PEER_CANDIDATES", 3)
 
-	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v",
-		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality)
+	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v mirror_peer_candidates=%d",
+		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality, peerCandidates)
 
 	registry := controller.NewRegistry(staleAfter, targetTTL)
 	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality)
-	server := controller.NewServer(registry, ranker, peerSourceCandidates)
+	server := controller.NewServer(registry, ranker, peerCandidates)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -1,92 +1,161 @@
 package worker
 
 import (
-	"fmt"
-	"io"
+	"strings"
 	"sync"
 	"time"
 )
 
-// CachedRuntime shares one short-lived local-image inventory between the
-// reporter, GC, and P2P source checks. The underlying runtime command is
-// expensive relative to a map lookup, and all three consumers otherwise tend
-// to ask the exact same question during a busy rollout.
-type CachedRuntime struct {
-	Runtime
-	maxAge time.Duration
+// Inventory is the one place this worker's view of local images lives.
+//
+// Before it existed the reporter (every 15s) and GC (every 60s) each ran
+// the runtime's full image listing on their own timers — the same
+// subprocess and the same JSON parse, twice, for the same answer. Now
+// whichever of them runs first refreshes the listing and the other reuses
+// it if it's young enough. The mirror never lists at all: it reads the
+// digest index built from whatever listing already happened.
+//
+// Reusing a listing that is up to one report interval old is safe for GC:
+// an image pulled after the listing simply isn't evaluated until the next
+// one (it can't be wrongly removed if it isn't seen), and an image removed
+// after it only produces a harmless "not found" from RemoveImage.
+type Inventory struct {
+	runtime Runtime
 
-	mu        sync.Mutex
-	refreshed time.Time
-	refs      []string
-	digests   map[string]string
+	fetchMu sync.Mutex // serializes refreshes so two callers never list at once
+
+	mu       sync.RWMutex
+	refs     []string
+	digests  map[string]string // any alias -> runtime's canonical id (GC input)
+	byDigest map[string]string // manifest digest -> exportable "repo@digest" ref
+	added    map[string]time.Time
+	bad      map[string]struct{} // manifest digests whose export failed
+	listedAt time.Time
+	haveData bool
 }
 
-func NewCachedRuntime(runtime Runtime, maxAge time.Duration) Runtime {
-	if runtime == nil || maxAge <= 0 {
-		return runtime
+// NewInventory builds an empty inventory backed by rt.
+func NewInventory(rt Runtime) *Inventory {
+	return &Inventory{
+		runtime:  rt,
+		byDigest: make(map[string]string),
+		added:    make(map[string]time.Time),
+		bad:      make(map[string]struct{}),
 	}
-	return &CachedRuntime{Runtime: runtime, maxAge: maxAge}
 }
 
-func (r *CachedRuntime) LocalImages() ([]string, map[string]string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.refreshed.IsZero() && time.Since(r.refreshed) < r.maxAge {
-		// Cached snapshots are immutable: refresh replaces the slice/map as a
-		// whole rather than mutating either in place, so readers can use them
-		// without allocating a defensive copy.
-		return r.refs, r.digests, nil
+// Get returns the local image listing, reusing the cached one if it is no
+// older than maxAge, otherwise refreshing it with one runtime call.
+func (inv *Inventory) Get(maxAge time.Duration) ([]string, map[string]string, error) {
+	if refs, digests, ok := inv.cached(maxAge); ok {
+		return refs, digests, nil
 	}
-
-	refs, digests, err := r.Runtime.LocalImages()
+	inv.fetchMu.Lock()
+	defer inv.fetchMu.Unlock()
+	// Another caller may have refreshed while we waited for fetchMu.
+	if refs, digests, ok := inv.cached(maxAge); ok {
+		return refs, digests, nil
+	}
+	started := time.Now()
+	refs, digests, err := inv.runtime.LocalImages()
 	if err != nil {
 		return nil, nil, err
 	}
-	r.refs = refs
-	r.digests = digests
-	r.refreshed = time.Now()
-	return r.refs, r.digests, nil
+	inv.replace(refs, digests, started)
+	return refs, digests, nil
 }
 
-func (r *CachedRuntime) invalidate() {
-	r.mu.Lock()
-	r.refreshed = time.Time{}
-	r.refs = nil
-	r.digests = nil
-	r.mu.Unlock()
-}
-
-func (r *CachedRuntime) PullImage(image string) error {
-	err := r.Runtime.PullImage(image)
-	if err == nil {
-		r.invalidate()
+func (inv *Inventory) cached(maxAge time.Duration) ([]string, map[string]string, bool) {
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	if !inv.haveData || time.Since(inv.listedAt) > maxAge {
+		return nil, nil, false
 	}
-	return err
+	return inv.refs, inv.digests, true
 }
 
-func (r *CachedRuntime) RemoveImage(image string) error {
-	err := r.Runtime.RemoveImage(image)
-	if err == nil {
-		r.invalidate()
-	}
-	return err
-}
-
-func (r *CachedRuntime) ExportImage(dst io.Writer, image string) error {
-	if rt, ok := r.Runtime.(interface{ ExportImage(io.Writer, string) error }); ok {
-		return rt.ExportImage(dst, image)
-	}
-	return fmt.Errorf("runtime does not support image export")
-}
-
-func (r *CachedRuntime) ImportImage(src io.Reader) error {
-	if rt, ok := r.Runtime.(interface{ ImportImage(io.Reader) error }); ok {
-		err := rt.ImportImage(src)
-		if err == nil {
-			r.invalidate()
+// replace installs a fresh listing and rebuilds the manifest-digest index.
+// Every runtime backend reports digest-pinned aliases ("repo@sha256:D")
+// as keys of its digest map — crictl via repoDigests, ctr as REF rows —
+// and D there is the manifest (or index) digest, which is exactly what
+// containerd asks a mirror for. Deriving the index from those keys keeps
+// it backend-agnostic and costs no extra call.
+//
+// Entries Add()ed after the listing started survive: an import that
+// finished while the listing subprocess was running must not be dropped
+// by a listing that couldn't have seen it.
+func (inv *Inventory) replace(refs []string, digests map[string]string, started time.Time) {
+	byDigest := make(map[string]string, len(digests)/2)
+	for key := range digests {
+		if at := strings.Index(key, "@sha256:"); at > 0 {
+			byDigest[key[at+1:]] = key
 		}
-		return err
 	}
-	return fmt.Errorf("runtime does not support image import")
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	for d, t := range inv.added {
+		if t.After(started) {
+			if _, ok := byDigest[d]; !ok {
+				byDigest[d] = inv.byDigest[d]
+			}
+		} else {
+			delete(inv.added, d)
+		}
+	}
+	for d := range inv.bad {
+		if _, ok := byDigest[d]; !ok {
+			delete(inv.bad, d) // image gone; a re-pull gets a clean slate
+		}
+	}
+	inv.refs, inv.digests, inv.byDigest = refs, digests, byDigest
+	inv.listedAt, inv.haveData = started, true
+}
+
+// Add records an image that just landed locally (a peer import) without
+// waiting for the next listing.
+func (inv *Inventory) Add(digest, ref string) {
+	inv.mu.Lock()
+	inv.byDigest[digest] = ref
+	inv.added[digest] = time.Now()
+	delete(inv.bad, digest)
+	inv.mu.Unlock()
+}
+
+// Lookup returns the local ref to export for a manifest digest.
+func (inv *Inventory) Lookup(digest string) (string, bool) {
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	if _, bad := inv.bad[digest]; bad {
+		return "", false
+	}
+	ref, ok := inv.byDigest[digest]
+	return ref, ok
+}
+
+// Has reports whether a manifest digest is present locally.
+func (inv *Inventory) Has(digest string) bool {
+	_, ok := inv.Lookup(digest)
+	return ok
+}
+
+// MarkUnexportable stops this node advertising a digest whose export just
+// failed (typically content pruned by discard_unpacked_layers before that
+// setting was fixed). It is cleared when the image leaves the node.
+func (inv *Inventory) MarkUnexportable(digest string) {
+	inv.mu.Lock()
+	inv.bad[digest] = struct{}{}
+	inv.mu.Unlock()
+}
+
+// Digests returns every advertisable manifest digest, for the report.
+func (inv *Inventory) Digests() []string {
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	out := make([]string, 0, len(inv.byDigest))
+	for d := range inv.byDigest {
+		if _, bad := inv.bad[d]; !bad {
+			out = append(out, d)
+		}
+	}
+	return out
 }

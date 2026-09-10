@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY internal ./internal
 COPY cmd/controller ./cmd/controller
-RUN CGO_ENABLED=0 go build -o /out/angryduck-controller ./cmd/controller
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/angryduck-controller ./cmd/controller
 
 FROM gcr.io/distroless/static-debian13
 COPY --from=build /out/angryduck-controller /angryduck-controller
