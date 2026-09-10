@@ -1,0 +1,9 @@
+# Put this in your Kubespray inventory, for example:
+# inventory/<cluster>/group_vars/all/containerd.yml
+#
+# Required for containerd 2.1+ so CRI uses the local/client pull path and
+# therefore honors certs.d/hosts.toml mirrors such as AngryDuck's _default.
+
+containerd_extra_args: |
+  [plugins."io.containerd.cri.v1.images"]
+    use_local_image_pull = true

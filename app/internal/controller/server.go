@@ -14,16 +14,21 @@ import (
 
 // Server wires the registry + ranker up to HTTP handlers.
 type Server struct {
-	registry *Registry
-	ranker   *Ranker
-	mux      *http.ServeMux
+	registry             *Registry
+	ranker               *Ranker
+	peerSourceCandidates int
+	mux                  *http.ServeMux
 }
 
 // NewServer builds a Server with routes registered.
-func NewServer(registry *Registry, ranker *Ranker) *Server {
-	s := &Server{registry: registry, ranker: ranker, mux: http.NewServeMux()}
+func NewServer(registry *Registry, ranker *Ranker, peerSourceCandidates int) *Server {
+	if peerSourceCandidates < 1 {
+		peerSourceCandidates = 1
+	}
+	s := &Server{registry: registry, ranker: ranker, peerSourceCandidates: peerSourceCandidates, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
 	s.mux.HandleFunc("/report", s.handleReport)
+	s.mux.HandleFunc("/peer/source", s.handlePeerSource)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.Handle("/metrics", metrics.Handler())
 	s.mux.HandleFunc("/healthz", s.handleHealth)
@@ -90,6 +95,28 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 		TargetImage:  req.Image,
 		OrderedNodes: ordered,
 	})
+}
+
+// handlePeerSource returns a very small candidate set based only on the
+// controller's repo-level inventory. Exact image presence and digest are
+// verified directly by the candidate worker before any bytes move.
+func (s *Server) handlePeerSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req model.PeerSourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	image := imageref.Normalize(strings.TrimSpace(req.Image))
+	if image == "" || req.TargetNode == "" {
+		writeJSON(w, http.StatusBadRequest, model.PeerSourceResponse{})
+		return
+	}
+	candidates := s.registry.PeerCandidates(image, req.TargetNode, s.peerSourceCandidates)
+	writeJSON(w, http.StatusOK, model.PeerSourceResponse{Candidates: candidates})
 }
 
 // handleReport ingests periodic disk-utilization reports from workers.

@@ -1,0 +1,9 @@
+# This file is shown only as a reference. AngryDuck creates the real file on
+# every worker node automatically:
+#   /etc/containerd/certs.d/_default/hosts.toml
+#
+# NODE_IP and port are filled in by the worker from the Kubernetes downward API.
+
+[host."http://NODE_IP:5000"]
+  capabilities = ["pull", "resolve"]
+  dial_timeout = "200ms"

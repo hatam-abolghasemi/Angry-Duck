@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 
@@ -82,18 +83,18 @@ type Runtime interface {
 // static Go binaries (verified: neither is a dynamic executable), so this
 // choice has no effect on the base image — distroless/static works for
 // either.
-func NewRuntime(kind string, creds *registryauth.Store, endpoint string) Runtime {
+func NewRuntime(kind string, creds *registryauth.Store, endpoint, ctrPath, crictlPath string) Runtime {
 	switch strings.ToLower(kind) {
 	case "docker":
 		return dockerRuntime{creds: creds}
 	case "containerd":
 		logging.Warnf("angryduck-worker: CONTAINER_RUNTIME=containerd shells out once PER running container on the node every GC tick (ctr has no bulk-list-with-image equivalent to crictl's `ps -o json`) — this is known to spike CPU well past the container's own limit on busy nodes; prefer crictl unless you have a specific reason not to")
-		return containerdRuntime{creds: creds}
+		return containerdRuntime{creds: creds, path: ctrPath}
 	default:
 		if kind != "" && strings.ToLower(kind) != "crictl" {
 			logging.Warnf("angryduck-worker: unrecognized CONTAINER_RUNTIME=%q, defaulting to crictl", kind)
 		}
-		return crictlRuntime{creds: creds, endpoint: endpoint}
+		return crictlRuntime{creds: creds, endpoint: endpoint, path: crictlPath}
 	}
 }
 
@@ -124,6 +125,7 @@ func splitNonEmptyLines(s string) []string {
 
 type containerdRuntime struct {
 	creds *registryauth.Store
+	path  string
 }
 
 func (r containerdRuntime) PullImage(image string) error {
@@ -132,7 +134,7 @@ func (r containerdRuntime) PullImage(image string) error {
 		args = append(args, "--user", userpass)
 	}
 	args = append(args, image)
-	_, err := runCmd("ctr", args...)
+	_, err := runCmd(r.path, args...)
 	return err
 }
 
@@ -141,8 +143,8 @@ func (r containerdRuntime) PullImage(image string) error {
 // digest map from that single parse — the ref list used to come from a
 // separate `-q` invocation, doubling the subprocess spawns for no reason,
 // since every ref `-q` would return is already a key in the table's parse.
-func (containerdRuntime) LocalImages() ([]string, map[string]string, error) {
-	out, err := runCmd("ctr", "-n", "k8s.io", "images", "list")
+func (r containerdRuntime) LocalImages() ([]string, map[string]string, error) {
+	out, err := runCmd(r.path, "-n", "k8s.io", "images", "list")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -196,15 +198,15 @@ type ctrContainerInfo struct {
 	Image string `json:"Image"`
 }
 
-func (containerdRuntime) ListRunningImages() ([]string, error) {
-	out, err := runCmd("ctr", "-n", "k8s.io", "containers", "list", "-q")
+func (r containerdRuntime) ListRunningImages() ([]string, error) {
+	out, err := runCmd(r.path, "-n", "k8s.io", "containers", "list", "-q")
 	if err != nil {
 		return nil, err
 	}
 	ids := splitNonEmptyLines(out)
 	var images []string
 	for _, id := range ids {
-		info, err := runCmd("ctr", "-n", "k8s.io", "containers", "info", id)
+		info, err := runCmd(r.path, "-n", "k8s.io", "containers", "info", id)
 		if err != nil {
 			continue
 		}
@@ -219,9 +221,36 @@ func (containerdRuntime) ListRunningImages() ([]string, error) {
 	return images, nil
 }
 
-func (containerdRuntime) RemoveImage(image string) error {
-	_, err := runCmd("ctr", "-n", "k8s.io", "images", "remove", image)
+func (r containerdRuntime) RemoveImage(image string) error {
+	_, err := runCmd(r.path, "-n", "k8s.io", "images", "remove", image)
 	return err
+}
+
+// ExportImage streams a complete containerd image archive without buffering
+// it in AngryDuck memory. It is intentionally containerd-specific because
+// crictl has no image archive export/import command.
+func (r containerdRuntime) ExportImage(dst io.Writer, image string) error {
+	cmd := exec.Command(r.path, "-n", "k8s.io", "images", "export", "-", image)
+	cmd.Stdout = dst
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s -n k8s.io images export - %s: %w: %s", r.path, image, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// ImportImage streams a complete containerd image archive directly into
+// containerd; no temporary file or in-memory tar buffer is required.
+func (r containerdRuntime) ImportImage(src io.Reader) error {
+	cmd := exec.Command(r.path, "-n", "k8s.io", "images", "import", "-")
+	cmd.Stdin = src
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s -n k8s.io images import -: %w: %s", r.path, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // --- crictl ---
@@ -229,6 +258,7 @@ func (containerdRuntime) RemoveImage(image string) error {
 type crictlRuntime struct {
 	creds    *registryauth.Store
 	endpoint string
+	path     string
 }
 
 // withEndpoint prepends `-r <endpoint>` when one is configured, so crictl
@@ -249,7 +279,7 @@ func (r crictlRuntime) PullImage(image string) error {
 		args = append(args, "--creds", userpass)
 	}
 	args = append(args, image)
-	_, err := runCmd("crictl", r.withEndpoint(args...)...)
+	_, err := runCmd(r.path, r.withEndpoint(args...)...)
 	return err
 }
 
@@ -281,7 +311,7 @@ type crictlImagesOutput struct {
 // match by digest instead of by whichever specific alias a running
 // container happens to report.
 func (r crictlRuntime) LocalImages() ([]string, map[string]string, error) {
-	out, err := runCmd("crictl", r.withEndpoint("images", "-o", "json")...)
+	out, err := runCmd(r.path, r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -324,7 +354,7 @@ type crictlPsOutput struct {
 }
 
 func (r crictlRuntime) ListRunningImages() ([]string, error) {
-	out, err := runCmd("crictl", r.withEndpoint("ps", "-o", "json")...)
+	out, err := runCmd(r.path, r.withEndpoint("ps", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +375,7 @@ func (r crictlRuntime) ListRunningImages() ([]string, error) {
 }
 
 func (r crictlRuntime) RemoveImage(image string) error {
-	_, err := runCmd("crictl", r.withEndpoint("rmi", image)...)
+	_, err := runCmd(r.path, r.withEndpoint("rmi", image)...)
 	return err
 }
 

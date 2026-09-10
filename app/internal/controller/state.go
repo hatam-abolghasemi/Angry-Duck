@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"angryduck/internal/imageref"
+
 	"angryduck/internal/model"
 )
 
@@ -135,6 +137,30 @@ func (r *Registry) CurrentTarget() (image string, setAt time.Time, active bool) 
 		return r.targetImage, r.targetSetAt, false
 	}
 	return r.targetImage, r.targetSetAt, true
+}
+
+// PeerCandidates returns fresh workers that report the target image's repo,
+// excluding the requesting node. The controller intentionally does not need
+// exact tag/digest state here; the target probes candidates directly before
+// starting a transfer. Results retain the existing utilization ordering.
+func (r *Registry) PeerCandidates(image, targetNode string, limit int) []model.PeerSourceCandidate {
+	repo := imageref.Repo(image)
+	if repo == "" || limit <= 0 {
+		return nil
+	}
+
+	fresh := r.FreshWorkers()
+	out := make([]model.PeerSourceCandidate, 0, limit)
+	for _, w := range fresh {
+		if w.NodeID == targetNode || !w.HasRepo(repo) || w.Address == "" {
+			continue
+		}
+		out = append(out, model.PeerSourceCandidate{NodeID: w.NodeID, Address: w.Address})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 // Snapshot builds the full debug view served at /status.

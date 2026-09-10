@@ -1,229 +1,220 @@
 # Angry Duck
 
-Angry Duck kills the "40 replicas, 40 origin pulls" problem. It pre-pulls
-a freshly-pushed image onto a couple of low-utilization nodes the moment
-CI pushes it, so by the time ArgoCD actually schedules pods everywhere
-else, [Spegel](https://github.com/spegel-org/spegel) can hand those nodes
-the image peer-to-peer instead of every one of them hitting the origin
-registry at once.
+Angry Duck is a lightweight image preheat, peer-mirror, and node-wide image GC
+service for Kubernetes clusters running containerd.
 
-## The problem
+Its main job is simple: make the **normal kubelet/containerd image pull faster**
+without becoming another image store or another blocking runtime process.
 
-A normal rollout looks like this: ArgoCD syncs, and every node that just
-got scheduled a new pod pulls the new image — independently, at the same
-moment, straight from the origin registry. Spegel is sitting right there
-ready to serve peers, but on a fresh deploy nobody has the image yet, so
-there's no peer to serve from. 40 replicas means 40 simultaneous origin
-pulls, right when the registry is least equipped to enjoy that.
+## Pull path
 
-## What Angry Duck does about it
+Every worker runs a small OCI Distribution mirror on the node. containerd is
+configured to try that mirror first through `_default/hosts.toml`:
 
-- **Gets ahead of the deploy, not in its way.** One `curl` call right
-  after `docker push` is all a pipeline needs to add. ArgoCD's sync is
-  completely untouched — Angry Duck never gates or blocks it, it just
-  wins the race to have the image ready first.
-- **Picks targets based on real signal, not guesses.** Nodes report disk
-  utilization *and* their local image inventory every few seconds. Given
-  those, the controller prefers a node that already has some older tag of
-  the same repo (usually a small delta to pull) over an emptier node
-  starting cold, and falls back to the least-utilized fresh nodes when no
-  node has the repo at all. It flatly refuses to preheat anything if it
-  has no recent view of any node's state rather than picking blind.
-- **Manages the whole node's disk, not just its own mess.** Every
-  worker's GC loop scans and reclaims *any* image that's fallen out of
-  use on that node — not only images Angry Duck itself pulled — so image
-  disk usage stays flat over time instead of accumulating with every tag
-  a pipeline ever pushes.
-- **Doesn't guess wrong about what's "in use."** Images are matched by
-  their canonical content digest, not by raw name — the same content can
-  legitimately show up locally under a tag, a digest-pinned reference,
-  and a bare digest, and only comparing by digest keeps GC from treating
-  those as separate, disposable images.
-- **Knows what it can't know.** A small always-safe allowlist
-  (`GC_EXCLUDE_IMAGE_SUBSTRINGS`) covers images like `pause` that
-  Kubernetes runs as pod sandboxes rather than regular containers — no
-  amount of "is this running?" logic will ever see them as running, so
-  they get an explicit pass instead of being cycled through GC forever.
-- **Doesn't waste a preheat slot on a node nothing will ever use.**
-  Master/control-plane nodes never get scheduled a real workload pod, so
-  they always look artificially idle. `RANK_EXCLUDE_NODE_SUBSTRINGS` keeps
-  them out of the *ranking*, while they keep running their own GC — the
-  disk still gets managed, the preheat slot just goes somewhere useful.
-- **Ships safe by default.** GC starts in dry-run, logging exactly what
-  it would remove and why, until you've watched it decide correctly
-  against your own nodes and flip it on.
-- **Costs almost nothing to run.** Pure Go, stdlib only — no dependencies
-  to audit, no `go mod download`, small static binaries, small images,
-  and worker pods sized in double-digit MiB.
-
-## Why this combo — Angry Duck + Spegel + your pipeline — actually adds up
-
-Each piece is solving a different stage of the same lifecycle, and
-together they cover it end to end:
-
-- **At push time**, Angry Duck turns "N nodes about to ask the registry
-  for the same layers" into a single, controlled origin pull on 1–3
-  nodes — the registry sees one request instead of a stampede, no matter
-  how large the fleet is.
-- **At rollout time**, Spegel turns that one pull into cluster-wide
-  availability for free: every other node ArgoCD schedules onto pulls
-  the image from a peer over the LAN instead of the origin, so rollouts
-  finish faster and registry egress stays flat regardless of replica
-  count.
-- **At steady state**, Angry Duck's node-wide GC keeps disk usage from
-  quietly climbing forever as your pipeline pushes new tags every day —
-  the same system that got the image onto the node in the first place is
-  the one making sure old ones don't just pile up.
-
-None of that requires touching ArgoCD, your pipeline's deploy logic, or
-Spegel's own configuration — Angry Duck sits entirely outside that path
-and only adds one webhook call. Origin bandwidth, rollout latency, and
-node disk pressure end up being managed as one connected system instead
-of three separate problems nobody owns.
-
-## Architecture
-
-```
-CI/CD pipeline                     Angry Duck controller               Angry Duck worker (DaemonSet, 1/node)
-─────────────────                  ───────────────────────             ──────────────────────────────────────
-docker push  ──POST /webhook/──►   - tracks worker freshness           - every REPORT_INTERVAL_S: scrape
-             preheat {image}       - rejects if 0 fresh workers          node-exporter + list local images,
-                                    - ranks fresh, eligible workers      POST /report {node_id, address,
-                                      by repo locality, then             utilization, repos}
-                                      utilization (ascending)           - on POST /pull {image}: pull the
-                                    - every RANK_INTERVAL_S, orders       image asynchronously; remember the
-                                      top RANK_TOP_N workers to pull      order time for GC grace-period
-                                      the current target image            protection
-                                      (POST worker's /pull)             - every GC_CHECK_INTERVAL_S: reclaim
-                                                                          any local image unused for
-                                                                          GC_MISS_THRESHOLD checks, unless
-                                                                          still in its grace period or on the
-                                                                          exclude list
+```text
+kubelet
+  -> containerd
+     -> AngryDuck :5000
+        -> local image/content on this node
+        -> repo-local peer(s)
+        -> fast miss
+     -> original registry
 ```
 
-## Quick start
+A mirror miss is not an error for Kubernetes. AngryDuck returns a normal
+registry miss (or is simply unreachable), so containerd continues to the
+configured upstream registry.
 
-```bash
-go build -o bin/angryduck-controller ./cmd/controller
-go build -o bin/angryduck-worker ./cmd/worker
+AngryDuck therefore never needs to sit in front of kubelet waiting for a pull
+to finish, and it never takes ownership of the node's image store.
 
-# terminal 1
-ENV_FILE=.env.example ./bin/angryduck-controller
+## What the mirror does
 
-# terminal 2 (SELF_ADDRESS needs a real reachable host:port so the
-# controller can call this worker back)
-NODE_ID=node-1 SELF_ADDRESS=localhost:18081 ENV_FILE=.env.example ./bin/angryduck-worker
+For a manifest/tag request AngryDuck first checks the node's existing
+containerd image metadata to resolve the reference to its canonical digest.
+For a digest request or blob request it uses the requested digest directly.
+
+If the requested object exists locally, AngryDuck streams it from containerd's
+existing content store.
+
+If it is not local, AngryDuck asks the controller for a small set of workers
+that report the same repository. Each peer is asked for the **exact same OCI
+request**. A peer that does not have that digest simply misses, and the next
+peer is tried.
+
+There is no layer graph inspection, layer negotiation, tar archive, temporary
+image file, or second AngryDuck image database. The image identity used for
+peer selection is repository/name plus the requested tag or digest; the exact
+content identity is always the containerd digest.
+
+## Preheat
+
+The CI webhook remains useful, but it no longer implements a second P2P pull
+mechanism.
+
+```text
+CI docker push
+      |
+      v
+POST /webhook/preheat
+      |
+      v
+AngryDuck controller ranks a few good nodes
+      |
+      v
+worker receives /pull asynchronously
+      |
+      v
+containerd pull -> AngryDuck mirror -> peer/origin fallback
 ```
 
-Trigger a preheat the way a pipeline would, right after `docker push`:
+This means preheat is genuinely useful: it gets the image onto a few nodes
+before ArgoCD schedules the workload, and the same mirror is then used by all
+other kubelet pulls.
 
-```bash
-curl -X POST http://localhost:8080/webhook/preheat \
-  -H 'Content-Type: application/json' \
-  -d '{"image":"registry.example.com/app:1.2.3"}'
+## Wise GC
+
+GC remains node-wide and digest-aware. It considers the actual images on the
+node, compares their content identity with currently running containers, and
+keeps freshly preheated images alive through the configured grace period.
+
+Because AngryDuck and kubelet/containerd use the same content store, there is
+no separate cache to synchronize or garbage-collect.
+
+GC starts in dry-run by default in the worker code path; the example
+Kubernetes config can enable real removal explicitly.
+
+## Resource discipline
+
+The mirror is deliberately bounded because it is a node-local acceleration
+service, not an image server that should compete with workloads.
+
+Defaults:
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `REGISTRY_MAX_CONCURRENT_STREAMS` | `4` | Maximum local content streams per worker |
+| `P2P_SOURCE_CANDIDATES` | `3` | Maximum peer candidates considered |
+| `REGISTRY_CANDIDATE_CACHE_S` | `1` | Candidate cache TTL |
+| `IMAGE_INVENTORY_CACHE_S` | `10` | Shared runtime inventory cache for reporter/GC |
+
+Peer/controller requests have short timeouts. A busy mirror does not build an
+unbounded queue: containerd is allowed to fall through to the origin instead.
+
+There is no resident image data in AngryDuck. Local object serving temporarily
+uses the existing `ctr content get` command and bounded streaming. The maximum
+stream count is intentionally small; increase it only after measuring CPU and
+I/O on representative workers.
+
+## Ubuntu + Kubespray
+
+The worker is designed for Kubespray's Ubuntu/containerd nodes.
+
+Kubespray installs the runtime tooling under `/usr/local/bin`, so the worker
+mounts these host binaries instead of carrying copies inside its image:
+
+```text
+/host/usr/local/bin/ctr
+/host/usr/local/bin/crictl
+/host/usr/local/bin/containerd
 ```
 
-`curl http://localhost:8080/status` shows every worker the controller
-currently knows about and the active preheat target.
+The worker image is Debian 13 slim, so `apt` remains available normally.
+
+The worker also mounts:
+
+```text
+/run/containerd/containerd.sock
+/etc/containerd/config.toml
+/etc/containerd/certs.d/
+```
+
+and writes only its own `_default/hosts.toml` mirror configuration.
+
+### containerd 2.1+
+
+containerd 2.1+ uses Transfer Service for CRI image pulls by default. To make
+`hosts.toml` mirrors apply to normal kubelet pulls, configure Kubespray with:
+
+```yaml
+containerd_extra_args: |
+  [plugins."io.containerd.cri.v1.images"]
+    use_local_image_pull = true
+```
+
+See [`deploy/kubespray/README.md`](deploy/kubespray/README.md).
+
+### Kubespray registry mirrors
+
+Do not create a more-specific `certs.d/<registry>/hosts.toml` for registries
+that should go through AngryDuck unless that file explicitly includes the
+AngryDuck mirror. `_default` is the generic fallback namespace.
+
+Do not have Spegel and AngryDuck both own `_default/hosts.toml` at the same
+time.
 
 ## Configuration
 
-Everything tunable lives in one place — see [`.env.example`](.env.example)
-for the full annotated list. The highlights:
+The main settings are in the environment files/configmaps. Important worker
+settings include:
 
-| Variable | Default | What it controls |
-|---|---|---|
-| `RANK_TOP_N` | 2 | how many nodes get ordered per rank |
-| `RANK_PREFER_IMAGE_LOCALITY` | true | prefer a node that already has some tag of the target repo over an emptier node that doesn't |
-| `RANK_EXCLUDE_NODE_SUBSTRINGS` | (empty) | node names (substrings) to never pick as preheat targets — e.g. `master,control-plane` |
-| `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before an image is removed |
-| `GC_GRACE_PERIOD_S` | 60 | protects a freshly-preheated image until Argo actually needs it |
-| `GC_EXCLUDE_IMAGE_SUBSTRINGS` | (empty) | images (substrings) GC should never remove, checked or not — e.g. `pause,node-exporter` |
-| `GC_DRY_RUN` | true | log what GC would remove without deleting anything |
-| `CONTAINER_RUNTIME` | crictl | `crictl` (recommended), `containerd`, or `docker` |
-| `REGISTRY_CREDENTIALS_PATH` | (empty) | dockerconfigjson for private-registry preheat pulls |
+| Variable | Default | Meaning |
+|---|---:|---|
+| `REGISTRY_MIRROR_ENABLED` | `true` | Enable the node-local OCI mirror |
+| `REGISTRY_LISTEN_ADDR` | `:5000` | Mirror HTTP listener |
+| `REGISTRY_MAX_CONCURRENT_STREAMS` | `4` | Bound local content streams |
+| `REGISTRY_CANDIDATE_CACHE_S` | `1` | Peer candidate cache TTL |
+| `P2P_SOURCE_CANDIDATES` | `3` | Peer candidates returned by controller |
+| `CTR_PATH` | `/host/usr/local/bin/ctr` | Node `ctr` binary |
+| `CRICTL_PATH` | `/host/usr/local/bin/crictl` | Node `crictl` binary |
+| `CONTAINERD_PATH` | `/host/usr/local/bin/containerd` | Node containerd binary |
+| `CONTAINERD_CONFIG_PATH` | `/host/etc/containerd/config.toml` | Host containerd config |
+| `CONTAINERD_CERTS_DIR` | `/host/etc/containerd/certs.d` | Host registry config directory |
 
-Real environment variables (a k8s ConfigMap, in practice — see
-`deploy/stg/configmap.yaml`) always win over `.env` file values.
+`CONTAINER_RUNTIME=crictl` remains the recommended worker runtime for GC and
+reporting because one `crictl ps -o json` call can provide running-container
+image information without spawning one `ctr containers info` command per
+container.
 
-**On `CONTAINER_RUNTIME`:** stick with `crictl`. It lists every running
-container's image in one `crictl ps -o json` call; the `containerd`
-backend has to shell out to `ctr containers info <id>` once *per
-container*, which is enough subprocess overhead on a busy node to blow
-past a worker's own CPU limit. Only use `containerd` if `crictl` genuinely
-isn't available.
+## API
 
-**On registry credentials:** the worker pulls by shelling out to the
-runtime CLI directly, which bypasses kubelet's CRI plumbing entirely — so
-a Pod's `imagePullSecrets` (which only kubelet honors) does nothing for
-images the worker decides to pull on its own. Mount the same
-`dockerconfigjson` secret and point `REGISTRY_CREDENTIALS_PATH` at it;
-`deploy/stg/worker-daemonset.yaml` already does this. Leave it unset if
-every image you'll preheat is public.
+### Controller
 
-## Deploying
+- `POST /webhook/preheat` — queue preheat for an image.
+- `POST /report` — worker state/inventory report.
+- `POST /peer/source` — return a small repo-local peer candidate set.
+- `GET /status` — controller state.
+- `GET /healthz` — health check.
 
-```bash
-# 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.12 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.12 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.0.12
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.12
-# (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
+### Worker control
 
-# 2. Apply the manifests
-kubectl apply -f deploy/stg/namespace.yaml
-kubectl apply -f deploy/stg/configmap.yaml
-kubectl apply -f deploy/stg/controller.yaml
-kubectl apply -f deploy/stg/worker-daemonset.yaml
+- `POST /pull` — asynchronous preheat order; responds without waiting for the
+  image pull to finish.
+- `GET /healthz` — health check.
 
-# 3. Expose just the webhook to the pipeline (edit host/IP allowlist first)
-kubectl apply -f deploy/stg/ingress.yaml
-```
+### Worker registry
 
-Then point the pipeline at it, right after `docker push`:
+The registry listener exposes OCI Distribution-compatible `GET`/`HEAD` paths
+under `/v2/`. It is intended for containerd and peer-to-peer mirror traffic,
+not for direct human use.
+
+## Build
 
 ```bash
-curl -X POST https://angryduck-webhook.internal-registry.example.com/webhook/preheat \
-  -H 'Content-Type: application/json' \
-  -d "{\"image\":\"$IMAGE_REF\"}"
-```
-
-`/report`, `/status`, and `/healthz` are deliberately **not** in the
-Ingress's path rules — only `/webhook/preheat` is reachable from outside
-the cluster, and only from the allowlisted IP range. Worker-to-controller
-traffic never leaves the pod network.
-
-A few things worth knowing about the worker DaemonSet: it needs
-`hostNetwork: true`, `hostPID: true`, and a mounted containerd socket
-(hence the privileged security context); `NODE_EXPORTER_URL` assumes
-node-exporter also runs `hostNetwork` on each node; and it should run on
-every node, master/control-plane included, since GC needs to manage disk
-everywhere even where preheat targets are never chosen.
-
-## API summary
-
-**Controller**
-- `POST /webhook/preheat` — `{"image": "..."}`. `503` if zero fresh
-  workers. Short references get normalized (`nginx` → `docker.io/library/nginx:latest`) before anything else happens.
-- `POST /report` — workers call this themselves.
-- `GET /status` — every known worker plus the active target.
-- `GET /healthz` — liveness/readiness.
-
-**Worker**
-- `POST /pull` — `{"image": "...", "ordered_at": "..."}`, called by the
-  controller. Pulls asynchronously, returns `202` immediately.
-- `GET /healthz` — liveness/readiness.
-
-## Logging
-
-Every line is tagged `[DEBUG]`/`[INFO]`/`[WARN]`/`[ERROR]`, filtered by
-`LOG_LEVEL`. `info` (the default) already shows GC's reasoning — tick
-summaries, miss-count progress, what got removed and why — without the
-per-image "yes, this is fine" noise that `debug` adds on top.
-
-## Testing
-
-```bash
+cd app
+go build -o ../bin/angryduck-controller ./cmd/controller
+go build -o ../bin/angryduck-worker ./cmd/worker
 go test ./...
+go vet ./...
 ```
+
+The worker runtime image does not copy `ctr`, `crictl`, or `containerd`; those
+come from the node's host installation.
+
+## Kubernetes deployment
+
+The ready-to-use DaemonSets are under `deploy/stg/` and `deploy/mgmt/`.
+
+For Kubespray nodes, apply the containerd configuration described in
+[`deploy/kubespray/README.md`](deploy/kubespray/README.md) before rolling out
+the worker DaemonSet.

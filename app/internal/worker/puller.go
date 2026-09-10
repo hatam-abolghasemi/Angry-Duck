@@ -12,42 +12,34 @@ import (
 	"angryduck/internal/model"
 )
 
-// pullsTotal counts pulls this worker has actually executed, by result.
-// This is the worker-side half of the pull story; the controller-side half
-// (orders sent, whether the worker accepted them) is
-// angryduck_controller_pull_orders_total in controller/ranker.go. A pull
-// order being accepted and a pull actually succeeding are different
-// events — this counter is the only one that tells you the latter.
 var pullsTotal = metrics.NewCounterVec(
 	"angryduck_worker_pulls_total",
 	"Total image pulls executed by this worker, by result.",
 	"node", "result",
 )
 
-// Puller receives pull orders from the controller, executes them
-// asynchronously, and remembers when each image was ordered so the GC loop
-// can grant it a grace period even if nothing has actually run it yet
-// (Argo may not have synced the new pod onto this node the moment the pull
-// lands).
+// Puller receives preheat orders from the controller. The actual image pull
+// is intentionally just a normal CRI pull, so containerd's configured
+// registry mirror (AngryDuck) handles local/peer/origin routing transparently.
 type Puller struct {
 	runtime     Runtime
 	gracePeriod time.Duration
 	nodeID      string
 	mu          sync.Mutex
 	orderedAt   map[string]time.Time
+	inFlight    map[string]bool
 }
 
-// NewPuller builds a Puller. nodeID is only used to label metrics.
-func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string) *Puller {
+func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string, _ ...interface{}) *Puller {
 	return &Puller{
 		runtime:     runtime,
 		gracePeriod: gracePeriod,
 		nodeID:      nodeID,
 		orderedAt:   make(map[string]time.Time),
+		inFlight:    make(map[string]bool),
 	}
 }
 
-// HandlePull is the HTTP handler mounted at /pull.
 func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -62,39 +54,40 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, model.PullAck{Accepted: false, Reason: "missing image"})
 		return
 	}
-	// Defense-in-depth: the controller already normalizes at the webhook,
-	// but normalize here too in case /pull is ever hit directly, so `ctr`
-	// never sees an ambiguous short reference regardless of caller.
-	normalized := imageref.Normalize(order.Image)
-	if normalized != order.Image {
-		logging.Infof("angryduck-worker: normalized image reference %q to %q", order.Image, normalized)
-	}
-	order.Image = normalized
+	order.Image = imageref.Normalize(order.Image)
 
 	p.mu.Lock()
 	p.orderedAt[order.Image] = time.Now()
+	if p.inFlight[order.Image] {
+		p.mu.Unlock()
+		writeJSON(w, http.StatusAccepted, model.PullAck{Accepted: true})
+		return
+	}
+	p.inFlight[order.Image] = true
 	p.mu.Unlock()
 
-	logging.Infof("angryduck-worker: received pull order for image=%s", order.Image)
-
-	go func() {
-		start := time.Now()
-		logging.Infof("angryduck-worker: pulling image=%s", order.Image)
-		if err := p.runtime.PullImage(order.Image); err != nil {
-			logging.Errorf("angryduck-worker: pull failed for image=%s after %s: %v", order.Image, time.Since(start).Round(time.Millisecond), err)
-			pullsTotal.Inc(p.nodeID, "failure")
-			return
-		}
-		logging.Infof("angryduck-worker: pull succeeded for image=%s in %s", order.Image, time.Since(start).Round(time.Millisecond))
-		pullsTotal.Inc(p.nodeID, "success")
-	}()
-
+	logging.Infof("angryduck-worker[%s]: received preheat order image=%s", p.nodeID, order.Image)
+	go p.executePull(order.Image)
 	writeJSON(w, http.StatusAccepted, model.PullAck{Accepted: true})
 }
 
-// InGracePeriod reports whether an image was ordered pulled recently enough
-// that the GC loop should not remove it yet, even if nothing is currently
-// running it.
+func (p *Puller) executePull(image string) {
+	defer func() {
+		p.mu.Lock()
+		delete(p.inFlight, image)
+		p.mu.Unlock()
+	}()
+
+	start := time.Now()
+	if err := p.runtime.PullImage(image); err != nil {
+		logging.Errorf("angryduck-worker[%s]: preheat pull failed image=%s after %s: %v", p.nodeID, image, time.Since(start).Round(time.Millisecond), err)
+		pullsTotal.Inc(p.nodeID, "failure")
+		return
+	}
+	logging.Infof("angryduck-worker[%s]: preheat pull succeeded image=%s in %s", p.nodeID, image, time.Since(start).Round(time.Millisecond))
+	pullsTotal.Inc(p.nodeID, "success")
+}
+
 func (p *Puller) InGracePeriod(image string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -105,13 +98,6 @@ func (p *Puller) InGracePeriod(image string) bool {
 	return time.Since(t) <= p.gracePeriod
 }
 
-// PruneExpired drops orderedAt entries whose grace period has fully
-// elapsed. Without this, orderedAt grows by one entry per unique image
-// reference ever ordered, for the lifetime of the process — harmless at
-// small scale, but unbounded on a long-lived pod in a repo with a steady
-// stream of new tags. Safe to call on a timer (the GC loop already ticks
-// on one); an entry past its grace period has nothing left to protect, so
-// dropping it changes no GC decision.
 func (p *Puller) PruneExpired() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()

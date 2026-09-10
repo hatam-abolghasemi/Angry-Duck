@@ -19,6 +19,7 @@ data:
   # See stg/configmap.yaml — adjust the substring(s) if this cluster's
   # master node names don't contain "master".
   RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
+  P2P_SOURCE_CANDIDATES: "3"
 
   WORKER_LISTEN_ADDR: ":18081"
   NODE_EXPORTER_URL: "http://localhost:9100/metrics"
@@ -38,6 +39,16 @@ data:
   # over their own CPU limit on busy nodes. See worker.NewRuntime.
   CONTAINER_RUNTIME: "crictl"
   CONTAINER_RUNTIME_ENDPOINT: "unix:///run/containerd/containerd.sock"
+  CTR_PATH: "/host/usr/local/bin/ctr"
+  CRICTL_PATH: "/host/usr/local/bin/crictl"
+  CONTAINERD_CERTS_DIR: "/host/etc/containerd/certs.d"
+  CONTAINERD_PATH: "/host/usr/local/bin/containerd"
+  CONTAINERD_CONFIG_PATH: "/host/etc/containerd/config.toml"
+  REGISTRY_MIRROR_ENABLED: "true"
+  REGISTRY_LISTEN_ADDR: ":5000"
+  REGISTRY_MAX_CONCURRENT_STREAMS: "4"
+  REGISTRY_CANDIDATE_CACHE_S: "1"
+  IMAGE_INVENTORY_CACHE_S: "10"
   # Path to a mounted dockerconfigjson secret (same format imagePullSecrets
   # uses) so preheat pulls can authenticate to private registries — the
   # worker's own pull mechanism bypasses kubelet's CRI plumbing entirely,

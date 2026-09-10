@@ -21,16 +21,32 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.12
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.1.1
           env:
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
             - name: SELF_ADDRESS
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: CTR_PATH
+              value: /host/usr/local/bin/ctr
+            - name: CRICTL_PATH
+              value: /host/usr/local/bin/crictl
+            - name: CONTAINERD_PATH
+              value: /host/usr/local/bin/containerd
+            - name: CONTAINERD_CONFIG_PATH
+              value: /host/etc/containerd/config.toml
+            - name: CONTAINERD_CERTS_DIR
+              value: /host/etc/containerd/certs.d
+            - name: REGISTRY_LISTEN_ADDR
+              value: :5000
           envFrom:
             - configMapRef:
                 name: angryduck-config
@@ -40,6 +56,14 @@ spec:
           volumeMounts:
             - name: containerd-sock
               mountPath: /run/containerd/containerd.sock
+            - name: containerd-certs-d
+              mountPath: /host/etc/containerd/certs.d
+            - name: containerd-config
+              mountPath: /host/etc/containerd/config.toml
+              readOnly: true
+            - name: host-usr-local-bin
+              mountPath: /host/usr/local/bin
+              readOnly: true
             - name: registry-creds
               mountPath: /etc/angryduck/registry-creds
               readOnly: true
@@ -73,6 +97,18 @@ spec:
           hostPath:
             path: /run/containerd/containerd.sock
             type: Socket
+        - name: containerd-certs-d
+          hostPath:
+            path: /etc/containerd/certs.d
+            type: DirectoryOrCreate
+        - name: containerd-config
+          hostPath:
+            path: /etc/containerd/config.toml
+            type: File
+        - name: host-usr-local-bin
+          hostPath:
+            path: /usr/local/bin
+            type: Directory
         - name: registry-creds
           secret:
             secretName: gitlab-registry-pull

@@ -39,6 +39,7 @@ func main() {
 		nodeID = hostname
 	}
 
+	nodeIP := config.String("NODE_IP", "")
 	selfAddress := config.String("SELF_ADDRESS", "")
 	if selfAddress == "" {
 		log.Fatalf("angryduck-worker: SELF_ADDRESS must be set to a controller-reachable host or host:port (e.g. pod IP via downward API)")
@@ -60,6 +61,7 @@ func main() {
 	gcMissThreshold := config.Int("GC_MISS_THRESHOLD", 5)
 	gracePeriod := config.Duration("GC_GRACE_PERIOD_S", 60)
 	gcExcludeSubstrings := config.StringSlice("GC_EXCLUDE_IMAGE_SUBSTRINGS", nil)
+	// Kubespray installs its node-managed binaries under /usr/local/bin by default.
 	// crictl is the default: unlike ctr, it lists every running
 	// container's image in one call instead of one subprocess per
 	// container — see the comment on NewRuntime for why this matters.
@@ -72,6 +74,17 @@ func main() {
 	// matching logic, watch what GC decides via logs before letting it
 	// actually delete anything. Set GC_DRY_RUN=false to enable real removal.
 	gcDryRun := config.Bool("GC_DRY_RUN", true)
+	ctrPath := resolveToolPath(config.String("CTR_PATH", "/host/usr/local/bin/ctr"), "/usr/local/bin/ctr")
+	crictlPath := resolveToolPath(config.String("CRICTL_PATH", "/host/usr/local/bin/crictl"), "/usr/local/bin/crictl")
+	registryEnabled := config.Bool("REGISTRY_MIRROR_ENABLED", true)
+	registryListenAddr := config.String("REGISTRY_LISTEN_ADDR", ":5000")
+	registryMaxStreams := config.Int("REGISTRY_MAX_CONCURRENT_STREAMS", 4)
+	registryCandidateLimit := config.Int("P2P_SOURCE_CANDIDATES", 3)
+	registryCandidateCacheTTL := config.Duration("REGISTRY_CANDIDATE_CACHE_S", 1)
+	inventoryCacheTTL := config.Duration("IMAGE_INVENTORY_CACHE_S", 10)
+	containerdCertsDir := config.String("CONTAINERD_CERTS_DIR", "/host/etc/containerd/certs.d")
+	containerdPath := config.String("CONTAINERD_PATH", "/host/usr/local/bin/containerd")
+	containerdConfigPath := config.String("CONTAINERD_CONFIG_PATH", "/host/etc/containerd/config.toml")
 
 	// The worker pulls images by shelling out directly to the container
 	// runtime CLI, bypassing kubelet's CRI plumbing entirely — so
@@ -89,10 +102,23 @@ func main() {
 		log.Printf("angryduck-worker: loaded credentials for %d registr(y/ies) from %s", creds.Count(), credsPath)
 	}
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s registry_listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v ctr_path=%s crictl_path=%s containerd_path=%s containerd_config=%s registry_enabled=%v registry_max_streams=%d registry_candidate_limit=%d registry_candidate_ttl=%s inventory_cache_ttl=%s",
+		nodeID, listenAddr, registryListenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, ctrPath, crictlPath, containerdPath, containerdConfigPath, registryEnabled, registryMaxStreams, registryCandidateLimit, registryCandidateCacheTTL, inventoryCacheTTL)
 
-	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint)
+	if registryEnabled {
+		if err := worker.CheckContainerdMirrorCompatibility(containerdPath, containerdConfigPath); err != nil {
+			log.Printf("angryduck-worker[%s]: WARNING: %v", nodeID, err)
+		}
+		if err := worker.EnsureContainerdMirrorConfig(containerdCertsDir, nodeIP, registryListenAddr, true); err != nil {
+			log.Printf("angryduck-worker[%s]: warning: containerd mirror config was not installed: %v", nodeID, err)
+		} else {
+			log.Printf("angryduck-worker[%s]: containerd _default mirror configured at %s for node=%s", nodeID, containerdCertsDir, nodeIP)
+		}
+	}
+
+	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, ctrPath, crictlPath)
+	rt = worker.NewCachedRuntime(rt, inventoryCacheTTL)
+	registry := worker.NewRegistryMirror(ctrPath, controllerURL, nodeID, registryEnabled, registryCandidateLimit, registryMaxStreams, inventoryCacheTTL, registryCandidateCacheTTL)
 	puller := worker.NewPuller(rt, gracePeriod, nodeID)
 	gc := worker.NewGC(rt, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, rt)
@@ -102,14 +128,17 @@ func main() {
 	go reporter.Run(ctx)
 	go gc.Run(ctx)
 
-	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: worker.NewServer(puller),
-	}
+	httpServer := &http.Server{Addr: listenAddr, Handler: worker.NewServer(puller, nil)}
+	registryServer := &http.Server{Addr: registryListenAddr, Handler: worker.NewRegistryServer(registry)}
 
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("angryduck-worker[%s]: http server failed: %v", nodeID, err)
+			log.Fatalf("angryduck-worker[%s]: control http server failed: %v", nodeID, err)
+		}
+	}()
+	go func() {
+		if err := registryServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("angryduck-worker[%s]: registry http server failed: %v", nodeID, err)
 		}
 	}()
 
@@ -121,7 +150,24 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+	_ = registryServer.Shutdown(shutdownCtx)
 	cancel()
+}
+
+// resolveToolPath prefers the node-mounted runtime binary, but keeps
+// compatibility with legacy worker images that bundled ctr/crictl under
+// /usr/local/bin.
+func resolveToolPath(configured, fallback string) string {
+	if configured != "" {
+		if _, err := os.Stat(configured); err == nil {
+			return configured
+		}
+	}
+	if _, err := os.Stat(fallback); err == nil {
+		logging.Warnf("angryduck-worker: runtime tool %q is unavailable; falling back to %q", configured, fallback)
+		return fallback
+	}
+	return configured
 }
 
 // listenPort extracts the port from a listen address like ":18081" or

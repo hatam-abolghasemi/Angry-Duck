@@ -38,13 +38,14 @@ func main() {
 	// utilization-only ranking. Set to false to restore the old
 	// utilization-only behavior if this ever needs a quick rollback.
 	preferImageLocality := config.Bool("RANK_PREFER_IMAGE_LOCALITY", true)
+	peerSourceCandidates := config.Int("P2P_SOURCE_CANDIDATES", 3)
 
 	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v",
 		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality)
 
 	registry := controller.NewRegistry(staleAfter, targetTTL)
 	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality)
-	server := controller.NewServer(registry, ranker)
+	server := controller.NewServer(registry, ranker, peerSourceCandidates)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
