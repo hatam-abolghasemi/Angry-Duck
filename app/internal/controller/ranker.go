@@ -36,7 +36,15 @@ var pullOrdersTotal = metrics.NewCounterVec(
 // within TARGET_TTL_S re-ranks and re-fires at the same lowest-utilization
 // nodes (utilization barely moves between 10s ticks), so the same image
 // was being ordered to the same handful of nodes a dozen times over one
-// preheat window. The ranker itself never blocks waiting on a pull to
+// preheat window.
+//
+// And at most topN nodes are ever ordered per target image. Before this,
+// the dedup above had a side effect: each tick picked topN *new* nodes, so
+// over TARGET_TTL_S one push preheated the entire fleet from origin (seen
+// on stg: 18 of 18 workers ordered within 30s). Now preheat seeds topN
+// nodes and stops; every other node gets the image when a pod actually
+// needs it, from a seed, through its mirror. Ticks within the TTL only
+// replace seeds whose order failed. The ranker itself never blocks waiting on a pull to
 // finish either way — sendPullOrder fires in its own goroutine and only
 // confirms the worker *accepted* the order (HTTP 2xx), never that the pull
 // itself completed.
@@ -51,6 +59,12 @@ type Ranker struct {
 	mu              sync.Mutex
 	orderedForImage string
 	orderedNodes    map[string]bool
+	// slotsUsed counts orders for orderedForImage that were sent and not
+	// rejected. Preheat seeds exactly topN nodes per image; every other
+	// node gets the image on demand through its mirror. A failed order
+	// frees its slot (the node stays in orderedNodes, so it isn't picked
+	// again) and the next tick fills it with the next-best node.
+	slotsUsed int
 }
 
 // NewRanker builds a ranker bound to the given registry. excludeSubstrings
@@ -132,7 +146,11 @@ func (rk *Ranker) orderLowestN(image string) []string {
 		return nil
 	}
 
-	candidates := rk.notYetOrdered(image, eligible)
+	candidates, remaining := rk.notYetOrdered(image, eligible)
+	if remaining <= 0 {
+		logging.Debugf("angryduck-controller: image=%s already has its %d seed(s), nothing new this tick", image, rk.topN)
+		return nil
+	}
 	if len(candidates) == 0 {
 		logging.Debugf("angryduck-controller: all %d eligible worker(s) already ordered for image=%s, nothing new this tick", len(eligible), image)
 		return nil
@@ -140,7 +158,7 @@ func (rk *Ranker) orderLowestN(image string) []string {
 
 	ranked := rk.rankByLocality(image, candidates)
 
-	n := rk.topN
+	n := remaining
 	if n > len(ranked) {
 		n = len(ranked)
 	}
@@ -157,6 +175,7 @@ func (rk *Ranker) orderLowestN(image string) []string {
 	for _, w := range chosen {
 		ordered = append(ordered, w.NodeID)
 		rk.orderedNodes[w.NodeID] = true
+		rk.slotsUsed++
 		go rk.sendPullOrder(w.NodeID, w.Address, image)
 	}
 	rk.mu.Unlock()
@@ -166,15 +185,18 @@ func (rk *Ranker) orderLowestN(image string) []string {
 // notYetOrdered resets the ordered-nodes set the moment image differs from
 // the last image this ranker ordered for (a new push landed), then returns
 // the subset of eligible workers not yet recorded as ordered — preserving
-// eligible's existing ascending-utilization order.
-func (rk *Ranker) notYetOrdered(image string, eligible []*workerEntry) []*workerEntry {
+// eligible's existing ascending-utilization order — and how many seed
+// slots are still open for this image.
+func (rk *Ranker) notYetOrdered(image string, eligible []*workerEntry) ([]*workerEntry, int) {
 	rk.mu.Lock()
 	defer rk.mu.Unlock()
 
 	if image != rk.orderedForImage {
 		rk.orderedForImage = image
 		rk.orderedNodes = make(map[string]bool)
+		rk.slotsUsed = 0
 	}
+	remaining := rk.topN - rk.slotsUsed
 
 	candidates := make([]*workerEntry, 0, len(eligible))
 	for _, w := range eligible {
@@ -182,7 +204,17 @@ func (rk *Ranker) notYetOrdered(image string, eligible []*workerEntry) []*worker
 			candidates = append(candidates, w)
 		}
 	}
-	return candidates
+	return candidates, remaining
+}
+
+// releaseSlot frees a seed slot after a failed order, if the order was for
+// the image still being seeded.
+func (rk *Ranker) releaseSlot(image string) {
+	rk.mu.Lock()
+	defer rk.mu.Unlock()
+	if image == rk.orderedForImage && rk.slotsUsed > 0 {
+		rk.slotsUsed--
+	}
 }
 
 // rankByLocality reorders candidates — already sorted ascending by
@@ -274,12 +306,14 @@ func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
 	if err != nil {
 		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s failed: %v", nodeID, addr, err)
 		pullOrdersTotal.Inc(nodeID, "failure")
+		rk.releaseSlot(image)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s rejected: status=%d", nodeID, addr, resp.StatusCode)
 		pullOrdersTotal.Inc(nodeID, "failure")
+		rk.releaseSlot(image)
 		return
 	}
 	logging.Infof("angryduck-controller: ordered node=%s to pull image=%s", nodeID, image)

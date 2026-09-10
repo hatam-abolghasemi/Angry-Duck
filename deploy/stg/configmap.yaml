@@ -11,6 +11,8 @@ data:
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
+  # Exactly how many nodes preheat per push (it no longer spreads to the
+  # whole fleet). Everyone else gets the image from these on demand.
   RANK_TOP_N: "5"
   # Prefer a node that already has some older tag of the same repo locally
   # over an emptier node that doesn't — most layers are usually shared
@@ -58,11 +60,14 @@ data:
   REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"
 
   # --- Peer mirror (see .env.example for the full story) ---
-  # stg first. Spegel's _default/hosts.toml is shadowed for the registries
-  # below while this is on (containerd picks the per-registry file), so
-  # every registry.internal-registry.example.com pull is Angry Duck's peer path or origin.
+  # containerd asks the local worker first for every image; the worker
+  # imports it from a node that has it, or answers at once so containerd
+  # goes to origin.
   MIRROR_ENABLED: "true"
-  MIRROR_REGISTRIES: "registry.internal-registry.example.com"
+  # "*" = every registry (containerd's certs.d/_default). A registry with
+  # its own certs.d/<host>/ directory bypasses _default — the worker logs
+  # a WARN naming each one at startup.
+  MIRROR_REGISTRIES: "*"
   MIRROR_HOLD_TIMEOUT_S: "60"
   MIRROR_QUEUE_WAIT_S: "3"
   MIRROR_MAX_EXPORTS: "2"

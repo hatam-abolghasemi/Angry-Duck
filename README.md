@@ -153,6 +153,9 @@ A few properties fall out of this shape:
   `capabilities = ["pull"]` — no `resolve` — so containerd resolves tags
   against origin itself. A moved tag can never make a node import a stale
   image, and origin's answer is always the one that wins.
+- **Preheat seeds, the mirror spreads.** A push preheats exactly
+  `RANK_TOP_N` nodes from origin and stops; a node that needs the image
+  later gets it from one of them, or from any node that got it since.
 - **Every answer is a 404.** After a successful import, after a failed one,
   and instantly when nobody has the image. containerd falls through to
   origin on any mirror error, so a dead or wedged worker costs a
@@ -232,7 +235,7 @@ for the full annotated list. The highlights:
 
 | Variable | Default | What it controls |
 |---|---|---|
-| `RANK_TOP_N` | 2 | how many nodes get ordered per rank |
+| `RANK_TOP_N` | 2 | exactly how many nodes preheat per pushed image |
 | `RANK_PREFER_IMAGE_LOCALITY` | true | prefer a node that already has some tag of the target repo over an emptier node that doesn't |
 | `RANK_EXCLUDE_NODE_SUBSTRINGS` | (empty) | node names (substrings) to never pick as preheat targets — e.g. `master,control-plane` |
 | `GC_MISS_THRESHOLD` | 5 | consecutive unused checks before an image is removed |
@@ -243,7 +246,7 @@ for the full annotated list. The highlights:
 | `REGISTRY_CREDENTIALS_PATH` | (empty) | dockerconfigjson for private-registry preheat pulls |
 | `HOST_ROOT` | /proc/1/root | where the node's filesystem is seen; node binaries run chrooted here |
 | `MIRROR_ENABLED` | false | put the worker in front of origin for containerd |
-| `MIRROR_REGISTRIES` | (empty) | registries to mirror, e.g. `registry.internal-registry.example.com` |
+| `MIRROR_REGISTRIES` | `*` | `*` = every registry (via `certs.d/_default`), or an explicit host list |
 | `MIRROR_PEER_TOKEN` | (empty) | shared secret for `/export`; required, from the `angryduck-mirror` Secret |
 | `MIRROR_HOLD_TIMEOUT_S` | 60 | longest a containerd pull waits on a peer transfer |
 | `MIRROR_MAX_EXPORTS` / `MIRROR_MAX_IMPORTS` | 2 / 2 | concurrent ctr transfer processes per node |
@@ -272,13 +275,15 @@ every image you'll preheat is public.
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.0 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.0 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.0
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.0
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.1 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.1 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.1
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.1
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
-# 2. The peer-transfer token (once per cluster; any 16+ char secret)
+# 2. The peer-transfer token — BEFORE the DaemonSet (once per cluster).
+#    If workers start without it they exit with a clear error and
+#    CrashLoop; creating the Secret fixes them on their next restart.
 sudo kubectl -n angryduck create secret generic angryduck-mirror \
   --from-literal=token="$(openssl rand -hex 32)"
 
@@ -314,14 +319,15 @@ every node, master/control-plane included, since GC needs to manage disk
 everywhere even where preheat targets are never chosen.
 
 For the mirror, containerd's CRI registry `config_path` must point at
-`/etc/containerd/certs.d` (it already does wherever Spegel ran; the worker
-warns at startup if not). The worker writes
-`certs.d/registry.internal-registry.example.com/hosts.toml` on start and deletes it on
-stop; it never touches a `hosts.toml` it didn't write. **While Spegel is
-still installed**, that per-registry file takes precedence over Spegel's
-`_default` for `registry.internal-registry.example.com`, so those pulls use Angry Duck's
-path (or origin) and not Spegel's — a clean comparison. Spegel clears
-`certs.d` when it restarts; the worker re-writes its file within 30s.
+`/etc/containerd/certs.d` (the worker warns at startup if not). With
+`MIRROR_REGISTRIES: "*"` the worker writes `certs.d/_default/hosts.toml` on
+start and deletes it on stop, which covers every registry that has no
+`certs.d/<host>/` directory of its own. containerd reads a registry's own
+directory *instead of* `_default`, so any such directory — Kubespray's
+`containerd_registries_mirrors`, or leftovers from Spegel — means that
+registry bypasses the mirror; the worker names each one in a WARN at
+startup. It never modifies a `hosts.toml` it didn't write, including a
+foreign `_default`.
 
 To turn the mirror off on a cluster: `MIRROR_ENABLED: "false"` and roll the
 DaemonSet. Each worker deletes its `hosts.toml` as it stops, and

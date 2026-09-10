@@ -261,6 +261,42 @@ func TestHostsTOMLWritesRemovesAndRespectsForeignFiles(t *testing.T) {
 	}
 }
 
+func TestHostsTOMLDefaultCoversEveryRegistryAndKeepsOrigins(t *testing.T) {
+	dir := t.TempDir()
+	hx, _ := NewHostExec("")
+	h := NewHostsTOML(hx, dir, []string{"*"}, "http://127.0.0.1:18081")
+	h.Ensure()
+	b, err := os.ReadFile(filepath.Join(dir, "_default", "hosts.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if strings.Contains(s, "\nserver") || strings.HasPrefix(s, "server") {
+		t.Fatalf("_default must not pin a server, or every registry would be sent to it:\n%s", s)
+	}
+	if !strings.Contains(s, `[host."http://127.0.0.1:18081"]`) || !strings.Contains(s, `capabilities = ["pull"]`) {
+		t.Fatalf("mirror entry missing:\n%s", s)
+	}
+	h.Remove()
+	if _, err := os.Stat(filepath.Join(dir, "_default")); !os.IsNotExist(err) {
+		t.Fatal("Remove should delete _default")
+	}
+}
+
+func TestHostsTOMLLeavesForeignDefaultAlone(t *testing.T) {
+	dir := t.TempDir()
+	hx, _ := NewHostExec("")
+	spegel := filepath.Join(dir, "_default", "hosts.toml")
+	_ = os.MkdirAll(filepath.Dir(spegel), 0o755)
+	_ = os.WriteFile(spegel, []byte("[host.\"http://127.0.0.1:30020\"]\n"), 0o644)
+	h := NewHostsTOML(hx, dir, []string{"*"}, "http://127.0.0.1:18081")
+	h.Ensure()
+	h.Remove()
+	if b, _ := os.ReadFile(spegel); strings.Contains(string(b), hostsMarker) || !strings.Contains(string(b), "30020") {
+		t.Fatalf("a _default someone else wrote must survive untouched:\n%s", b)
+	}
+}
+
 // --- mirror protocol helpers ------------------------------------------------
 
 func TestParseV2Path(t *testing.T) {

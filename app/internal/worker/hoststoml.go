@@ -43,13 +43,22 @@ type HostsTOML struct {
 // NewHostsTOML builds a manager. registries are hostnames
 // (registry.internal-registry.example.com, docker.io, host:5000); prefix one with http://
 // for a plain-HTTP registry. https is assumed otherwise.
+//
+// "*" means every registry: it manages certs.d/_default/hosts.toml, which
+// containerd uses for any registry that has no directory of its own. That
+// file carries no `server` line, so containerd keeps its normal origin for
+// each registry (https://<host>, registry-1.docker.io for docker.io) and
+// only puts the worker in front of it.
 func NewHostsTOML(hx *HostExec, dir string, registries []string, endpoint string) *HostsTOML {
 	return &HostsTOML{hx: hx, dir: dir, registries: registries, endpoint: endpoint, warned: make(map[string]bool)}
 }
 
 // Check warns when containerd is not configured to read dir at all, in
-// which case every file written here is dead text.
+// which case every file written here is dead text, and — when covering
+// every registry via _default — names each registry whose own directory
+// shadows _default and therefore bypasses the mirror.
 func (h *HostsTOML) Check() {
+	h.warnShadowing()
 	cfg, err := os.ReadFile(h.hx.HostFile("/etc/containerd/config.toml"))
 	if err != nil {
 		logging.Warnf("angryduck-worker-mirror: could not read /etc/containerd/config.toml to verify config_path (%v); mirror only works if containerd's registry config_path = %q", err, h.dir)
@@ -58,6 +67,42 @@ func (h *HostsTOML) Check() {
 	re := regexp.MustCompile(`(?m)^\s*config_path\s*=\s*["']` + regexp.QuoteMeta(h.dir) + `/?["']`)
 	if !re.Match(cfg) {
 		logging.Warnf("angryduck-worker-mirror: containerd config_path does not point at %s — containerd will ignore the mirror until it does (needs one containerd restart after setting it)", h.dir)
+	}
+}
+
+// warnShadowing lists certs.d/<host>/ directories not written by this
+// worker. containerd consults a registry's own directory INSTEAD of
+// _default (never both), so each one is a registry the mirror can't see.
+// Directories starting with "_" (_default, Spegel's _backup) aren't
+// registries and are skipped.
+func (h *HostsTOML) warnShadowing() {
+	covered := false
+	mine := map[string]bool{}
+	for _, e := range h.registries {
+		d, _ := splitRegistry(e)
+		mine[d] = true
+		if d == "_default" {
+			covered = true
+		}
+	}
+	if !covered {
+		return
+	}
+	entries, err := os.ReadDir(h.hx.HostFile(h.dir))
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, "_") || mine[name] {
+			continue
+		}
+		b, err := os.ReadFile(h.hx.HostFile(filepath.Join(h.dir, name, "hosts.toml")))
+		if err == nil && bytes.Contains(b, []byte(hostsMarker)) {
+			continue // a per-registry file of ours from an earlier config; Ensure/Remove handle it
+		}
+		logging.Warnf("angryduck-worker-mirror: %s has its own hosts.toml config, which containerd uses instead of _default — pulls from %s bypass the mirror (delete or merge %s to cover it)",
+			name, name, filepath.Join(h.dir, name))
 	}
 }
 
@@ -97,7 +142,11 @@ func (h *HostsTOML) Ensure() {
 			logging.Errorf("angryduck-worker-mirror: writing hosts.toml for %s: %v", reg, err)
 			continue
 		}
-		logging.Infof("angryduck-worker-mirror: containerd now tries %s before origin for %s", h.endpoint, reg)
+		label := reg
+		if reg == "_default" {
+			label = "every registry without its own certs.d entry (_default)"
+		}
+		logging.Infof("angryduck-worker-mirror: containerd now tries %s before origin for %s", h.endpoint, label)
 	}
 }
 
@@ -135,7 +184,12 @@ func renderHostsTOML(server, endpoint string) string {
 	var b strings.Builder
 	b.WriteString(hostsMarker + "\n")
 	b.WriteString("# Written at worker start, removed at worker stop. Do not edit.\n")
-	b.WriteString(`server = "` + server + "\"\n\n")
+	if server != "" {
+		b.WriteString(`server = "` + server + "\"\n")
+	} else {
+		b.WriteString("# No server line: containerd keeps each registry's usual origin.\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(`[host."` + endpoint + "\"]\n")
 	b.WriteString("  capabilities = [\"pull\"]\n")
 	b.WriteString("  dial_timeout = \"200ms\"\n")
@@ -145,6 +199,9 @@ func renderHostsTOML(server, endpoint string) string {
 // splitRegistry turns a MIRROR_REGISTRIES entry into the certs.d
 // directory name containerd looks up and the origin server URL.
 func splitRegistry(entry string) (dir, server string) {
+	if entry == "*" || entry == "_default" {
+		return "_default", ""
+	}
 	if rest, ok := strings.CutPrefix(entry, "http://"); ok {
 		return rest, entry
 	}

@@ -11,6 +11,8 @@ data:
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
+  # Exactly how many nodes preheat per push (it no longer spreads to the
+  # whole fleet). Everyone else gets the image from these on demand.
   RANK_TOP_N: "5"
   # See stg/configmap.yaml — prefer a node that already has some tag of
   # the target repo locally over an emptier node without it. Set to
@@ -55,7 +57,10 @@ data:
   # angryduck_worker_mirror_transfers_total{result="hit"} and the worker
   # pods' memory under real rollouts.
   MIRROR_ENABLED: "false"
-  MIRROR_REGISTRIES: "registry.internal-registry.example.com"
+  # "*" = every registry (containerd's certs.d/_default). A registry with
+  # its own certs.d/<host>/ directory bypasses _default — the worker logs
+  # a WARN naming each one at startup.
+  MIRROR_REGISTRIES: "*"
   MIRROR_HOLD_TIMEOUT_S: "60"
   MIRROR_QUEUE_WAIT_S: "3"
   MIRROR_MAX_EXPORTS: "2"

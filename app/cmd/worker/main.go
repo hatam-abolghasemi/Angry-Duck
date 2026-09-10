@@ -100,7 +100,8 @@ func main() {
 	hostRoot := config.String("HOST_ROOT", "/proc/1/root")
 
 	mirrorEnabled := config.Bool("MIRROR_ENABLED", false)
-	mirrorRegistries := config.StringSlice("MIRROR_REGISTRIES", nil)
+	// "*" = every registry, via containerd's certs.d/_default.
+	mirrorRegistries := config.StringSlice("MIRROR_REGISTRIES", []string{"*"})
 	mirrorToken := config.String("MIRROR_PEER_TOKEN", "")
 
 	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s mirror=%v",
@@ -170,12 +171,15 @@ func main() {
 	cancel()
 }
 
-// setupMirror validates mirror config and builds its pieces. Any problem
-// disables the mirror with a loud log instead of killing the worker:
-// preheat and GC are still worth running without it.
+// setupMirror validates mirror config and builds its pieces. With
+// MIRROR_ENABLED=true any problem is fatal: a worker that quietly runs
+// without the mirror looks healthy while every pull goes to origin (that
+// is exactly how the first stg test went — pods started before the token
+// Secret existed). Crashing makes it visible, and the restart re-reads
+// the Secret, so creating it fixes the pods without a manual rollout.
 func setupMirror(nodeID string, hx *worker.HostExec, inv *worker.Inventory, controllerURL, runtimeKind, runtimeEndpoint, listenAddr string, registries []string, token string) (*worker.Mirror, *worker.HostsTOML) {
 	fail := func(format string, args ...interface{}) (*worker.Mirror, *worker.HostsTOML) {
-		log.Printf("angryduck-worker[%s]: MIRROR DISABLED: "+format, append([]interface{}{nodeID}, args...)...)
+		log.Fatalf("angryduck-worker[%s]: MIRROR_ENABLED=true but cannot start the mirror: "+format, append([]interface{}{nodeID}, args...)...)
 		return nil, nil
 	}
 	if strings.EqualFold(runtimeKind, "docker") {

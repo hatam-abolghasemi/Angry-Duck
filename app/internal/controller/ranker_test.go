@@ -323,3 +323,64 @@ func TestRankerLocalityMatchesByRepoNotTag(t *testing.T) {
 func (rk *Ranker) tickForTest(image string) []string {
 	return rk.orderLowestN(image)
 }
+
+// TestRankerSeedsExactlyTopNPerImage is the stg regression: with the old
+// dedup, every tick ordered topN NEW nodes until the TTL ran out, so one
+// push preheated the whole fleet. Now later ticks order nobody.
+func TestRankerSeedsExactlyTopNPerImage(t *testing.T) {
+	registry := NewRegistry(time.Minute, time.Minute)
+	var recs []*pullOrderRecorder
+	for i := 0; i < 6; i++ {
+		rec := newPullOrderRecorder(t)
+		recs = append(recs, rec)
+		registry.Update(model.WorkerReport{
+			NodeID: "worker" + string(rune('a'+i)), Address: rec.address,
+			Utilization: float64(i) / 10, Timestamp: time.Now(),
+		})
+	}
+	rk := NewRanker(registry, 2, time.Hour, nil, true)
+
+	if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 2 {
+		t.Fatalf("first tick should seed 2, got %v", got)
+	}
+	waitForPulls(t, recs...)
+	for i := 0; i < 5; i++ {
+		if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 0 {
+			t.Fatalf("tick %d ordered %v after the seeds were placed; preheat must not fan out", i+2, got)
+		}
+	}
+	total := 0
+	for _, r := range recs {
+		total += len(r.received())
+	}
+	if total != 2 {
+		t.Fatalf("%d pull orders delivered, want 2", total)
+	}
+}
+
+// TestRankerReplacesAFailedSeed: a rejected order frees its slot, the next
+// tick fills it with a different node, and the failed node isn't retried.
+func TestRankerReplacesAFailedSeed(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer bad.Close()
+	good := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{NodeID: "broken", Address: bad.Listener.Addr().String(), Utilization: 0.01, Timestamp: time.Now()})
+	registry.Update(model.WorkerReport{NodeID: "healthy", Address: good.address, Utilization: 0.50, Timestamp: time.Now()})
+	rk := NewRanker(registry, 1, time.Hour, nil, true)
+
+	if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 1 || got[0] != "broken" {
+		t.Fatalf("lowest utilization should be tried first, got %v", got)
+	}
+	time.Sleep(100 * time.Millisecond) // the rejected send releases the slot
+	if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 1 || got[0] != "healthy" {
+		t.Fatalf("freed slot should go to the next node, got %v", got)
+	}
+	waitForPulls(t, good)
+	if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 0 {
+		t.Fatalf("slot filled; nothing more expected, got %v", got)
+	}
+}
