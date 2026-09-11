@@ -448,6 +448,15 @@ var tagFallbackTotal = metrics.NewCounterVec(
 // fallback digest silently becoming the permanent answer for a tag is
 // the actual danger, not the mechanism itself.
 func (m *Mirror) FallbackImport(ctx context.Context, image string) error {
+	if isDigest(image) {
+		// kubelet reports a bare "sha256:..." as a container's image when
+		// the pod's spec pinned a digest directly — there is no tag here
+		// to resolve, and nothing to trust: the digest IS the identity
+		// the pod is already waiting on, so this is exactly the mirror's
+		// ordinary "does a fresh peer have it" question, just asked
+		// outside of containerd's own pull instead of during it.
+		return m.fallbackImportDigest(ctx, image)
+	}
 	digest, observedAt, ok, err := m.resolveTag(ctx, image)
 	if err != nil {
 		tagFallbackTotal.Inc(m.cfg.NodeID, "resolve_error")
@@ -488,6 +497,39 @@ func (m *Mirror) FallbackImport(ctx context.Context, image string) error {
 			}
 			tagFallbackTotal.Inc(m.cfg.NodeID, "hit")
 			logging.Warnf("angryduck-worker-podwatch: recovered %s from %s using a %s-old fallback digest", image, peer, age)
+			return nil
+		}
+	}
+	tagFallbackTotal.Inc(m.cfg.NodeID, "import_failed")
+	return fmt.Errorf("every candidate peer for %s failed", digest)
+}
+
+// fallbackImportDigest handles a pod stuck on an already-digest-pinned
+// reference (kubelet reports a bare "sha256:..." for a container whose
+// spec used a digest, not a tag). Unlike FallbackImport's tag path,
+// there's no resolve step and no trust decision — the digest already IS
+// the exact identity the pod is waiting on — and no final `ctr images
+// tag` either, since once the digest itself is present in this node's
+// content store, containerd already satisfies a by-digest pull from it
+// directly with no alias needed.
+func (m *Mirror) fallbackImportDigest(ctx context.Context, digest string) error {
+	if m.inv.Has(digest) {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "hit_local")
+		return nil
+	}
+	peers, err := m.peers(ctx, digest)
+	if err != nil {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "peer_lookup_failed")
+		return fmt.Errorf("peer lookup for %s: %w", digest, err)
+	}
+	if len(peers) == 0 {
+		tagFallbackTotal.Inc(m.cfg.NodeID, "no_peer")
+		return fmt.Errorf("no fresh peer currently holds %s", digest)
+	}
+	for _, peer := range peers {
+		if m.importFrom(ctx, peer, digest, digest, true) == outcomeOK {
+			tagFallbackTotal.Inc(m.cfg.NodeID, "hit")
+			logging.Infof("angryduck-worker-podwatch: recovered digest-pinned image %s from %s", digest, peer)
 			return nil
 		}
 	}
@@ -604,11 +646,19 @@ func (m *Mirror) ServeExport(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
-		// "not found" means this node's content store is missing blobs
-		// for the image — stop advertising it. A broken pipe just means
-		// the requester went away and says nothing about us.
-		if strings.Contains(msg, "not found") {
+		// Broaden this beyond the original "not found" check: production
+		// showed a blob can be present but truncated/corrupted in the
+		// content store, which ctr reports as an ingest/EOF error, not
+		// "not found" — and multiple nodes hit the exact same digest and
+		// byte count, so it's a real content problem, not chance. Treat
+		// ANY export failure as evidence this node can't actually produce
+		// the digest, with one deliberate exception: the requester simply
+		// disconnecting (broken pipe / connection reset) says nothing
+		// about whether we could have served it, so that alone must not
+		// stop future advertising.
+		if !isPeerDisconnect(msg) {
 			m.inv.MarkUnexportable(digest)
+			logging.Warnf("angryduck-worker-mirror: marking %s unexportable on this node after export failure: %s", digest, msg)
 		}
 		mirrorExportsTotal.Inc(m.cfg.NodeID, "failed")
 		logging.Warnf("angryduck-worker-mirror: export of %s to %s failed after %s: %v: %s", ref, r.RemoteAddr, time.Since(start).Round(time.Millisecond), err, msg)
@@ -621,6 +671,22 @@ func (m *Mirror) ServeExport(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// isPeerDisconnect reports whether an export failure's stderr indicates
+// the requester simply went away mid-transfer, rather than this node
+// being unable to produce the content. Deliberately a narrow allowlist
+// of known disconnect phrasing (ctr on Linux) rather than a broad
+// denylist of "real" failures — the safer default is to assume an
+// unrecognized error means we can't serve this digest, not the reverse.
+func isPeerDisconnect(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, s := range []string{"broken pipe", "connection reset by peer", "use of closed network connection"} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
 
 func acquire(ctx context.Context, slots chan struct{}, wait time.Duration) bool {
 	select {

@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"angryduck/internal/model"
 )
 
 // fakeLister is a scriptable podLister: each call to listStuckImages pops
@@ -40,12 +44,13 @@ func (f *fakeLister) listStuckImages(ctx context.Context, nodeID string) ([]podS
 
 func newTestPodWatch(client podLister, backoff time.Duration, fix func(context.Context, string) error) *PodWatch {
 	return &PodWatch{
-		nodeID:    "test-node",
-		client:    client,
-		interval:  time.Second, // irrelevant to tick() calls made directly
-		backoff:   backoff,
-		fix:       fix,
-		attempted: make(map[string]time.Time),
+		nodeID:      "test-node",
+		client:      client,
+		interval:    time.Second, // irrelevant to tick() calls made directly
+		backoff:     backoff,
+		fix:         fix,
+		attempted:   make(map[string]time.Time),
+		lastWarnLog: make(map[string]time.Time),
 	}
 }
 
@@ -157,6 +162,109 @@ func TestPodWatchTick_FixErrorDoesNotPanicOrBlockOthers(t *testing.T) {
 	pw.tick(context.Background())
 	if len(fixed) != 2 {
 		t.Fatalf("expected both images attempted despite the first failing, got %v", fixed)
+	}
+}
+
+func TestPodWatchTick_ExcludedNamespaceIsFullyIgnored(t *testing.T) {
+	lister := &fakeLister{responses: [][]podStuckImage{{
+		{Namespace: "kyverno-test", Pod: "nginx", Container: "nginx", Image: "myjob:12", Reason: "ImagePullBackOff"},
+	}}}
+	called := false
+	pw := newTestPodWatch(lister, time.Minute, func(_ context.Context, _ string) error {
+		called = true
+		return nil
+	})
+	pw.excludeNamespaces = []string{"kyverno-test", "k8sgpt-demo"}
+	pw.tick(context.Background())
+	if called {
+		t.Fatal("fix must not be called for an excluded namespace")
+	}
+}
+
+func TestPodWatchTick_ExcludedImageIsFullyIgnored(t *testing.T) {
+	lister := &fakeLister{responses: [][]podStuckImage{{
+		{Namespace: "some-ns", Pod: "p", Container: "c", Image: "repo-afra.internal-dev.example.com/nginx:this-tag-does-not-exist-9999", Reason: "ImagePullBackOff"},
+	}}}
+	called := false
+	pw := newTestPodWatch(lister, time.Minute, func(_ context.Context, _ string) error {
+		called = true
+		return nil
+	})
+	pw.excludeImages = []string{"this-tag-does-not-exist"}
+	pw.tick(context.Background())
+	if called {
+		t.Fatal("fix must not be called for an excluded image substring")
+	}
+}
+
+func TestPodWatchTick_ExclusionIsSubstringNotExactMatch(t *testing.T) {
+	lister := &fakeLister{responses: [][]podStuckImage{{
+		{Namespace: "kyverno-test-2", Pod: "p", Container: "c", Image: "img-a", Reason: "ImagePullBackOff"},
+	}}}
+	called := false
+	pw := newTestPodWatch(lister, time.Minute, func(_ context.Context, _ string) error {
+		called = true
+		return nil
+	})
+	pw.excludeNamespaces = []string{"kyverno-test"}
+	pw.tick(context.Background())
+	if called {
+		t.Fatal("substring match should exclude kyverno-test-2 too")
+	}
+}
+
+func TestPodWatchTick_RepeatedSightingLogsWarnOnceThenDebug(t *testing.T) {
+	lister := &fakeLister{responses: [][]podStuckImage{
+		{{Namespace: "ns", Pod: "p1", Container: "c", Image: "img-a", Reason: "ImagePullBackOff"}},
+		{{Namespace: "ns", Pod: "p1", Container: "c", Image: "img-a", Reason: "ImagePullBackOff"}},
+	}}
+	pw := newTestPodWatch(lister, time.Hour, nil)
+	key := "ns/p1/c"
+	if pw.recentlyWarned(key) {
+		t.Fatal("must not be considered warned before any tick")
+	}
+	pw.tick(context.Background())
+	if !pw.recentlyWarned(key) {
+		t.Fatal("first sighting should mark this stuck container as warned")
+	}
+	before := pw.lastWarnLog[key]
+	pw.tick(context.Background())
+	if !pw.lastWarnLog[key].Equal(before) {
+		t.Fatal("a repeat sighting within the backoff window must not refresh the warn timestamp")
+	}
+}
+
+// --- FallbackImport's digest-pinned path ------------------------------------
+
+func TestFallbackImportBareDigestSkipsResolveAndTagging(t *testing.T) {
+	fakeCtrOnPath(t)
+	m, inv := newTestMirror(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			t.Error("a bare digest must never need /resolve — it already IS the identity")
+		}
+		if r.URL.Path == "/peers" {
+			t.Error("must not look up peers when the digest is already local")
+		}
+	}))
+	inv.Add(testDigest, "reg/app@"+testDigest)
+
+	if err := m.FallbackImport(context.Background(), testDigest); err != nil {
+		t.Fatalf("FallbackImport: %v", err)
+	}
+}
+
+func TestFallbackImportBareDigestNoPeer(t *testing.T) {
+	m, _ := newTestMirror(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			t.Error("a bare digest must never call /resolve")
+		case "/peers":
+			_ = json.NewEncoder(w).Encode(model.PeersResponse{})
+		}
+	}))
+	err := m.FallbackImport(context.Background(), testDigest)
+	if err == nil || !strings.Contains(err.Error(), "no fresh peer") {
+		t.Fatalf("err = %v, want a 'no fresh peer' error", err)
 	}
 }
 

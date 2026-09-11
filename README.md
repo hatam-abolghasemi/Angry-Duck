@@ -167,10 +167,15 @@ mechanism Angry Duck has.
   the *exact* reference the stuck pod is waiting on. kubelet's own
   `ImageStatus` check then finds it present on its next retry and never
   calls origin — no need to touch the pod at all.
-- **This is a trust decision, not a confirmation.** Every other path in
-  Angry Duck ultimately defers to origin for what a tag means; this one
-  can't, by construction — origin is exactly what's unreachable. There is
-  deliberately no allowlist restricting which images this applies to.
+- **This is a trust decision, not a confirmation** — except when the pod
+  is already pinned to an exact digest (kubelet reports a bare
+  `sha256:...` when a pod's spec used one directly): there, the digest
+  itself already IS the identity being waited on, so it's answered
+  exactly like the mirror's own "does a fresh peer have it" question, no
+  trust involved. Every other path in Angry Duck ultimately defers to
+  origin for what a *tag* means; the tag-resolving path can't, by
+  construction — origin is exactly what's unreachable. There is
+  deliberately no allowlist restricting which tags this applies to.
   Instead, every fallback attempt logs the digest's age at `WARN`
   regardless of outcome, and two metrics exist specifically so this
   doesn't go unnoticed: `angryduck_worker_pod_image_pull_failures_total{node}`
@@ -178,6 +183,17 @@ mechanism Angry Duck has.
   "is this node having pull problems at all") and
   `angryduck_worker_tag_fallback_total{node,result}` (the rescue
   attempt's own outcome). Watch both.
+- **`POD_WATCH_EXCLUDE_NAMESPACE_SUBSTRINGS` / `POD_WATCH_EXCLUDE_IMAGE_SUBSTRINGS`**
+  exist because a real fleet accumulates long-abandoned feature-branch
+  deployments and deliberately-broken test/demo resources (chaos-testing
+  namespaces, policy-testing images) that pod-watch would otherwise
+  re-log at `WARN` on every poll, on every node, forever — the first
+  rollout here found exactly that. A match is ignored entirely: no log,
+  no metric, no fix attempt. Beyond that, a stuck container's own first
+  sighting still logs at `WARN`; a repeat sighting of the *same* one
+  within `POD_WATCH_RETRY_BACKOFF_S` drops to `DEBUG` (the failure
+  counter still increments every time either way — only the repeated log
+  line is throttled).
 - The controller's tag index only advances a digest's "observed" age when
   the digest for that tag actually *changes* — a node re-reporting the
   same cached mapping on every heartbeat does not make an old fact look
@@ -316,7 +332,8 @@ for the full annotated list. The highlights:
 | `MIRROR_MAX_EXPORTS` / `MIRROR_MAX_IMPORTS` | 2 / 2 | concurrent ctr transfer processes per node |
 | `POD_WATCH_ENABLED` | true | rescue pods stuck in ImagePullBackOff by importing their image from a peer under its exact tag |
 | `POD_WATCH_INTERVAL_S` | 30 | how often to poll this node's pods for stuck pulls |
-| `POD_WATCH_RETRY_BACKOFF_S` | 300 | how long to wait before retrying a fix that just failed |
+| `POD_WATCH_RETRY_BACKOFF_S` | 300 | how long to wait before retrying a fix that just failed (also throttles repeat WARN logs for the same stuck container) |
+| `POD_WATCH_EXCLUDE_NAMESPACE_SUBSTRINGS` / `POD_WATCH_EXCLUDE_IMAGE_SUBSTRINGS` | (empty) | ignore stuck pods matching these entirely — no log, no metric, no fix attempt |
 
 Real environment variables (a k8s ConfigMap, in practice — see
 `deploy/stg/configmap.yaml`) always win over `.env` file values.
@@ -325,10 +342,10 @@ Real environment variables (a k8s ConfigMap, in practice — see
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.3 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.3 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.3
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.3
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.4 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.4 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.3.4
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.4
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. The peer-transfer token — BEFORE the DaemonSet (once per cluster).

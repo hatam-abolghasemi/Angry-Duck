@@ -129,11 +129,11 @@ func (g *GC) isExcluded(image string) bool {
 func (g *GC) Run(ctx context.Context) {
 	ticker := time.NewTicker(g.interval)
 	defer ticker.Stop()
-	logging.Infof("angryduck-worker-gc: loop started: check_interval=%s miss_threshold=%d dry_run=%v", g.interval, g.missThreshold, g.dryRun)
+	logging.Infof("angryduck-worker-gc: cleanup started — checking every %s, and removing an image once it has been unused for %d check(s) in a row (dry_run=%v: when true, only logs what it would remove, without deleting anything)", g.interval, g.missThreshold, g.dryRun)
 	for {
 		select {
 		case <-ctx.Done():
-			logging.Infof("angryduck-worker-gc: loop stopping")
+			logging.Infof("angryduck-worker-gc: cleanup stopped")
 			return
 		case <-ticker.C:
 			g.tick()
@@ -145,7 +145,7 @@ func (g *GC) tick() {
 	tickStart := time.Now()
 
 	if pruned := g.puller.PruneExpired(); pruned > 0 {
-		logging.Debugf("angryduck-worker-gc: pruned %d expired pull-order record(s) from the puller's grace-period tracker", pruned)
+		logging.Debugf("angryduck-worker-gc: %d image(s) aged out of their post-pull protection window", pruned)
 	}
 
 	// One listing for both the local ref list and the digest map, and
@@ -156,19 +156,19 @@ func (g *GC) tick() {
 	// down, say) does GC list for itself.
 	local, digests, err := g.inventory.Get(g.listMaxAge)
 	if err != nil {
-		logging.Errorf("angryduck-worker-gc: failed to list local images: %v", err)
+		logging.Errorf("angryduck-worker-gc: could not get the list of images on this node, skipping this check: %v", err)
 		return
 	}
 	if digests == nil {
 		// Not fatal: fall back to raw-string matching only. Log loudly
 		// since this silently re-exposes the alias-mismatch bug — better
 		// to know GC is running degraded than to wonder why.
-		logging.Errorf("angryduck-worker-gc: runtime returned no digest map, falling back to raw reference matching only (this re-exposes the alias-mismatch bug for this tick)")
+		logging.Errorf("angryduck-worker-gc: could not match images by their actual content this time, falling back to a less reliable name-based check — an image could be wrongly treated as unused if its running container refers to it by a different name")
 		digests = map[string]string{}
 	}
 	running, err := g.runtime.ListRunningImages()
 	if err != nil {
-		logging.Errorf("angryduck-worker-gc: failed to list running images: %v", err)
+		logging.Errorf("angryduck-worker-gc: could not get the list of currently running containers, skipping this check: %v", err)
 		return
 	}
 
@@ -184,7 +184,7 @@ func (g *GC) tick() {
 		}
 	}
 
-	logging.Infof("angryduck-worker-gc: tick start: %d local image(s), %d running image(s), %d already tracked as unused",
+	logging.Infof("angryduck-worker-gc: checking this node's images — %d present, %d in use by running containers, %d already flagged as unused from an earlier check",
 		len(local), len(runningSet), len(g.missCounts))
 
 	seen := make(map[string]bool, len(local))
@@ -197,9 +197,9 @@ func (g *GC) tick() {
 
 		if g.isExcluded(img) {
 			if g.missCounts[img] > 0 {
-				logging.Infof("angryduck-worker-gc: image=%s now matches an excluded image pattern, resetting miss count from %d to 0", img, g.missCounts[img])
+				logging.Infof("angryduck-worker-gc: image=%s is on the never-remove list, no longer counting it as unused (had been unused for %d check(s) in a row)", img, g.missCounts[img])
 			} else {
-				logging.Debugf("angryduck-worker-gc: image=%s matches an excluded image pattern, never eligible for removal regardless of running-state", img)
+				logging.Debugf("angryduck-worker-gc: image=%s is on the never-remove list, skipping", img)
 			}
 			delete(g.missCounts, img)
 			sparedExcluded++
@@ -217,9 +217,9 @@ func (g *GC) tick() {
 
 		if inUse {
 			if g.missCounts[img] > 0 {
-				logging.Infof("angryduck-worker-gc: image=%s now in use again (%s), resetting miss count from %d to 0", img, matchedVia, g.missCounts[img])
+				logging.Infof("angryduck-worker-gc: image=%s is being used again, no longer counts as unused (had been unused for %d check(s) in a row; matched via %s)", img, g.missCounts[img], matchedVia)
 			} else {
-				logging.Debugf("angryduck-worker-gc: image=%s is running (%s), no action", img, matchedVia)
+				logging.Debugf("angryduck-worker-gc: image=%s is currently in use (%s), nothing to do", img, matchedVia)
 			}
 			delete(g.missCounts, img)
 			sparedRunning++
@@ -227,7 +227,7 @@ func (g *GC) tick() {
 		}
 
 		if g.puller.InGracePeriod(img) {
-			logging.Debugf("angryduck-worker-gc: image=%s not running but still within its post-pull grace period, skipping this check", img)
+			logging.Debugf("angryduck-worker-gc: image=%s isn't running, but it was pulled very recently — giving it more time before treating it as unused", img)
 			sparedGrace++
 			continue
 		}
@@ -237,12 +237,12 @@ func (g *GC) tick() {
 
 		if miss >= g.missThreshold {
 			if g.dryRun {
-				logging.Warnf("angryduck-worker-gc: [DRY RUN] would remove image=%s: unused for %d/%d consecutive checks (would NOT actually remove — GC_DRY_RUN=true)",
-					img, miss, g.missThreshold)
+				logging.Warnf("angryduck-worker-gc: [DRY RUN] image=%s has been unused for %d check(s) in a row and would be removed now — nothing was actually deleted, because dry_run is enabled",
+					img, miss)
 			} else {
-				logging.Warnf("angryduck-worker-gc: removing image=%s: unused for %d/%d consecutive checks", img, miss, g.missThreshold)
+				logging.Warnf("angryduck-worker-gc: image=%s has been unused for %d check(s) in a row, removing it now", img, miss)
 				if err := g.runtime.RemoveImage(img); err != nil {
-					logging.Errorf("angryduck-worker-gc: failed to remove image=%s: %v", img, err)
+					logging.Errorf("angryduck-worker-gc: tried to remove image=%s but it failed: %v", img, err)
 					continue
 				}
 				logging.Infof("angryduck-worker-gc: image=%s removed successfully", img)
@@ -251,8 +251,8 @@ func (g *GC) tick() {
 			delete(g.missCounts, img)
 			removedCount++
 		} else {
-			logging.Infof("angryduck-worker-gc: image=%s unused this check: miss count %d/%d (removal happens at %d)",
-				img, miss, g.missThreshold, g.missThreshold)
+			logging.Infof("angryduck-worker-gc: image=%s hasn't been used for %d check(s) in a row — it will be removed once that reaches %d",
+				img, miss, g.missThreshold)
 			trackedCount++
 		}
 	}
@@ -260,11 +260,11 @@ func (g *GC) tick() {
 	// Drop counters for images that no longer exist locally at all.
 	for img := range g.missCounts {
 		if !seen[img] {
-			logging.Debugf("angryduck-worker-gc: image=%s no longer present locally, dropping its miss counter", img)
+			logging.Debugf("angryduck-worker-gc: image=%s is gone from this node, no longer tracking it", img)
 			delete(g.missCounts, img)
 		}
 	}
 
-	logging.Infof("angryduck-worker-gc: tick done in %s: %d spared (running), %d spared (grace period), %d spared (excluded by config), %d tracked below threshold, %d removed",
+	logging.Infof("angryduck-worker-gc: finished checking images in %s — %d in use, %d recently pulled (protected for now), %d on the never-remove list, %d unused but not yet due for removal, %d removed",
 		time.Since(tickStart).Round(time.Millisecond), sparedRunning, sparedGrace, sparedExcluded, trackedCount, removedCount)
 }

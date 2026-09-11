@@ -189,26 +189,58 @@ type podLister interface {
 // is no rescue mechanism available) — pod-watch still runs and still
 // counts failures for visibility, it just never attempts a repair.
 type PodWatch struct {
-	nodeID   string
-	client   podLister
-	interval time.Duration
-	backoff  time.Duration
-	fix      func(ctx context.Context, image string) error
+	nodeID            string
+	client            podLister
+	interval          time.Duration
+	backoff           time.Duration
+	fix               func(ctx context.Context, image string) error
+	excludeNamespaces []string
+	excludeImages     []string
 
-	mu        sync.Mutex
-	attempted map[string]time.Time // image -> last attempt, so a permanently-broken image isn't retried every tick
+	mu          sync.Mutex
+	attempted   map[string]time.Time // image -> last fix attempt, so a permanently-broken image isn't retried every tick
+	lastWarnLog map[string]time.Time // "namespace/pod/container" -> last time this exact stuck sighting logged at WARN
 }
 
-// NewPodWatch builds a PodWatch. Call Run to start it.
-func NewPodWatch(nodeID string, client *k8sInClusterClient, interval, backoff time.Duration, fix func(context.Context, string) error) *PodWatch {
+// NewPodWatch builds a PodWatch. Call Run to start it. excludeNamespaces
+// and excludeImages are substring lists (same style as GC's
+// GC_EXCLUDE_IMAGE_SUBSTRINGS) — a fleet inevitably accumulates abandoned
+// feature-branch deployments and deliberately-broken test/demo resources
+// (chaos-engineering namespaces, policy-testing images) that have been
+// stuck for a long time and were simply invisible before pod-watch
+// existed; without a way to say "not these," pod-watch surfaces every
+// one of them at WARN on every poll, on every node, forever.
+func NewPodWatch(nodeID string, client *k8sInClusterClient, interval, backoff time.Duration, excludeNamespaces, excludeImages []string, fix func(context.Context, string) error) *PodWatch {
 	return &PodWatch{
-		nodeID:    nodeID,
-		client:    client,
-		interval:  interval,
-		backoff:   backoff,
-		fix:       fix,
-		attempted: make(map[string]time.Time),
+		nodeID:            nodeID,
+		client:            client,
+		interval:          interval,
+		backoff:           backoff,
+		fix:               fix,
+		excludeNamespaces: excludeNamespaces,
+		excludeImages:     excludeImages,
+		attempted:         make(map[string]time.Time),
+		lastWarnLog:       make(map[string]time.Time),
 	}
+}
+
+// isExcluded reports whether a stuck sighting should be ignored
+// entirely — no log, no metric, no fix attempt. Matches GC's
+// substring-list style deliberately, for the same reason: a git-diffable
+// ConfigMap entry, not code, is what should decide "this one doesn't
+// count."
+func (pw *PodWatch) isExcluded(s podStuckImage) bool {
+	for _, sub := range pw.excludeNamespaces {
+		if sub != "" && strings.Contains(s.Namespace, sub) {
+			return true
+		}
+	}
+	for _, sub := range pw.excludeImages {
+		if sub != "" && strings.Contains(s.Image, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // Run blocks, polling on every tick until ctx is done.
@@ -242,9 +274,27 @@ func (pw *PodWatch) tick(ctx context.Context) {
 	// attempt covers all of them, so dedupe before calling fix.
 	tried := make(map[string]bool, len(stuck))
 	for _, s := range stuck {
+		if pw.isExcluded(s) {
+			continue
+		}
 		podImagePullFailuresTotal.Inc(pw.nodeID)
-		logging.Warnf("angryduck-worker-podwatch: pod=%s/%s container=%s stuck (%s) on image=%s",
-			s.Namespace, s.Pod, s.Container, s.Reason, s.Image)
+
+		// Log the first sighting of a given stuck container at WARN, then
+		// drop to DEBUG for the same one until the backoff window passes
+		// — a fleet-wide fleet of long-stuck test/demo pods would
+		// otherwise re-log the identical line every single poll tick,
+		// forever, on every node, drowning out anything new. The metric
+		// above still counts every tick regardless, so nothing about the
+		// underlying signal is lost, only the repeated log line.
+		key := s.Namespace + "/" + s.Pod + "/" + s.Container
+		if pw.recentlyWarned(key) {
+			logging.Debugf("angryduck-worker-podwatch: pod=%s/%s container=%s still stuck (%s) on image=%s",
+				s.Namespace, s.Pod, s.Container, s.Reason, s.Image)
+		} else {
+			pw.markWarned(key)
+			logging.Warnf("angryduck-worker-podwatch: pod=%s/%s container=%s stuck (%s) on image=%s",
+				s.Namespace, s.Pod, s.Container, s.Reason, s.Image)
+		}
 
 		if pw.fix == nil || tried[s.Image] || pw.recentlyAttempted(s.Image) {
 			continue
@@ -255,6 +305,19 @@ func (pw *PodWatch) tick(ctx context.Context) {
 			logging.Warnf("angryduck-worker-podwatch: fallback fix for image=%s did not succeed: %v", s.Image, err)
 		}
 	}
+}
+
+func (pw *PodWatch) recentlyWarned(key string) bool {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	last, ok := pw.lastWarnLog[key]
+	return ok && time.Since(last) < pw.backoff
+}
+
+func (pw *PodWatch) markWarned(key string) {
+	pw.mu.Lock()
+	pw.lastWarnLog[key] = time.Now()
+	pw.mu.Unlock()
 }
 
 func (pw *PodWatch) recentlyAttempted(image string) bool {

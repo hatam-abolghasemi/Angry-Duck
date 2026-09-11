@@ -87,3 +87,9 @@ data:
   POD_WATCH_ENABLED: "true"
   POD_WATCH_INTERVAL_S: "30"
   POD_WATCH_RETRY_BACKOFF_S: "300"
+  # kyverno-test and k8sgpt-demo run pods with deliberately broken images
+  # (policy/diagnostic-tool testing) that have been stuck indefinitely —
+  # first rollout showed these logging identically on every node, every
+  # poll, forever. Add more here as other permanent test/demo namespaces
+  # turn up.
+  POD_WATCH_EXCLUDE_NAMESPACE_SUBSTRINGS: "kyverno-test,k8sgpt-demo"

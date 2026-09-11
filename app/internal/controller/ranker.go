@@ -148,11 +148,11 @@ func (rk *Ranker) orderLowestN(image string) []string {
 
 	candidates, remaining := rk.notYetOrdered(image, eligible)
 	if remaining <= 0 {
-		logging.Debugf("angryduck-controller: image=%s already has its %d seed(s), nothing new this tick", image, rk.topN)
+		logging.Debugf("angryduck-controller: image=%s already has its %d seed(s), nothing new to do right now", image, rk.topN)
 		return nil
 	}
 	if len(candidates) == 0 {
-		logging.Debugf("angryduck-controller: all %d eligible worker(s) already ordered for image=%s, nothing new this tick", len(eligible), image)
+		logging.Debugf("angryduck-controller: all %d eligible worker(s) already ordered for image=%s, nothing new to do right now", len(eligible), image)
 		return nil
 	}
 

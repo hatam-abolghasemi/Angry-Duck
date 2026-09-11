@@ -111,6 +111,8 @@ func main() {
 	podWatchEnabled := config.Bool("POD_WATCH_ENABLED", true)
 	podWatchInterval := config.Duration("POD_WATCH_INTERVAL_S", 30)
 	podWatchBackoff := config.Duration("POD_WATCH_RETRY_BACKOFF_S", 300)
+	podWatchExcludeNamespaces := config.StringSlice("POD_WATCH_EXCLUDE_NAMESPACE_SUBSTRINGS", nil)
+	podWatchExcludeImages := config.StringSlice("POD_WATCH_EXCLUDE_IMAGE_SUBSTRINGS", nil)
 
 	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s mirror=%v pod_watch=%v",
 		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, mirrorEnabled, podWatchEnabled)
@@ -165,7 +167,7 @@ func main() {
 			} else {
 				log.Printf("angryduck-worker[%s]: pod-watch running without a fix mechanism (MIRROR_ENABLED=false) — it will only count and log stuck pulls", nodeID)
 			}
-			pw := worker.NewPodWatch(nodeID, k8sClient, podWatchInterval, podWatchBackoff, fix)
+			pw := worker.NewPodWatch(nodeID, k8sClient, podWatchInterval, podWatchBackoff, podWatchExcludeNamespaces, podWatchExcludeImages, fix)
 			go pw.Run(ctx)
 		}
 	}
