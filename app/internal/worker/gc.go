@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -184,11 +185,11 @@ func (g *GC) tick() {
 		}
 	}
 
-	logging.Infof("angryduck-worker-gc: checking this node's images — %d present, %d in use by running containers, %d already flagged as unused from an earlier check",
+	logging.Debugf("angryduck-worker-gc: checking this node's images — %d present, %d in use by running containers, %d already flagged as unused from an earlier check",
 		len(local), len(runningSet), len(g.missCounts))
 
 	seen := make(map[string]bool, len(local))
-	removedCount, sparedRunning, sparedGrace, sparedExcluded, trackedCount := 0, 0, 0, 0, 0
+	removedCount, sparedRunning, sparedGrace, sparedExcluded, trackedCount, newlyTracked := 0, 0, 0, 0, 0, 0
 	for _, img := range local {
 		if img == "" {
 			continue
@@ -251,8 +252,22 @@ func (g *GC) tick() {
 			delete(g.missCounts, img)
 			removedCount++
 		} else {
-			logging.Infof("angryduck-worker-gc: image=%s hasn't been used for %d check(s) in a row — it will be removed once that reaches %d",
-				img, miss, g.missThreshold)
+			// Only the FIRST tick an image becomes unused is new
+			// information worth INFO — every subsequent tick just
+			// repeats the same fact with the count one higher. Left at
+			// INFO, an image that churns every few minutes (a periodic
+			// job's image, say) reprints an identical-shaped line on
+			// every node, every tick, for the entire threshold window —
+			// exactly the noise a live troubleshooting session doesn't
+			// want to scroll through. DEBUG still has the full count-up
+			// for whenever that detail actually matters.
+			if miss == 1 {
+				logging.Infof("angryduck-worker-gc: image=%s is now unused — it will be removed if that continues for %d check(s) in a row", img, g.missThreshold)
+				newlyTracked++
+			} else {
+				logging.Debugf("angryduck-worker-gc: image=%s hasn't been used for %d check(s) in a row — it will be removed once that reaches %d",
+					img, miss, g.missThreshold)
+			}
 			trackedCount++
 		}
 	}
@@ -265,6 +280,18 @@ func (g *GC) tick() {
 		}
 	}
 
-	logging.Infof("angryduck-worker-gc: finished checking images in %s — %d in use, %d recently pulled (protected for now), %d on the never-remove list, %d unused but not yet due for removal, %d removed",
+	// Same reasoning as the per-image line above: a tick where nothing
+	// changed (nothing new flagged, nothing removed) is exactly what a
+	// healthy, quiet node looks like almost all the time, and repeating
+	// that fact at INFO every interval, on every node, adds up to a wall
+	// of text with no decisions in it. Only log at INFO when this tick
+	// actually did something; otherwise the identical line is still
+	// available at DEBUG.
+	summary := fmt.Sprintf("finished checking images in %s — %d in use, %d recently pulled (protected for now), %d on the never-remove list, %d unused but not yet due for removal, %d removed",
 		time.Since(tickStart).Round(time.Millisecond), sparedRunning, sparedGrace, sparedExcluded, trackedCount, removedCount)
+	if removedCount > 0 || newlyTracked > 0 {
+		logging.Infof("angryduck-worker-gc: %s", summary)
+	} else {
+		logging.Debugf("angryduck-worker-gc: %s", summary)
+	}
 }
