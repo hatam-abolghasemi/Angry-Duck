@@ -52,25 +52,10 @@ data:
   # to pull anonymously (fine for public images only).
   REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"
 
-  # --- Peer mirror (see .env.example for the full story) ---
-  # Off until stg has run with it — flip after checking stg's
-  # angryduck_worker_mirror_transfers_total{result="hit"} and the worker
-  # pods' memory under real rollouts.
-  MIRROR_ENABLED: "false"
-  # "*" = every registry (containerd's certs.d/_default). A registry with
-  # its own certs.d/<host>/ directory bypasses _default — the worker logs
-  # a WARN naming each one at startup.
-  MIRROR_REGISTRIES: "*"
-  MIRROR_HOLD_TIMEOUT_S: "60"
-  MIRROR_QUEUE_WAIT_S: "3"
-  MIRROR_MAX_EXPORTS: "2"
-  MIRROR_MAX_IMPORTS: "2"
-  MIRROR_MANAGE_HOSTS_TOML: "true"
-  MIRROR_HOSTS_DIR: "/etc/containerd/certs.d"
-  MIRROR_PEER_CANDIDATES: "3"
-  # MIRROR_PEER_TOKEN comes from the angryduck-mirror Secret, not here.
-
-  # --- Pod-watch (see .env.example for the full story) ---
-  POD_WATCH_ENABLED: "true"
-  POD_WATCH_INTERVAL_S: "30"
-  POD_WATCH_RETRY_BACKOFF_S: "300"
+  # --- Pod rescue (see stg/configmap.yaml and .env.example for the full
+  # story) ---
+  RESCUE_ENABLED: "true"
+  RESCUE_POLL_INTERVAL_S: "30"
+  RESCUE_RETRY_INTERVAL_S: "600"
+  RESCUE_MAX_CONCURRENT_EXPORTS: "1"
+  # RESCUE_PEER_TOKEN comes from the angryduck-rescue Secret, not here.

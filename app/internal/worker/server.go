@@ -7,11 +7,11 @@ import (
 )
 
 // NewServer builds the worker's HTTP handler: /pull to receive orders from
-// the controller, /metrics for pull/GC counters, /healthz for
-// liveness/readiness probes. With a non-nil mirror it also serves /v2/
-// (containerd's registry mirror, loopback only) and /export (peer
-// transfer source, token-protected).
-func NewServer(puller *Puller, mirror *Mirror) http.Handler {
+// the controller, /metrics for pull/GC/rescue counters, /healthz for
+// liveness/readiness probes. With a non-nil exporter it also serves
+// /rescue-export, the token-protected one-shot image handoff used to
+// rescue a pod stuck in ImagePullBackOff elsewhere in the fleet.
+func NewServer(puller *Puller, exporter *RescueExporter) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/pull", puller.HandlePull)
 	mux.Handle("/metrics", metrics.Handler())
@@ -19,9 +19,8 @@ func NewServer(puller *Puller, mirror *Mirror) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	if mirror != nil {
-		mux.HandleFunc("/v2/", mirror.ServeRegistry)
-		mux.HandleFunc("/export", mirror.ServeExport)
+	if exporter != nil {
+		mux.HandleFunc("/rescue-export", exporter.ServeExport)
 	}
 	return mux
 }

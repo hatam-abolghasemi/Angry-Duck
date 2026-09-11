@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -20,10 +19,14 @@ type workerEntry struct {
 	// already have repo X" membership check per candidate, per preheat —
 	// never iteration over the full list.
 	Repos map[string]struct{}
-	// Digests is the set of manifest digests this node can export to a
-	// peer. Replaced wholesale by each report; extended between reports
-	// by /announce as peer transfers land.
-	Digests  map[string]struct{}
+	// Images is the set of exact local image references (repo:tag) this
+	// node last reported — used only to find a single rescue source for a
+	// pod stuck in ImagePullBackOff (see RescueSourceFor). Deliberately a
+	// set of exact strings, not a digest index: rescue matches by exact
+	// reference, the same one the stuck pod itself is waiting on, so
+	// there's no need to track manifest digests or resolve tags at all —
+	// that whole layer of bookkeeping goes away with it.
+	Images   map[string]struct{}
 	LastSeen time.Time
 }
 
@@ -37,17 +40,6 @@ func (w *workerEntry) HasRepo(repo string) bool {
 	return ok
 }
 
-// tagRecord is the fleet's current answer for one tag reference: which
-// digest it currently means, and since when. observedAt is deliberately
-// NOT refreshed every time a node re-reports the same (tag, digest) pair
-// — only when the digest actually changes — so its age reflects how long
-// this has genuinely been unconfirmed against origin, not how recently
-// some node happened to heartbeat. See UpdateTags.
-type tagRecord struct {
-	digest     string
-	observedAt time.Time
-}
-
 // Registry tracks all workers the controller has heard from, and the
 // currently active "preheat" target image (if any).
 type Registry struct {
@@ -57,12 +49,6 @@ type Registry struct {
 	targetImage string
 	targetSetAt time.Time
 	targetTTL   time.Duration
-	// tags is fleet-wide, not per-worker: it answers "what digest does
-	// this tag currently mean, anywhere," independent of which node last
-	// reported it. Sourcing an actual peer for that digest is still
-	// PeersFor's job (which does check freshness) — this index only ever
-	// answers the tag->digest question.
-	tags map[string]tagRecord
 }
 
 // NewRegistry builds an empty worker registry.
@@ -71,7 +57,6 @@ func NewRegistry(staleAfter, targetTTL time.Duration) *Registry {
 		workers:    make(map[string]*workerEntry),
 		staleAfter: staleAfter,
 		targetTTL:  targetTTL,
-		tags:       make(map[string]tagRecord),
 	}
 }
 
@@ -103,100 +88,36 @@ func (r *Registry) Update(rep model.WorkerReport) {
 	}
 	w.Repos = repos
 
-	digests := make(map[string]struct{}, len(rep.Digests))
-	for _, d := range rep.Digests {
-		if d != "" {
-			digests[d] = struct{}{}
+	images := make(map[string]struct{}, len(rep.Images))
+	for _, img := range rep.Images {
+		if img != "" {
+			images[img] = struct{}{}
 		}
 	}
-	w.Digests = digests
+	w.Images = images
 }
 
-// UpdateTags folds a worker's reported tag->digest observations into the
-// fleet-wide index ResolveTag answers from. Called separately from
-// Update (not nested inside it) since both take the same lock and
-// sync.Mutex isn't reentrant.
-//
-// A tag's observedAt only moves forward when the digest it maps to
-// actually changes. Without that, a node that resolved a tag against
-// origin once and simply keeps re-reporting the same cached mapping on
-// every heartbeat would make an arbitrarily old fact look freshly
-// confirmed — exactly the illusion of freshness this index exists to
-// avoid, since its entire purpose is telling a caller how much to trust
-// it when origin itself is unreachable.
-func (r *Registry) UpdateTags(tags map[string]string) {
-	if len(tags) == 0 {
-		return
-	}
-	now := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for tag, digest := range tags {
-		if tag == "" || digest == "" {
-			continue
-		}
-		if cur, ok := r.tags[tag]; !ok || cur.digest != digest {
-			r.tags[tag] = tagRecord{digest: digest, observedAt: now}
-		}
-	}
-}
-
-// ResolveTag returns the fleet's current best-known digest for a tag
-// reference and how long it's been the answer. ok=false means nobody in
-// the fleet has ever reported this tag.
-func (r *Registry) ResolveTag(tag string) (digest string, observedAt time.Time, ok bool) {
+// RescueSourceFor returns the address of ONE fresh worker (other than
+// excludeNode) that currently reports having image exactly, or ok=false if
+// none does. Deliberately singular, not a list: rescue is a single
+// best-effort attempt, not a search — if this one source can't actually
+// serve it, the caller waits for its own retry cooldown rather than
+// hunting through alternatives. Which fresh worker is returned when
+// several qualify is unspecified (map iteration order); nothing here
+// needs it to be deterministic.
+func (r *Registry) RescueSourceFor(image, excludeNode string) (address string, ok bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	rec, found := r.tags[tag]
-	if !found {
-		return "", time.Time{}, false
-	}
-	return rec.digest, rec.observedAt, true
-}
-
-// Announce adds one digest to a known worker between reports. Unknown
-// workers are ignored — they'll show up with their first report.
-func (r *Registry) Announce(nodeID, digest string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	w, ok := r.workers[nodeID]
-	if !ok || digest == "" {
-		return false
-	}
-	// Copy-on-write, same reasoning as Update: never mutate a map a
-	// FreshWorkers() snapshot may be reading.
-	next := make(map[string]struct{}, len(w.Digests)+1)
-	for d := range w.Digests {
-		next[d] = struct{}{}
-	}
-	next[digest] = struct{}{}
-	w.Digests = next
-	return true
-}
-
-// PeersFor returns up to limit addresses of fresh workers holding digest,
-// excluding the asking node, in random order. Random rather than ranked:
-// during a rollout dozens of nodes ask at once, and a shuffle spreads
-// them over every source without the controller tracking who is busy —
-// sources that are busy say so themselves (503) and requesters move on.
-func (r *Registry) PeersFor(digest, excludeNode string, limit int) []string {
-	r.mu.RLock()
 	now := time.Now()
-	var out []string
 	for id, w := range r.workers {
 		if id == excludeNode || !r.isFresh(w, now) {
 			continue
 		}
-		if _, ok := w.Digests[digest]; ok {
-			out = append(out, w.Address)
+		if _, has := w.Images[image]; has {
+			return w.Address, true
 		}
 	}
-	r.mu.RUnlock()
-	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out
+	return "", false
 }
 
 // isFresh reports whether a worker has reported within staleAfter of now.
@@ -274,7 +195,6 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 			Address:     w.Address,
 			Utilization: w.Utilization,
 			Repos:       repos,
-			DigestCount: len(w.Digests),
 			LastSeen:    w.LastSeen,
 			Fresh:       r.isFresh(w, now),
 		})

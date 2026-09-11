@@ -39,7 +39,8 @@ type Puller struct {
 }
 
 // OnSuccess registers a callback run after every successful pull (the
-// reporter's Kick, so seeds become visible as peers immediately).
+// reporter's Kick, so the controller's locality view of this node is
+// fresh immediately rather than waiting for the next report interval).
 func (p *Puller) OnSuccess(fn func()) { p.onSuccess = fn }
 
 // NewPuller builds a Puller. nodeID is only used to label metrics.

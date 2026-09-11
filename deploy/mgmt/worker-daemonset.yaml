@@ -22,7 +22,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.3.5
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.0
           env:
             - name: NODE_ID
               valueFrom:
@@ -32,14 +32,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # Shared by every worker; peers present it to each other's
-            # /export. With MIRROR_ENABLED=true and no Secret the worker
-            # exits with a clear error and CrashLoops; creating the Secret
-            # fixes it on the next restart, no rollout needed.
-            - name: MIRROR_PEER_TOKEN
+            # Shared by every worker; a rescue import presents this to
+            # the source node's /rescue-export. Optional and soft-fail by
+            # design (see cmd/worker/main.go): without it, rescue still
+            # runs and still counts/logs stuck pulls, it just can't fix
+            # anything -- unlike the old mirror, a missing token here
+            # never makes a normal pull silently go wrong.
+            - name: RESCUE_PEER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: angryduck-mirror
+                  name: angryduck-rescue
                   key: token
                   optional: true
           envFrom:
@@ -67,22 +69,29 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            # Idle usage is unchanged: the worker itself is ~6 MiB, and the
-            # periodic crictl call (~20 MiB, a child in this cgroup) is
-            # what the old ~20-40Mi observation mostly was.
-            # Limits are for peer transfers: each ctr export/import child
-            # peaks at ~30-35 MiB and needs ~5 ms CPU per MiB moved.
-            # Worst case = worker 6 + 2 exports 62 + 2 imports 68 + crictl
-            # listing 20 + preheat crictl pull 25 ~= 181 MiB. At the old
-            # 200m CPU a 150 MiB image took >=3.8 s of throttled CPU per
-            # side (~40 MiB/s) — slower than the LAN it rides on.
-            # Requests stay low: limits reserve nothing.
+            # Idle usage: the worker binary itself is ~6 MiB resident; the
+            # periodic `crictl images`/`crictl ps` calls (~20 MiB, a child
+            # in this cgroup, gone the instant the call returns) and an
+            # occasional preheat `crictl pull` (~25 MiB) are the only
+            # other regular consumers. Nothing here holds unbounded state:
+            # the largest thing kept resident is the local image listing
+            # cache (Inventory), a few tens of short strings -- well under
+            # a megabyte even on a node with 100+ local images.
+            # Limits cover the rare case: at most ONE rescue export and
+            # ONE rescue import in flight on this node at a time (rescue
+            # is a one-shot repair, not a throughput mechanism -- see
+            # RESCUE_MAX_CONCURRENT_EXPORTS), each peaking at ~30-35 MiB
+            # while it runs. Worst case ~= worker 6 + 1 export 35 +
+            # 1 import 35 + crictl listing 20 + preheat pull 25 ~= 121 MiB.
+            # CPU is bursty by nature (short subprocess execs), never
+            # sustained, so the limit only needs to cover one of those
+            # bursts, not throughput.
             requests:
-              cpu: 50m
-              memory: 32Mi
+              cpu: 20m
+              memory: 24Mi
             limits:
-              cpu: "1"
-              memory: 192Mi
+              cpu: 500m
+              memory: 128Mi
           securityContext:
             privileged: true
       volumes:

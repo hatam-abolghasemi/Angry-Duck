@@ -59,37 +59,32 @@ data:
   # to pull anonymously (fine for public images only).
   REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"
 
-  # --- Peer mirror (see .env.example for the full story) ---
-  # containerd asks the local worker first for every image; the worker
-  # imports it from a node that has it, or answers at once so containerd
-  # goes to origin.
-  MIRROR_ENABLED: "true"
-  # "*" = every registry (containerd's certs.d/_default). A registry with
-  # its own certs.d/<host>/ directory bypasses _default — the worker logs
-  # a WARN naming each one at startup.
-  MIRROR_REGISTRIES: "*"
-  MIRROR_HOLD_TIMEOUT_S: "60"
-  MIRROR_QUEUE_WAIT_S: "3"
-  MIRROR_MAX_EXPORTS: "2"
-  MIRROR_MAX_IMPORTS: "2"
-  MIRROR_MANAGE_HOSTS_TOML: "true"
-  MIRROR_HOSTS_DIR: "/etc/containerd/certs.d"
-  MIRROR_PEER_CANDIDATES: "3"
-  # MIRROR_PEER_TOKEN comes from the angryduck-mirror Secret, not here.
-
-  # --- Pod-watch (see .env.example for the full story) ---
-  # Fixes a pod stuck in ImagePullBackOff by importing its image from a
-  # peer under its exact tag, for the case the mirror above can't help
-  # with: tag resolution against origin itself failing, so the pull never
-  # reaches this worker at all. Needs the RBAC in rbac.yaml. No allowlist
-  # gates it — watch angryduck_worker_tag_fallback_total and the WARN logs
-  # for the digest age each time it fires.
-  POD_WATCH_ENABLED: "true"
-  POD_WATCH_INTERVAL_S: "30"
-  POD_WATCH_RETRY_BACKOFF_S: "300"
+  # --- Pod rescue (see .env.example for the full story) ---
+  # Not P2P, not a standing mirror: only fires for a pod already stuck in
+  # ImagePullBackOff/ErrImagePull. Asks the controller for AT MOST ONE
+  # node that already has the exact image, makes exactly ONE attempt to
+  # copy it from there, and on failure goes quiet for
+  # RESCUE_RETRY_INTERVAL_S instead of retrying — no busy-peer loop, no
+  # fan-out, no continuous interception of every pull the way the old
+  # mirror worked. Needs the RBAC in rbac.yaml. No allowlist gates which
+  # images this applies to — watch angryduck_worker_rescue_attempts_total
+  # and the WARN logs instead.
+  RESCUE_ENABLED: "true"
+  RESCUE_POLL_INTERVAL_S: "30"
+  # How long to wait before retrying a rescue that just failed (no source
+  # anywhere, transfer failed, ...). This is the entire retry policy —
+  # there is no internal retry loop, so this is the only thing standing
+  # between "tried once" and "tried again."
+  RESCUE_RETRY_INTERVAL_S: "600"
+  # At most this many /rescue-export requests run at once on one node.
+  # Rescue is a rare, occasional repair path, not a throughput mechanism,
+  # so this deliberately stays small (see the resources comment in
+  # worker-daemonset.yaml for the memory math this implies).
+  RESCUE_MAX_CONCURRENT_EXPORTS: "1"
   # kyverno-test and k8sgpt-demo run pods with deliberately broken images
   # (policy/diagnostic-tool testing) that have been stuck indefinitely —
   # first rollout showed these logging identically on every node, every
   # poll, forever. Add more here as other permanent test/demo namespaces
   # turn up.
-  POD_WATCH_EXCLUDE_NAMESPACE_SUBSTRINGS: "kyverno-test,k8sgpt-demo"
+  RESCUE_EXCLUDE_NAMESPACE_SUBSTRINGS: "kyverno-test,k8sgpt-demo"
+  # RESCUE_PEER_TOKEN comes from the angryduck-rescue Secret, not here.

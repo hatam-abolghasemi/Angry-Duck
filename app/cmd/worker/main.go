@@ -3,11 +3,16 @@
 // pull orders the controller sends it, and garbage-collects images that
 // have fallen out of use — while protecting freshly-ordered images with a
 // short grace period so they don't get GC'd before Argo ever schedules a
-// pod that needs them. With MIRROR_ENABLED it also sits in front of the
-// origin registry for containerd and satisfies pulls from peer nodes.
+// pod that needs them.
 //
 // It carries no container CLIs of its own: crictl/ctr/docker are the
 // node's binaries, run chrooted into HOST_ROOT (see worker.HostExec).
+//
+// Peer-to-peer image distribution for a running fleet is Spegel's job,
+// not this one — Angry Duck only ever does the initial preheat pull onto
+// a few seed nodes, GC, and (with RESCUE_ENABLED) one narrow exception: a
+// single, one-shot image handoff to unstick a pod already failing in
+// ImagePullBackOff, never a standing mirror in front of containerd.
 package main
 
 import (
@@ -99,23 +104,22 @@ func main() {
 	// runs outside Kubernetes.
 	hostRoot := config.String("HOST_ROOT", "/proc/1/root")
 
-	mirrorEnabled := config.Bool("MIRROR_ENABLED", false)
-	// "*" = every registry, via containerd's certs.d/_default.
-	mirrorRegistries := config.StringSlice("MIRROR_REGISTRIES", []string{"*"})
-	mirrorToken := config.String("MIRROR_PEER_TOKEN", "")
+	// Rescue: a pod stuck in ImagePullBackOff for a reason nothing else
+	// here can see (kubelet gives up before containerd's own pull ever
+	// starts, e.g. origin unreachable for that specific registry/node).
+	// Deliberately not P2P: at most ONE attempt per stuck image per
+	// RESCUE_RETRY_INTERVAL_S, from at most ONE source the controller
+	// knows about, then silence until the interval passes. See rescue.go.
+	rescueEnabled := config.Bool("RESCUE_ENABLED", true)
+	rescueInterval := config.Duration("RESCUE_POLL_INTERVAL_S", 30)
+	rescueRetryInterval := config.Duration("RESCUE_RETRY_INTERVAL_S", 600)
+	rescueExcludeNamespaces := config.StringSlice("RESCUE_EXCLUDE_NAMESPACE_SUBSTRINGS", nil)
+	rescueExcludeImages := config.StringSlice("RESCUE_EXCLUDE_IMAGE_SUBSTRINGS", nil)
+	rescueToken := config.String("RESCUE_PEER_TOKEN", "")
+	rescueMaxConcurrentExports := config.Int("RESCUE_MAX_CONCURRENT_EXPORTS", 1)
 
-	// Defaults to true: a pod stuck in ImagePullBackOff because origin
-	// itself can't resolve the tag is invisible to everything else Angry
-	// Duck does (GC and the mirror both only ever see containerd/CRI
-	// state, which a pod this stuck never reaches). See podwatch.go.
-	podWatchEnabled := config.Bool("POD_WATCH_ENABLED", true)
-	podWatchInterval := config.Duration("POD_WATCH_INTERVAL_S", 30)
-	podWatchBackoff := config.Duration("POD_WATCH_RETRY_BACKOFF_S", 300)
-	podWatchExcludeNamespaces := config.StringSlice("POD_WATCH_EXCLUDE_NAMESPACE_SUBSTRINGS", nil)
-	podWatchExcludeImages := config.StringSlice("POD_WATCH_EXCLUDE_IMAGE_SUBSTRINGS", nil)
-
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s mirror=%v pod_watch=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, mirrorEnabled, podWatchEnabled)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled)
 
 	hx, err := worker.NewHostExec(hostRoot)
 	if err != nil {
@@ -140,41 +144,44 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var mirror *worker.Mirror
-	var hosts *worker.HostsTOML
-	if mirrorEnabled {
-		mirror, hosts = setupMirror(nodeID, hx, inv, controllerURL, runtimeKind, runtimeEndpoint, listenAddr, mirrorRegistries, mirrorToken)
-	}
-
 	go reporter.Run(ctx)
 	go gc.Run(ctx)
 
-	// Pod-watch: fixes a pod stuck in ImagePullBackOff by importing its
-	// image from a peer under its exact tag, for the case the mirror
-	// above can never help with — tag resolution against origin itself
-	// failing, so containerd's pull never even reaches this worker. See
-	// internal/worker/podwatch.go. Runs by default; the fix mechanism
-	// itself (Mirror.FallbackImport) needs the mirror, so with
-	// MIRROR_ENABLED=false pod-watch still runs and still counts failed
-	// pulls for visibility, it just can't repair anything.
-	if podWatchEnabled {
-		if k8sClient, err := worker.NewInClusterK8sClient(); err != nil {
-			log.Printf("angryduck-worker[%s]: POD_WATCH_ENABLED=true but not usable: %v — pod-watch disabled", nodeID, err)
+	// Rescue setup: soft-fails (logs and runs in count-only mode) rather
+	// than crashing, since it's a secondary safety net, not core to what
+	// this worker does — unlike the old mirror, a misconfigured rescue
+	// doesn't make every pull silently go to origin; it just means a pod
+	// stuck for reasons rescue could have fixed stays stuck, exactly as
+	// it would if Angry Duck weren't installed at all.
+	var exporter *worker.RescueExporter
+	var rescuer *worker.Rescuer
+	if rescueEnabled {
+		containerdAddr := strings.TrimPrefix(runtimeEndpoint, "unix://")
+		if _, err := hx.Resolve("ctr"); err != nil {
+			log.Printf("angryduck-worker[%s]: RESCUE_ENABLED=true but ctr is not on the node; rescue will only count and log stuck pulls, not fix them", nodeID)
+		} else if len(rescueToken) < 16 {
+			log.Printf("angryduck-worker[%s]: RESCUE_ENABLED=true but RESCUE_PEER_TOKEN is unset or under 16 chars; rescue will only count and log stuck pulls, not fix them", nodeID)
 		} else {
-			var fix func(context.Context, string) error
-			if mirror != nil {
-				fix = mirror.FallbackImport
-			} else {
-				log.Printf("angryduck-worker[%s]: pod-watch running without a fix mechanism (MIRROR_ENABLED=false) — it will only count and log stuck pulls", nodeID)
+			exporter = worker.NewRescueExporter(nodeID, rescueToken, hx, containerdAddr, "k8s.io", rescueMaxConcurrentExports)
+			rescuer = worker.NewRescuer(nodeID, controllerURL, rescueToken, hx, containerdAddr, "k8s.io")
+			log.Printf("angryduck-worker[%s]: rescue enabled: poll_interval=%s retry_interval=%s max_concurrent_exports=%d",
+				nodeID, rescueInterval, rescueRetryInterval, rescueMaxConcurrentExports)
+		}
+		if k8sClient, err := worker.NewInClusterK8sClient(); err != nil {
+			log.Printf("angryduck-worker[%s]: RESCUE_ENABLED=true but not usable: %v — rescue watch disabled", nodeID, err)
+		} else {
+			var attempt func(context.Context, string) error
+			if rescuer != nil {
+				attempt = rescuer.Attempt
 			}
-			pw := worker.NewPodWatch(nodeID, k8sClient, podWatchInterval, podWatchBackoff, podWatchExcludeNamespaces, podWatchExcludeImages, fix)
-			go pw.Run(ctx)
+			rw := worker.NewRescueWatch(nodeID, k8sClient, rescueInterval, rescueRetryInterval, rescueExcludeNamespaces, rescueExcludeImages, attempt)
+			go rw.Run(ctx)
 		}
 	}
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
-		Handler: worker.NewServer(puller, mirror),
+		Handler: worker.NewServer(puller, exporter),
 	}
 
 	go func() {
@@ -182,75 +189,16 @@ func main() {
 			log.Fatalf("angryduck-worker[%s]: http server failed: %v", nodeID, err)
 		}
 	}()
-	// Register with containerd only once something is listening.
-	if hosts != nil {
-		go hosts.Run(ctx, 30*time.Second)
-	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	log.Printf("angryduck-worker[%s]: shutting down", nodeID)
 
-	// Unregister from containerd first, so no new pull is routed at a
-	// worker that is about to stop listening.
-	if hosts != nil {
-		hosts.Remove()
-	}
-
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	cancel()
-}
-
-// setupMirror validates mirror config and builds its pieces. With
-// MIRROR_ENABLED=true any problem is fatal: a worker that quietly runs
-// without the mirror looks healthy while every pull goes to origin (that
-// is exactly how the first stg test went — pods started before the token
-// Secret existed). Crashing makes it visible, and the restart re-reads
-// the Secret, so creating it fixes the pods without a manual rollout.
-func setupMirror(nodeID string, hx *worker.HostExec, inv *worker.Inventory, controllerURL, runtimeKind, runtimeEndpoint, listenAddr string, registries []string, token string) (*worker.Mirror, *worker.HostsTOML) {
-	fail := func(format string, args ...interface{}) (*worker.Mirror, *worker.HostsTOML) {
-		log.Fatalf("angryduck-worker[%s]: MIRROR_ENABLED=true but cannot start the mirror: "+format, append([]interface{}{nodeID}, args...)...)
-		return nil, nil
-	}
-	if strings.EqualFold(runtimeKind, "docker") {
-		return fail("peer transfer needs containerd; CONTAINER_RUNTIME=docker")
-	}
-	if len(registries) == 0 {
-		return fail("MIRROR_REGISTRIES is empty")
-	}
-	// /export streams any image on this node to whoever asks, and the
-	// worker is hostNetwork — without a shared secret that is every
-	// private image readable by anything that can route to the node.
-	if len(token) < 16 {
-		return fail("MIRROR_PEER_TOKEN must be set (16+ chars) — see the angryduck-mirror Secret")
-	}
-	if _, err := hx.Resolve("ctr"); err != nil {
-		return fail("%v", err)
-	}
-	addr := strings.TrimPrefix(runtimeEndpoint, "unix://")
-	cfg := worker.MirrorConfig{
-		NodeID:            nodeID,
-		ControllerURL:     controllerURL,
-		Token:             token,
-		ContainerdAddress: addr,
-		Namespace:         "k8s.io",
-		HoldTimeout:       config.Duration("MIRROR_HOLD_TIMEOUT_S", 60),
-		QueueWait:         config.Duration("MIRROR_QUEUE_WAIT_S", 3),
-		MaxExports:        config.Int("MIRROR_MAX_EXPORTS", 2),
-		MaxImports:        config.Int("MIRROR_MAX_IMPORTS", 2),
-	}
-	endpoint := "http://127.0.0.1:" + listenPort(listenAddr)
-	var hosts *worker.HostsTOML
-	if config.Bool("MIRROR_MANAGE_HOSTS_TOML", true) {
-		hosts = worker.NewHostsTOML(hx, config.String("MIRROR_HOSTS_DIR", "/etc/containerd/certs.d"), registries, endpoint)
-		hosts.Check()
-	}
-	log.Printf("angryduck-worker[%s]: mirror enabled: registries=%v endpoint=%s containerd=%s hold=%s queue_wait=%s max_exports=%d max_imports=%d",
-		nodeID, registries, endpoint, addr, cfg.HoldTimeout, cfg.QueueWait, cfg.MaxExports, cfg.MaxImports)
-	return worker.NewMirror(cfg, hx, inv), hosts
 }
 
 // listenPort extracts the port from a listen address like ":18081" or

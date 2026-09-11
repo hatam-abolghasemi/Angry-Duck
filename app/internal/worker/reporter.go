@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"angryduck/internal/imageref"
@@ -31,9 +32,8 @@ type Reporter struct {
 // pulling a new tag onto a node that already has an older tag of the same
 // repo is typically far cheaper than a cold pull.
 //
-// The listing goes through the shared Inventory, which also feeds GC and
-// the mirror's digest index, so one `crictl images -o json` per interval
-// serves all three.
+// The listing goes through the shared Inventory, which also feeds GC, so
+// one `crictl images -o json` per interval serves both.
 func NewReporter(nodeID, selfAddress, metricsURL, controllerURL string, interval time.Duration, inv *Inventory) *Reporter {
 	return &Reporter{
 		nodeID:        nodeID,
@@ -48,10 +48,9 @@ func NewReporter(nodeID, selfAddress, metricsURL, controllerURL string, interval
 }
 
 // Kick asks for one report right now instead of at the next tick. Used
-// after a preheat pull succeeds, so the controller can start pointing
-// peers at this node immediately rather than up to REPORT_INTERVAL_S
-// later — the rollout is racing the preheat, and those seconds are the
-// window where requesters would otherwise find no peer and go to origin.
+// after a preheat pull succeeds, so the controller's repo-locality view of
+// this node (used to prefer it for a later preheat of the same repo) is
+// fresh immediately rather than up to REPORT_INTERVAL_S stale.
 // Non-blocking; multiple kicks before the loop wakes collapse into one.
 func (rp *Reporter) Kick() {
 	select {
@@ -98,15 +97,14 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: computed root fs utilization: used=%.0f bytes, free=%.0f bytes, size=%.0f bytes, utilization=%.4f (%.1f%%)",
 		rp.nodeID, result.UsedBytes, result.FreeBytes, result.SizeBytes, result.Utilization, result.Utilization*100)
 
-	repos := rp.localRepos(listMaxAge)
+	repos, images := rp.localRefs(listMaxAge)
 
 	report := model.WorkerReport{
 		NodeID:      rp.nodeID,
 		Address:     rp.selfAddress,
 		Utilization: result.Utilization,
 		Repos:       repos,
-		Digests:     rp.inventory.Digests(),
-		Tags:        rp.inventory.Tags(),
+		Images:      images,
 		Timestamp:   time.Now(),
 	}
 	body, err := json.Marshal(report)
@@ -129,33 +127,38 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: report accepted by controller: utilization=%.1f%%, repos=%d", rp.nodeID, result.Utilization*100, len(repos))
 }
 
-// localRepos asks the runtime for every local image reference and reduces
-// it to the deduplicated set of bare repo identities (imageref.Repo),
-// stripping tag/digest so the controller only needs to know "does this
-// node have SOME build of this repo", not which exact tag.
+// localRefs asks the runtime for every local image reference once, and
+// returns two small, cheap-to-report views of it: the deduplicated set of
+// bare repo identities (Repos, for preheat locality ranking) and the
+// exact tag-form references (Images, for one-shot rescue sourcing). Both
+// are bounded by how many images actually sit on this node — tens, not
+// thousands — so neither grows without bound over the node's lifetime.
 //
-// The listing comes from the shared Inventory: GC and the mirror's digest
-// index use the same one, so this is the only regular image listing the
-// worker performs.
-func (rp *Reporter) localRepos(listMaxAge time.Duration) []string {
+// The listing comes from the shared Inventory: GC uses the same one, so
+// this is the only regular image listing the worker performs.
+func (rp *Reporter) localRefs(listMaxAge time.Duration) (repos, images []string) {
 	refs, _, err := rp.inventory.Get(listMaxAge)
 	if err != nil {
-		logging.Warnf("angryduck-worker[%s]: failed to list local images for repo report: %v", rp.nodeID, err)
-		return nil
+		logging.Warnf("angryduck-worker[%s]: failed to list local images for report: %v", rp.nodeID, err)
+		return nil, nil
 	}
 
-	seen := make(map[string]struct{}, len(refs))
-	repos := make([]string, 0, len(refs))
+	seenRepo := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
+		if ref == "" || strings.HasPrefix(ref, "sha256:") || strings.Contains(ref, "@sha256:") {
+			continue // bare digest or digest-pinned alias: no repo identity, not a tag a pod would reference
+		}
+		images = append(images, ref)
+
 		repo := imageref.Repo(ref)
 		if repo == "" {
-			continue // bare digest alias, no repo identity to report
-		}
-		if _, ok := seen[repo]; ok {
 			continue
 		}
-		seen[repo] = struct{}{}
+		if _, ok := seenRepo[repo]; ok {
+			continue
+		}
+		seenRepo[repo] = struct{}{}
 		repos = append(repos, repo)
 	}
-	return repos
+	return repos, images
 }

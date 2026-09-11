@@ -1,12 +1,12 @@
 package worker
 
-// mirror_test.go already covers Resolve() path preference, symlink
-// handling, non-executable rejection, missing-root errors, env scrubbing,
-// and Run() without a chroot. Everything here fills gaps that were still
-// open: the cache actually surviving a filesystem change, forget()
-// clearing it, Command() actually wiring up SysProcAttr.Chroot/Dir/Path,
-// and — the one that matters most in production, since it's the exact
-// mechanism angryduck-worker uses on every node — a real chroot(2) exec.
+// hostexec_test.go covers Resolve() path preference, symlink handling,
+// non-executable rejection, missing-root errors, env scrubbing, and Run()
+// without a chroot. Everything here fills gaps that were still open: the
+// cache actually surviving a filesystem change, forget() clearing it,
+// Command() actually wiring up SysProcAttr.Chroot/Dir/Path, and — the one
+// that matters most in production, since it's the exact mechanism
+// angryduck-worker uses on every node — a real chroot(2) exec.
 
 import (
 	"context"

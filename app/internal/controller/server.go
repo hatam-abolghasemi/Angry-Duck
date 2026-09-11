@@ -12,40 +12,19 @@ import (
 	"angryduck/internal/model"
 )
 
-// peerLookupsTotal counts /peers answers: found means at least one node
-// could serve the digest, none means the requester went to origin.
-var peerLookupsTotal = metrics.NewCounterVec(
-	"angryduck_controller_peer_lookups_total",
-	"Peer lookups answered for worker mirrors, by result.",
-	"result",
-)
-
-// resolveLookupsTotal counts /resolve answers: found means the fleet has
-// ever observed a digest for the asked tag (regardless of how stale),
-// none means the worker has nothing to fall back to at all.
-var resolveLookupsTotal = metrics.NewCounterVec(
-	"angryduck_controller_resolve_lookups_total",
-	"Tag-fallback resolve lookups answered, by result.",
-	"result",
-)
-
 // Server wires the registry + ranker up to HTTP handlers.
 type Server struct {
-	registry       *Registry
-	ranker         *Ranker
-	peerCandidates int
-	mux            *http.ServeMux
+	registry *Registry
+	ranker   *Ranker
+	mux      *http.ServeMux
 }
 
-// NewServer builds a Server with routes registered. peerCandidates caps
-// how many sources one /peers answer lists.
-func NewServer(registry *Registry, ranker *Ranker, peerCandidates int) *Server {
-	s := &Server{registry: registry, ranker: ranker, peerCandidates: peerCandidates, mux: http.NewServeMux()}
+// NewServer builds a Server with routes registered.
+func NewServer(registry *Registry, ranker *Ranker) *Server {
+	s := &Server{registry: registry, ranker: ranker, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
 	s.mux.HandleFunc("/report", s.handleReport)
-	s.mux.HandleFunc("/peers", s.handlePeers)
-	s.mux.HandleFunc("/resolve", s.handleResolve)
-	s.mux.HandleFunc("/announce", s.handleAnnounce)
+	s.mux.HandleFunc("/rescue-source", s.handleRescueSource)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.Handle("/metrics", metrics.Handler())
 	s.mux.HandleFunc("/healthz", s.handleHealth)
@@ -133,87 +112,34 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		rep.Timestamp = time.Now()
 	}
 	s.registry.Update(rep)
-	s.registry.UpdateTags(rep.Tags)
-	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%% tags=%d", rep.NodeID, rep.Address, rep.Utilization*100, len(rep.Tags))
+	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%%", rep.NodeID, rep.Address, rep.Utilization*100)
 	writeJSON(w, http.StatusOK, model.ReportAck{Accepted: true})
 }
 
-// handleResolve answers "what digest does this tag currently mean,
-// fleet-wide" — the tag-fallback lookup a worker makes only when origin
-// itself couldn't resolve a tag (see internal/worker's
-// Mirror.FallbackImport). Deliberately does not filter by freshness the
-// way /peers does: a mapping observed by a now-stale worker is still a
-// real fact worth returning, and PeersFor already re-checks freshness
-// the moment the caller asks who can actually serve the resulting
-// digest — staleness there fails safely (empty peer list), so filtering
-// here too would only hide information for no added safety.
-func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+// handleRescueSource answers "does any fresh node already have this exact
+// image" — used only when a pod is stuck in ImagePullBackOff, to find a
+// single source for a one-shot rescue import (see internal/worker's
+// Rescuer). Deliberately singular: at most one address, never a list —
+// there is no fan-out, no retry-through-alternatives here, matching the
+// "try once" nature of the whole mechanism.
+func (s *Server) handleRescueSource(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	tag := r.URL.Query().Get("tag")
-	if tag == "" {
-		http.Error(w, "tag required", http.StatusBadRequest)
+	image := r.URL.Query().Get("image")
+	if image == "" {
+		http.Error(w, "image required", http.StatusBadRequest)
 		return
 	}
-	digest, observedAt, ok := s.registry.ResolveTag(tag)
+	addr, ok := s.registry.RescueSourceFor(image, r.URL.Query().Get("node"))
 	if !ok {
-		resolveLookupsTotal.Inc("none")
-		logging.Debugf("angryduck-controller: node=%s asked to resolve tag=%s, nobody has ever reported it", r.URL.Query().Get("node"), tag)
-		http.NotFound(w, r)
+		logging.Debugf("angryduck-controller: no rescue source found for image=%s", image)
+		writeJSON(w, http.StatusOK, model.RescueSourceResponse{})
 		return
 	}
-	resolveLookupsTotal.Inc("found")
-	logging.Infof("angryduck-controller: node=%s resolved tag=%s to digest=%s (age=%s, fleet-observed, not origin-confirmed)",
-		r.URL.Query().Get("node"), tag, digest, time.Since(observedAt).Round(time.Second))
-	writeJSON(w, http.StatusOK, model.ResolveResponse{Digest: digest, ObservedAt: observedAt})
-}
-
-// handlePeers tells a worker's mirror which nodes can export a digest.
-// Answered entirely from memory: no fan-out, no calls to workers.
-func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	digest := r.URL.Query().Get("digest")
-	if !strings.HasPrefix(digest, "sha256:") {
-		http.Error(w, "digest required", http.StatusBadRequest)
-		return
-	}
-	asker := r.URL.Query().Get("node")
-	peers := s.registry.PeersFor(digest, asker, s.peerCandidates)
-	if len(peers) == 0 {
-		peerLookupsTotal.Inc("none")
-		logging.Infof("angryduck-controller: node=%s asked for peers of %s, found none — it'll go to origin", asker, digest)
-	} else {
-		peerLookupsTotal.Inc("found")
-		logging.Infof("angryduck-controller: node=%s asked for peers of %s, offered %d: %v", asker, digest, len(peers), peers)
-	}
-	writeJSON(w, http.StatusOK, model.PeersResponse{Peers: peers})
-}
-
-// handleAnnounce records a digest a worker just imported from a peer.
-func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var a model.Announce
-	if err := json.NewDecoder(r.Body).Decode(&a); err != nil || a.NodeID == "" || a.Digest == "" {
-		http.Error(w, "node_id and digest required", http.StatusBadRequest)
-		return
-	}
-	if ok := s.registry.Announce(a.NodeID, a.Digest); ok {
-		logging.Infof("angryduck-controller: node=%s announced it now holds %s", a.NodeID, a.Digest)
-	} else {
-		// Node isn't in the registry yet (no /report has landed for it
-		// yet) — its own next report will cover this digest anyway, so
-		// this is informational, not an error.
-		logging.Debugf("angryduck-controller: ignored announce from unknown node=%s for %s (no report from it yet)", a.NodeID, a.Digest)
-	}
-	w.WriteHeader(http.StatusNoContent)
+	logging.Infof("angryduck-controller: offering %s as a rescue source for image=%s", addr, image)
+	writeJSON(w, http.StatusOK, model.RescueSourceResponse{Address: addr})
 }
 
 // handleStatus is a debug endpoint showing the full worker registry and
