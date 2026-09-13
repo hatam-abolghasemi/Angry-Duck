@@ -144,26 +144,26 @@ func TestHandlePullRecordsPreheatedRepoOnSuccess(t *testing.T) {
 	t.Fatalf("expected repo docker.io/library/nginx to be recorded as preheated after a successful pull")
 }
 
-// TestHandlePullObservesDurationHistogram confirms a successful pull
-// records exactly one observation in pullDurationSeconds under the same
-// node/result/registry labels pullsTotal uses — the two metrics time and
-// count the same event, from the same call site.
-func TestHandlePullObservesDurationHistogram(t *testing.T) {
+// TestHandlePullSetsDurationGauge confirms a successful pull sets
+// pullDurationSeconds under the same node/result/registry labels
+// pullsTotal uses, plus the bare-repo image label — the two metrics time
+// and count the same event, from the same call site.
+func TestHandlePullSetsDurationGauge(t *testing.T) {
 	rt := newFakeRuntime()
 	const nodeID = "test-node-duration"
 	p := NewPuller(rt, time.Minute, nodeID, false, "")
 
 	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
 
-	want := `angryduck_worker_pull_duration_seconds_count{node="` + nodeID + `",result="success",registry=""} 1`
+	wantPrefix := `angryduck_worker_pull_duration_seconds{node="` + nodeID + `",result="success",registry="",image="docker.io/library/nginx",spegel=""} `
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(scrapeMetrics(t), want) {
+		if strings.Contains(scrapeMetrics(t), wantPrefix) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("expected %q in metrics output after a successful pull", want)
+	t.Fatalf("expected a line starting with %q in metrics output after a successful pull", wantPrefix)
 }
 
 // TestSpegelPresenceDisabledByDefault confirms an empty
@@ -199,7 +199,7 @@ func TestSpegelPresenceDetectsRunningContainer(t *testing.T) {
 
 // TestHandlePullLabelsSpegelPresence confirms a real pull through
 // HandlePull actually threads the Spegel-presence label into the
-// duration histogram, not just that the standalone method works.
+// duration gauge, not just that the standalone method works.
 func TestHandlePullLabelsSpegelPresence(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.running["ghcr.io/spegel-org/spegel:v0.7.4"] = true
@@ -209,13 +209,13 @@ func TestHandlePullLabelsSpegelPresence(t *testing.T) {
 
 	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
 
-	want := `angryduck_worker_pull_duration_seconds_count{node="` + nodeID + `",result="success",registry="",spegel="true"} 1`
+	wantPrefix := `angryduck_worker_pull_duration_seconds{node="` + nodeID + `",result="success",registry="",image="docker.io/library/nginx",spegel="true"} `
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(scrapeMetrics(t), want) {
+		if strings.Contains(scrapeMetrics(t), wantPrefix) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("expected %q in metrics output", want)
+	t.Fatalf("expected a line starting with %q in metrics output", wantPrefix)
 }

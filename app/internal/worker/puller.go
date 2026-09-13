@@ -28,24 +28,30 @@ var pullsTotal = metrics.NewCounterVec(
 	"node", "result", "registry",
 )
 
-// pullDurationSeconds times how long a preheat pull actually took,
-// success or failure — the baseline stg benchmark (kubelet Pulled events,
-// 0.25s-45.6s across workloads) sized these bucket boundaries. This times
-// exactly the same event pullsTotal counts (this is the ONLY path Angry
-// Duck pulls images through — rescue uses a separate export/import
-// mechanism, not PullImage), so the two are always consistent with each
-// other.
+// pullDurationSeconds is the most recent preheat pull duration, per
+// node/result/registry/image/spegel combination — a gauge, not a
+// histogram: this times exactly the same event pullsTotal counts (this
+// is the ONLY path Angry Duck pulls images through — rescue uses a
+// separate export/import mechanism, not PullImage), so the two are
+// always consistent with each other.
 //
-// spegel is only populated when SPEGEL_IMAGE_SUBSTRING is set — empty
-// otherwise, at zero extra cost (see spegelPresence). Values are
-// "true"/"false"/"unknown" (a runtime error checking presence is
-// reported as unknown, never silently folded into "false" — an error
-// isn't evidence Spegel was absent).
-var pullDurationSeconds = metrics.NewHistogramVec(
+// image is the bare repo (imageref.Repo — no tag, no digest), added
+// specifically so different repos pulled to the same node don't
+// overwrite each other's value. It does NOT fully eliminate gauge
+// overwrite: if the SAME repo is pulled to the SAME node twice before a
+// scrape catches the first value (a rapid hotfix-then-redeploy, say),
+// only the later duration survives to be scraped. Accepted deliberately
+// here in exchange for simplicity — for the full distribution (not just
+// "last observed"), aggregate pullsTotal counts and reason about rates,
+// or watch this value trend over successive scrapes.
+//
+// registry is only populated when METRICS_LABEL_REGISTRY is enabled;
+// spegel only when SPEGEL_IMAGE_SUBSTRING is set — see imagesDeletedTotal
+// in gc.go and spegelPresence respectively.
+var pullDurationSeconds = metrics.NewGaugeVec(
 	"angryduck_worker_pull_duration_seconds",
-	"How long a preheat pull took, by result. registry is only populated when METRICS_LABEL_REGISTRY=true; spegel only when SPEGEL_IMAGE_SUBSTRING is set.",
-	[]float64{0.5, 1, 2, 5, 10, 20, 30, 60, 120},
-	"node", "result", "registry", "spegel",
+	"Most recent preheat pull duration in seconds (a gauge, not a histogram — last value per label combination, not a distribution). registry only when METRICS_LABEL_REGISTRY=true; spegel only when SPEGEL_IMAGE_SUBSTRING is set.",
+	"node", "result", "registry", "image", "spegel",
 )
 
 // Puller receives pull orders from the controller, executes them
@@ -157,19 +163,20 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		logging.Infof("angryduck-worker: pulling image=%s", order.Image)
 		registry := imageref.RegistryLabel(order.Image, p.labelRegistry)
+		repo := imageref.Repo(order.Image)
 		if err := p.runtime.PullImage(order.Image); err != nil {
 			elapsed := time.Since(start)
 			logging.Errorf("angryduck-worker: pull failed for image=%s after %s: %v", order.Image, elapsed.Round(time.Millisecond), err)
 			pullsTotal.Inc(p.nodeID, "failure", registry)
-			pullDurationSeconds.Observe(elapsed.Seconds(), p.nodeID, "failure", registry, p.spegelPresence())
+			pullDurationSeconds.Set(elapsed.Seconds(), p.nodeID, "failure", registry, repo, p.spegelPresence())
 			return
 		}
 		elapsed := time.Since(start)
 		logging.Infof("angryduck-worker: pull succeeded for image=%s in %s", order.Image, elapsed.Round(time.Millisecond))
 		pullsTotal.Inc(p.nodeID, "success", registry)
-		pullDurationSeconds.Observe(elapsed.Seconds(), p.nodeID, "success", registry, p.spegelPresence())
+		pullDurationSeconds.Set(elapsed.Seconds(), p.nodeID, "success", registry, repo, p.spegelPresence())
 
-		if repo := imageref.Repo(order.Image); repo != "" {
+		if repo != "" {
 			p.mu.Lock()
 			p.preheatedAt[repo] = time.Now()
 			p.mu.Unlock()

@@ -174,104 +174,6 @@ func (g *GaugeVec) write(w io.Writer) {
 	}
 }
 
-// HistogramVec is a cumulative-bucket histogram split by a fixed, ordered
-// set of label names, following the same bucket/sum/count exposition
-// shape the Prometheus client libraries produce. Safe for concurrent use.
-type HistogramVec struct {
-	name       string
-	help       string
-	labelNames []string
-	// bounds is ascending and fixed at construction; a value's bucket is
-	// the first bound it's <= to, with an implicit "+Inf" bucket (every
-	// observation) after the last configured bound.
-	bounds []float64
-
-	mu      sync.Mutex
-	entries map[string]*histogramEntry
-}
-
-type histogramEntry struct {
-	// bucketCounts[i] is the count of observations that fell into bounds[i]
-	// specifically (NOT cumulative) — write() accumulates these in order
-	// to produce the cumulative counts Prometheus's histogram format
-	// requires. One extra trailing slot holds everything above the last
-	// configured bound (the "+Inf"-only portion). Their sum at write time
-	// IS the total count, so there's no separate counter field to keep in
-	// sync.
-	bucketCounts []int64
-	sum          float64
-}
-
-// NewHistogramVec creates a labeled histogram and registers it against
-// the package-level registry. bounds are the upper (inclusive) edges of
-// every bucket except the implicit trailing "+Inf" one; they're sorted
-// ascending internally regardless of the order passed in.
-func NewHistogramVec(name, help string, bounds []float64, labelNames ...string) *HistogramVec {
-	b := append([]float64(nil), bounds...)
-	sort.Float64s(b)
-	h := &HistogramVec{
-		name:       name,
-		help:       help,
-		labelNames: labelNames,
-		bounds:     b,
-		entries:    make(map[string]*histogramEntry),
-	}
-	defaultRegistry.register(h)
-	return h
-}
-
-// Observe records one sample of v (e.g. a duration in seconds) for the
-// given label values.
-func (h *HistogramVec) Observe(v float64, labelValues ...string) {
-	key := strings.Join(labelValues, labelSep)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	e, ok := h.entries[key]
-	if !ok {
-		e = &histogramEntry{bucketCounts: make([]int64, len(h.bounds)+1)}
-		h.entries[key] = e
-	}
-	idx := len(h.bounds) // default: above every configured bound, the "+Inf"-only slot
-	for i, bound := range h.bounds {
-		if v <= bound {
-			idx = i
-			break
-		}
-	}
-	e.bucketCounts[idx]++
-	e.sum += v
-}
-
-func (h *HistogramVec) write(w io.Writer) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	fmt.Fprintf(w, "# HELP %s %s\n", h.name, h.help)
-	fmt.Fprintf(w, "# TYPE %s histogram\n", h.name)
-
-	keys := make([]string, 0, len(h.entries))
-	for k := range h.entries {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		e := h.entries[key]
-		values := strings.Split(key, labelSep)
-		labels := joinLabels(h.labelNames, values)
-
-		var cumulative int64
-		for i, bound := range h.bounds {
-			cumulative += e.bucketCounts[i]
-			fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", h.name, labels, formatFloat(bound), cumulative)
-		}
-		cumulative += e.bucketCounts[len(h.bounds)] // the "+Inf"-only slot
-		fmt.Fprintf(w, "%s_bucket{%s,le=\"+Inf\"} %d\n", h.name, labels, cumulative)
-		fmt.Fprintf(w, "%s_sum{%s} %s\n", h.name, labels, formatFloat(e.sum))
-		fmt.Fprintf(w, "%s_count{%s} %d\n", h.name, labels, cumulative)
-	}
-}
-
 // formatFloat renders a float64 the way Prometheus text exposition
 // expects (shortest round-trippable decimal — "0.5", "10", "45.6", not
 // "4.56e+01" or trailing zeros).
@@ -279,9 +181,9 @@ func formatFloat(f float64) string {
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
-// registry holds every metric created via NewCounterVec/NewGaugeVec/
-// NewHistogramVec, so Handler can serve all of them from one endpoint
-// without each call site having to wire its own HTTP route.
+// registry holds every metric created via NewCounterVec/NewGaugeVec, so
+// Handler can serve all of them from one endpoint without each call site
+// having to wire its own HTTP route.
 type registry struct {
 	mu      sync.Mutex
 	metrics []metric

@@ -88,7 +88,13 @@ func main() {
 	// disable the monitor entirely if that ever matters more than the
 	// visibility it buys.
 	preheatAttributionInterval := config.Duration("PREHEAT_ATTRIBUTION_INTERVAL_S", 300)
-	preheatAttributionRetention := config.Duration("PREHEAT_ATTRIBUTION_RETENTION_S", 3600)
+	// Default (360 = GC_GRACE_PERIOD_S + GC_MISS_THRESHOLD*GC_CHECK_INTERVAL_S
+	// at THEIR defaults, 60 + 5*60) is the worst-case time an untouched
+	// preheated image survives before GC reclaims it: protected during the
+	// grace period, then up to GC_MISS_THRESHOLD checks at
+	// GC_CHECK_INTERVAL_S. Past that, if nothing used it, the image is
+	// already gone — recompute this if you change any of those three.
+	preheatAttributionRetention := config.Duration("PREHEAT_ATTRIBUTION_RETENTION_S", 360)
 	// Empty (the default) disables Spegel-presence detection entirely —
 	// no extra cost paid unless set. When non-empty, every preheat pull
 	// does ONE extra ListRunningImages() call (not a periodic poll: pulls
