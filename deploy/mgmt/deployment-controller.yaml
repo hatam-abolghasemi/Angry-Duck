@@ -4,16 +4,22 @@ metadata:
   name: angryduck-controller
   namespace: angryduck
   labels:
-    app: angryduck-controller
+    app.kubernetes.io/env: mgmt
+    app.kubernetes.io/name: angryduck
+    app.kubernetes.io/component: controller
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: angryduck-controller
+      app.kubernetes.io/env: mgmt
+      app.kubernetes.io/name: angryduck
+      app.kubernetes.io/component: controller
   template:
     metadata:
       labels:
-        app: angryduck-controller
+        app.kubernetes.io/env: mgmt
+        app.kubernetes.io/name: angryduck
+        app.kubernetes.io/component: controller
     spec:
       imagePullSecrets:
         - name: gitlab-docker-registry
@@ -39,29 +45,9 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            # The controller only ever holds small, bounded per-node
-            # state (a fresh/utilization record, a set of repo names, and
-            # a set of exact image references -- tens of short strings
-            # per node), replaced wholesale on every report, never
-            # accumulated. Even at fleet sizes far beyond today's, this
-            # stays a few hundred KB, not something that needs a large
-            # memory budget.
             requests:
               cpu: 20m
               memory: 16Mi
             limits:
               cpu: 150m
               memory: 32Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: angryduck-controller
-  namespace: angryduck
-spec:
-  selector:
-    app: angryduck-controller
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
