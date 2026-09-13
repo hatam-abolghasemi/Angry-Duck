@@ -3,6 +3,10 @@ kind: Ingress
 metadata:
   name: angryduck-webhook
   namespace: angryduck
+  labels:
+    app.kubernetes.io/env: stg
+    app.kubernetes.io/name: angryduck
+    app.kubernetes.io/component: controller
   annotations:
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /webhook/preheat

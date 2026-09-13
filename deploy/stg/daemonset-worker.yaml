@@ -4,15 +4,21 @@ metadata:
   name: angryduck-worker
   namespace: angryduck
   labels:
-    app: angryduck-worker
+    app.kubernetes.io/env: stg
+    app.kubernetes.io/name: angryduck
+    app.kubernetes.io/component: worker
 spec:
   selector:
     matchLabels:
-      app: angryduck-worker
+      app.kubernetes.io/env: stg
+      app.kubernetes.io/name: angryduck
+      app.kubernetes.io/component: worker
   template:
     metadata:
       labels:
-        app: angryduck-worker
+        app.kubernetes.io/env: stg
+        app.kubernetes.io/name: angryduck
+        app.kubernetes.io/component: worker
     spec:
       serviceAccountName: angryduck-worker
       hostNetwork: true
@@ -32,10 +38,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # Shared by every worker; peers present it to each other's
-            # /export. With MIRROR_ENABLED=true and no Secret the worker
-            # exits with a clear error and CrashLoops; creating the Secret
-            # fixes it on the next restart, no rollout needed.
             - name: MIRROR_PEER_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -49,8 +51,6 @@ spec:
             - containerPort: 18081
               name: http
           volumeMounts:
-            # No containerd socket or binary mounts: crictl/ctr run
-            # chrooted into /proc/1/root and see the node's own socket.
             - name: registry-creds
               mountPath: /etc/angryduck/registry-creds
               readOnly: true
@@ -67,16 +67,6 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            # Idle usage is unchanged: the worker itself is ~6 MiB, and the
-            # periodic crictl call (~20 MiB, a child in this cgroup) is
-            # what the old ~20-40Mi observation mostly was.
-            # Limits are for peer transfers: each ctr export/import child
-            # peaks at ~30-35 MiB and needs ~5 ms CPU per MiB moved.
-            # Worst case = worker 6 + 2 exports 62 + 2 imports 68 + crictl
-            # listing 20 + preheat crictl pull 25 ~= 181 MiB. At the old
-            # 200m CPU a 150 MiB image took >=3.8 s of throttled CPU per
-            # side (~40 MiB/s) — slower than the LAN it rides on.
-            # Requests stay low: limits reserve nothing.
             requests:
               cpu: 50m
               memory: 32Mi

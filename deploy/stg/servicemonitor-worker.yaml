@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: angryduck-worker
+  namespace: angryduck
+  labels:
+    release: prometheus
+    app.kubernetes.io/env: stg
+    app.kubernetes.io/name: angryduck
+    app.kubernetes.io/component: worker
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/env: stg
+      app.kubernetes.io/name: angryduck
+      app.kubernetes.io/component: worker
+  namespaceSelector:
+    matchNames:
+      - angryduck
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
