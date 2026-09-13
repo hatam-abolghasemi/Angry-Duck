@@ -137,7 +137,7 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 // The listing comes from the shared Inventory: GC uses the same one, so
 // this is the only regular image listing the worker performs.
 func (rp *Reporter) localRefs(listMaxAge time.Duration) (repos, images []string) {
-	refs, _, err := rp.inventory.Get(listMaxAge)
+	refs, _, _, err := rp.inventory.Get(listMaxAge)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: failed to list local images for report: %v", rp.nodeID, err)
 		return nil, nil

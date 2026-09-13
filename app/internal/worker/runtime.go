@@ -3,6 +3,8 @@ package worker
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"angryduck/internal/imageref"
@@ -57,7 +59,18 @@ type Runtime interface {
 	// single GC tick — on crictl that meant `crictl images -o json` ran
 	// and was JSON-unmarshaled twice per tick for identical output.
 	// Combined into one call/parse that serves both needs.
-	LocalImages() (refs []string, digests map[string]string, err error)
+	//
+	// sizes maps every alias in refs/digests to that image's approximate
+	// or exact size in bytes, feeding GC's freed-bytes metric. It comes
+	// from whatever the same underlying listing call already reports —
+	// crictl's JSON gives an exact byte count for free; ctr and docker
+	// only give a human-rounded string ("14.7 MiB", "5.58MB") in their
+	// bulk listing, so on those backends the value here is a best-effort
+	// reconstruction of that rounded string, not the original exact size.
+	// An alias missing from sizes means the backend reported nothing
+	// parseable for it — callers should treat that as "unknown", not
+	// zero.
+	LocalImages() (refs []string, digests map[string]string, sizes map[string]int64, err error)
 	ListRunningImages() ([]string, error)
 	RemoveImage(image string) error
 }
@@ -142,17 +155,17 @@ func (r containerdRuntime) PullImage(image string) error {
 // digest map from that single parse — the ref list used to come from a
 // separate `-q` invocation, doubling the subprocess spawns for no reason,
 // since every ref `-q` would return is already a key in the table's parse.
-func (r containerdRuntime) LocalImages() ([]string, map[string]string, error) {
+func (r containerdRuntime) LocalImages() ([]string, map[string]string, map[string]int64, error) {
 	out, err := r.hx.Run("ctr", "-n", "k8s.io", "images", "list")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	digests := parseCtrImagesList(out)
+	digests, sizes := parseCtrImagesList(out)
 	refs := make([]string, 0, len(digests))
 	for ref := range digests {
 		refs = append(refs, ref)
 	}
-	return refs, digests, nil
+	return refs, digests, sizes, nil
 }
 
 // parseCtrImagesList extracts a ref->digest map from the tabular output of
@@ -171,8 +184,16 @@ func (r containerdRuntime) LocalImages() ([]string, map[string]string, error) {
 // column (SIZE, e.g. "14.7 MiB") itself contains an internal space, because
 // none of REF, TYPE, or DIGEST can ever contain whitespace themselves —
 // only columns after the one we need can, so they don't affect parsing.
-func parseCtrImagesList(output string) map[string]string {
+//
+// The SIZE column (fields[3]+" "+fields[4], e.g. "14.7 MiB") is also
+// parsed here, into an approximate byte count for GC's freed-bytes
+// metric — approximate because ctr has already rounded it to one decimal
+// place by the time it reaches us; see parseApproxBytes. A ref whose size
+// couldn't be parsed (malformed line, missing column) simply has no entry
+// in sizes.
+func parseCtrImagesList(output string) (map[string]string, map[string]int64) {
 	digests := make(map[string]string)
+	sizes := make(map[string]int64)
 	for _, line := range splitNonEmptyLines(output) {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
@@ -186,8 +207,56 @@ func parseCtrImagesList(output string) map[string]string {
 			continue // defensive: not a real digest, skip rather than guess
 		}
 		digests[ref] = digest
+		if len(fields) >= 5 {
+			if b, ok := parseApproxBytes(fields[3]+" "+fields[4], binarySizeUnits, binarySizeBase); ok {
+				sizes[ref] = b
+			}
+		}
 	}
-	return digests
+	return digests, sizes
+}
+
+// binarySizeUnits are the IEC (binary) units ctr prints in its SIZE column
+// ("14.7 MiB", "312.9 KiB"), ordered smallest-to-largest so
+// parseApproxBytes can walk them from the most specific suffix down to the
+// bare "B" every one of them also ends with.
+var binarySizeUnits = []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+
+const binarySizeBase = 1024.0
+
+// decimalSizeUnits are the SI (decimal) units `docker images` prints in
+// its SIZE column ("5.58MB", "312.9kB"), same ordering convention as
+// binarySizeUnits.
+var decimalSizeUnits = []string{"B", "kB", "MB", "GB", "TB", "PB"}
+
+const decimalSizeBase = 1000.0
+
+// parseApproxBytes reconstructs a byte count from a humanized size string
+// like "14.7 MiB" or "5.58MB". It only exists because ctr's and docker's
+// bulk image-listing commands round the real byte count to a
+// human-friendly string before Angry Duck ever sees it — by the time this
+// function runs, the original exact value is already gone, so the result
+// is a best-effort approximation, not the precision crictl's own "size"
+// field gives for free (see crictlRuntime.LocalImages). Good enough for a
+// "how much disk did GC free" metric; not something to alert on down to
+// the byte. units must be ordered smallest-to-largest (as
+// binarySizeUnits/decimalSizeUnits are) and checked in reverse so e.g.
+// "MiB" is matched before the trailing "B" every unit in the list shares.
+func parseApproxBytes(s string, units []string, base float64) (int64, bool) {
+	s = strings.TrimSpace(s)
+	for exp := len(units) - 1; exp >= 0; exp-- {
+		unit := units[exp]
+		if !strings.HasSuffix(s, unit) {
+			continue
+		}
+		numPart := strings.TrimSpace(strings.TrimSuffix(s, unit))
+		val, err := strconv.ParseFloat(numPart, 64)
+		if err != nil {
+			continue
+		}
+		return int64(val * math.Pow(base, float64(exp))), true
+	}
+	return 0, false
 }
 
 // ctrContainerInfo covers only the field we need from `ctr containers info`
@@ -263,6 +332,11 @@ type crictlImagesOutput struct {
 		ID          string   `json:"id"`
 		RepoTags    []string `json:"repoTags"`
 		RepoDigests []string `json:"repoDigests"`
+		// Size is a uint64 byte count, but CRI encodes it as a JSON
+		// string (large enough to overflow a JSON number in some
+		// encoders) — unlike ctr/docker, crictl gives this to us exact,
+		// with no "14.7 MiB" rounding in between.
+		Size string `json:"size"`
 	} `json:"images"`
 }
 
@@ -282,18 +356,19 @@ type crictlImagesOutput struct {
 // stable value shared by every alias of one piece of content, letting GC
 // match by digest instead of by whichever specific alias a running
 // container happens to report.
-func (r crictlRuntime) LocalImages() ([]string, map[string]string, error) {
+func (r crictlRuntime) LocalImages() ([]string, map[string]string, map[string]int64, error) {
 	out, err := r.hx.Run("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var parsed crictlImagesOutput
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		return nil, nil, fmt.Errorf("parsing crictl images output: %w", err)
+		return nil, nil, nil, fmt.Errorf("parsing crictl images output: %w", err)
 	}
 
 	var refs []string
 	digests := make(map[string]string)
+	sizes := make(map[string]int64)
 	for _, img := range parsed.Images {
 		refs = append(refs, img.RepoTags...)
 		if img.ID == "" {
@@ -306,8 +381,17 @@ func (r crictlRuntime) LocalImages() ([]string, map[string]string, error) {
 		for _, d := range img.RepoDigests {
 			digests[d] = img.ID
 		}
+		if b, err := strconv.ParseInt(img.Size, 10, 64); err == nil && b > 0 {
+			sizes[img.ID] = b
+			for _, tag := range img.RepoTags {
+				sizes[tag] = b
+			}
+			for _, d := range img.RepoDigests {
+				sizes[d] = b
+			}
+		}
 	}
-	return refs, digests, nil
+	return refs, digests, sizes, nil
 }
 
 // crictlPsOutput matches the shape of `crictl ps -o json`. Per the CRI
@@ -397,24 +481,31 @@ func (r dockerRuntime) ListRunningImages() ([]string, error) {
 // --format {{.Image}}` occasionally reporting a container's original image
 // by ID instead of tag (e.g. after the tag has been moved or removed since
 // the container started).
-func (r dockerRuntime) LocalImages() ([]string, map[string]string, error) {
-	out, err := r.hx.Run("docker", "images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}")
+func (r dockerRuntime) LocalImages() ([]string, map[string]string, map[string]int64, error) {
+	out, err := r.hx.Run("docker", "images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var refs []string
 	digests := make(map[string]string)
+	sizes := make(map[string]int64)
 	for _, line := range splitNonEmptyLines(out) {
 		fields := strings.Fields(line)
-		if len(fields) != 2 {
+		if len(fields) != 3 {
 			continue
 		}
-		ref, id := fields[0], fields[1]
+		ref, id, sizeStr := fields[0], fields[1], fields[2]
 		refs = append(refs, ref)
 		digests[ref] = id
 		digests[id] = id
+		// Docker's Size field ("5.58MB") is already rounded by the time
+		// it reaches us, same caveat as ctr — see parseApproxBytes.
+		if b, ok := parseApproxBytes(sizeStr, decimalSizeUnits, decimalSizeBase); ok {
+			sizes[ref] = b
+			sizes[id] = b
+		}
 	}
-	return refs, digests, nil
+	return refs, digests, sizes, nil
 }
 
 func (r dockerRuntime) RemoveImage(image string) error {
