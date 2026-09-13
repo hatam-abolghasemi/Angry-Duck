@@ -4,19 +4,19 @@ metadata:
   name: angryduck-worker
   namespace: angryduck
   labels:
-    app.kubernetes.io/env: mgmt
+    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: worker
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/env: mgmt
+      app.kubernetes.io/env: stg
       app.kubernetes.io/name: angryduck
       app.kubernetes.io/component: worker
   template:
     metadata:
       labels:
-        app.kubernetes.io/env: mgmt
+        app.kubernetes.io/env: stg
         app.kubernetes.io/name: angryduck
         app.kubernetes.io/component: worker
     spec:
@@ -28,7 +28,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.0
+          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.1
           env:
             - name: NODE_ID
               valueFrom:
@@ -38,10 +38,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: MIRROR_PEER_TOKEN
+            - name: RESCUE_PEER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: angryduck-mirror
+                  name: angryduck-rescue
                   key: token
                   optional: true
           envFrom:

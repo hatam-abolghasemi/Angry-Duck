@@ -267,7 +267,7 @@ func (rw *RescueWatch) isExcluded(s podStuckImage) bool {
 func (rw *RescueWatch) Run(ctx context.Context) {
 	ticker := time.NewTicker(rw.interval)
 	defer ticker.Stop()
-	logging.Infof("angryduck-worker-rescue: watch started: interval=%s cooldown=%s rescue_enabled=%v", rw.interval, rw.cooldown, rw.rescue != nil)
+	logging.Infof("angryduck-worker-rescue: watch started: interval=%s cooldown=%s mode=%s", rw.interval, rw.cooldown, rw.mode())
 	for {
 		select {
 		case <-ctx.Done():
@@ -315,6 +315,19 @@ func (rw *RescueWatch) tick(ctx context.Context) {
 			logging.Warnf("angryduck-worker-rescue: one-shot rescue of image=%s did not succeed, will not retry for %s: %v", s.Image, rw.cooldown, err)
 		}
 	}
+}
+
+// mode reports this watch's operating mode for logging: "fix" if it can
+// actually pull a stuck image from a peer, "count-only" if it can only
+// observe and log stuck pulls (e.g. no token, no ctr binary, no in-cluster
+// client) without ever attempting a rescue. Distinct from whether the
+// RESCUE_ENABLED feature flag is set — that's decided in main before this
+// watch is even constructed.
+func (rw *RescueWatch) mode() string {
+	if rw.rescue != nil {
+		return "fix"
+	}
+	return "count-only"
 }
 
 func (rw *RescueWatch) recentlyAttempted(image string) bool {

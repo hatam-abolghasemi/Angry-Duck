@@ -271,10 +271,10 @@ Real environment variables (a k8s ConfigMap, in practice — see
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.0 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.0 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.0
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.0
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.1 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.1 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.1
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.1
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. The rescue token — before the DaemonSet (once per cluster). Rescue

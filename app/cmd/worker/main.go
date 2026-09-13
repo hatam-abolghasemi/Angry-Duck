@@ -118,7 +118,7 @@ func main() {
 	rescueToken := config.String("RESCUE_PEER_TOKEN", "")
 	rescueMaxConcurrentExports := config.Int("RESCUE_MAX_CONCURRENT_EXPORTS", 1)
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue=%v",
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v",
 		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled)
 
 	hx, err := worker.NewHostExec(hostRoot)
@@ -158,17 +158,17 @@ func main() {
 	if rescueEnabled {
 		containerdAddr := strings.TrimPrefix(runtimeEndpoint, "unix://")
 		if _, err := hx.Resolve("ctr"); err != nil {
-			log.Printf("angryduck-worker[%s]: RESCUE_ENABLED=true but ctr is not on the node; rescue will only count and log stuck pulls, not fix them", nodeID)
+			log.Printf("angryduck-worker[%s]: rescue running in count-only mode: ctr is not on the node, so stuck pulls will be logged but not fixed", nodeID)
 		} else if len(rescueToken) < 16 {
-			log.Printf("angryduck-worker[%s]: RESCUE_ENABLED=true but RESCUE_PEER_TOKEN is unset or under 16 chars; rescue will only count and log stuck pulls, not fix them", nodeID)
+			log.Printf("angryduck-worker[%s]: rescue running in count-only mode: RESCUE_PEER_TOKEN is unset or under 16 chars, so stuck pulls will be logged but not fixed", nodeID)
 		} else {
 			exporter = worker.NewRescueExporter(nodeID, rescueToken, hx, containerdAddr, "k8s.io", rescueMaxConcurrentExports)
 			rescuer = worker.NewRescuer(nodeID, controllerURL, rescueToken, hx, containerdAddr, "k8s.io")
-			log.Printf("angryduck-worker[%s]: rescue enabled: poll_interval=%s retry_interval=%s max_concurrent_exports=%d",
+			log.Printf("angryduck-worker[%s]: rescue running in fix mode: poll_interval=%s retry_interval=%s max_concurrent_exports=%d",
 				nodeID, rescueInterval, rescueRetryInterval, rescueMaxConcurrentExports)
 		}
 		if k8sClient, err := worker.NewInClusterK8sClient(); err != nil {
-			log.Printf("angryduck-worker[%s]: RESCUE_ENABLED=true but not usable: %v — rescue watch disabled", nodeID, err)
+			log.Printf("angryduck-worker[%s]: rescue watch not started: %v", nodeID, err)
 		} else {
 			var attempt func(context.Context, string) error
 			if rescuer != nil {
