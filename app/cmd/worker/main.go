@@ -76,6 +76,30 @@ func main() {
 	// the controller's angryduck_controller_pull_orders_total, since both
 	// read the same ConfigMap.
 	labelRegistry := config.Bool("METRICS_LABEL_REGISTRY", false)
+	// How often PreheatMonitor samples running containers against
+	// recently-preheated repos, and how long a repo counts as
+	// "recently preheated" once a pull for it succeeds here. Deliberately
+	// much coarser than GC_CHECK_INTERVAL_S — this is a dashboard sample,
+	// not a decision that needs to react quickly. On the crictl backend
+	// this is already close to free (the monitor skips its runtime call
+	// entirely on any node with nothing preheated recently — see
+	// PreheatMonitor.tick), but on CONTAINER_RUNTIME=containerd it's a
+	// second N+1-subprocess pass on top of GC's own; set this to 0 to
+	// disable the monitor entirely if that ever matters more than the
+	// visibility it buys.
+	preheatAttributionInterval := config.Duration("PREHEAT_ATTRIBUTION_INTERVAL_S", 300)
+	preheatAttributionRetention := config.Duration("PREHEAT_ATTRIBUTION_RETENTION_S", 3600)
+	// Empty (the default) disables Spegel-presence detection entirely —
+	// no extra cost paid unless set. When non-empty, every preheat pull
+	// does ONE extra ListRunningImages() call (not a periodic poll: pulls
+	// are already a low-frequency event, bounded by RANK_TOP_N per push,
+	// so this stays cheap even on the ctr backend) to check whether a
+	// container whose image contains this substring is running on this
+	// node, and labels angryduck_worker_pull_duration_seconds with the
+	// result — answering "was this pull's timing measured with or
+	// without Spegel in place," using only the local container runtime,
+	// no Kubernetes API access.
+	spegelImageSubstring := config.String("SPEGEL_IMAGE_SUBSTRING", "")
 	// crictl is the default: unlike ctr, it lists every running
 	// container's image in one call instead of one subprocess per
 	// container — see the comment on NewRuntime for why this matters.
@@ -125,8 +149,8 @@ func main() {
 	rescueToken := config.String("RESCUE_PEER_TOKEN", "")
 	rescueMaxConcurrentExports := config.Int("RESCUE_MAX_CONCURRENT_EXPORTS", 1)
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v metrics_label_registry=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled, labelRegistry)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v metrics_label_registry=%v preheat_attribution_interval=%s preheat_attribution_retention=%s spegel_image_substring=%q",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled, labelRegistry, preheatAttributionInterval, preheatAttributionRetention, spegelImageSubstring)
 
 	hx, err := worker.NewHostExec(hostRoot)
 	if err != nil {
@@ -143,7 +167,7 @@ func main() {
 
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, hx)
 	inv := worker.NewInventory(rt)
-	puller := worker.NewPuller(rt, gracePeriod, nodeID, labelRegistry)
+	puller := worker.NewPuller(rt, gracePeriod, nodeID, labelRegistry, spegelImageSubstring)
 	gc := worker.NewGC(rt, inv, reportInterval, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID, labelRegistry)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, inv)
 	puller.OnSuccess(reporter.Kick)
@@ -153,6 +177,12 @@ func main() {
 
 	go reporter.Run(ctx)
 	go gc.Run(ctx)
+	if preheatAttributionInterval > 0 {
+		preheatMonitor := worker.NewPreheatMonitor(rt, puller, preheatAttributionInterval, preheatAttributionRetention, nodeID)
+		go preheatMonitor.Run(ctx)
+	} else {
+		log.Printf("angryduck-worker[%s]: preheat-attribution monitor disabled (PREHEAT_ATTRIBUTION_INTERVAL_S=0)", nodeID)
+	}
 
 	// Rescue setup: soft-fails (logs and runs in count-only mode) rather
 	// than crashing, since it's a secondary safety net, not core to what

@@ -72,6 +72,15 @@ type Runtime interface {
 	// zero.
 	LocalImages() (refs []string, digests map[string]string, sizes map[string]int64, err error)
 	ListRunningImages() ([]string, error)
+	// RunningImageRepos counts currently-running containers on this node,
+	// grouped by bare repository identity (imageref.Repo) — one count per
+	// actual container. This is deliberately NOT built on top of
+	// ListRunningImages(): that method intentionally returns every alias
+	// of a running image (tag form AND digest form) for GC's set-membership
+	// matching, and naively counting entries from it would double-count
+	// every container on the crictl backend, which reports both aliases
+	// per container. Used only by PreheatMonitor's coarse sample.
+	RunningImageRepos() (map[string]int, error)
 	RemoveImage(image string) error
 }
 
@@ -289,6 +298,39 @@ func (r containerdRuntime) ListRunningImages() ([]string, error) {
 	return images, nil
 }
 
+// RunningImageRepos shells out the same way ListRunningImages does (one
+// `ctr containers info` per container — see NewRuntime's warning about
+// this backend's cost), but groups by repo instead of returning raw
+// aliases. Unlike crictl, ctr's `containers info` reports exactly one
+// Image string per container already, so no alias-duplication concern
+// applies here — this exists mainly for interface symmetry with the
+// crictl backend, where it does matter.
+func (r containerdRuntime) RunningImageRepos() (map[string]int, error) {
+	out, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "list", "-q")
+	if err != nil {
+		return nil, err
+	}
+	ids := splitNonEmptyLines(out)
+	counts := make(map[string]int)
+	for _, id := range ids {
+		info, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "info", id)
+		if err != nil {
+			continue
+		}
+		var parsed ctrContainerInfo
+		if err := json.Unmarshal([]byte(info), &parsed); err != nil {
+			continue
+		}
+		if parsed.Image == "" {
+			continue
+		}
+		if repo := imageref.Repo(parsed.Image); repo != "" {
+			counts[repo]++
+		}
+	}
+	return counts, nil
+}
+
 func (r containerdRuntime) RemoveImage(image string) error {
 	_, err := r.hx.Run("ctr", "-n", "k8s.io", "images", "remove", image)
 	return err
@@ -430,6 +472,49 @@ func (r crictlRuntime) ListRunningImages() ([]string, error) {
 	return images, nil
 }
 
+// countRunningReposByContainer groups crictl's per-container ps output by
+// bare repository identity, picking exactly one alias per container
+// (ImageRef if the CRI runtime resolved one, else the requested
+// Image.Image) — pulled out as its own function so the
+// one-alias-per-container fix is directly unit-testable against a parsed
+// fixture, the same way parseCtrImagesList is.
+func countRunningReposByContainer(parsed crictlPsOutput) map[string]int {
+	counts := make(map[string]int)
+	for _, c := range parsed.Containers {
+		ref := c.ImageRef
+		if ref == "" {
+			ref = c.Image.Image
+		}
+		if ref == "" {
+			continue
+		}
+		if repo := imageref.Repo(ref); repo != "" {
+			counts[repo]++
+		}
+	}
+	return counts
+}
+
+// RunningImageRepos parses the same `crictl ps -o json` output
+// ListRunningImages does, but — unlike that method — picks exactly ONE
+// alias per container before computing its repo (see
+// countRunningReposByContainer). ListRunningImages deliberately returns
+// BOTH aliases per container for GC's set-membership matching, where the
+// duplication is harmless; counting containers from that same list would
+// double almost every count, since real containers almost always have
+// both fields populated.
+func (r crictlRuntime) RunningImageRepos() (map[string]int, error) {
+	out, err := r.hx.Run("crictl", r.withEndpoint("ps", "-o", "json")...)
+	if err != nil {
+		return nil, err
+	}
+	var parsed crictlPsOutput
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, fmt.Errorf("parsing crictl ps output: %w", err)
+	}
+	return countRunningReposByContainer(parsed), nil
+}
+
 func (r crictlRuntime) RemoveImage(image string) error {
 	_, err := r.hx.Run("crictl", r.withEndpoint("rmi", image)...)
 	return err
@@ -468,6 +553,24 @@ func (r dockerRuntime) ListRunningImages() ([]string, error) {
 		return nil, err
 	}
 	return splitNonEmptyLines(out), nil
+}
+
+// RunningImageRepos is a second `docker ps` call rather than deriving from
+// ListRunningImages, purely for symmetry with the other two backends —
+// docker ps already reports exactly one line per container, so there's no
+// alias-duplication bug to work around here.
+func (r dockerRuntime) RunningImageRepos() (map[string]int, error) {
+	out, err := r.hx.Run("docker", "ps", "--format", "{{.Image}}")
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int)
+	for _, ref := range splitNonEmptyLines(out) {
+		if repo := imageref.Repo(ref); repo != "" {
+			counts[repo]++
+		}
+	}
+	return counts, nil
 }
 
 // LocalImages runs `docker images` exactly once (asking for both the

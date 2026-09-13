@@ -8,7 +8,8 @@ metadata:
     app.kubernetes.io/name: angryduck
 data:
   LOG_LEVEL: "info"
-  METRICS_LABEL_REGISTRY: "false"
+  METRICS_LABEL_REGISTRY: "true"
+  SPEGEL_IMAGE_SUBSTRING: "spegel"
   CONTROLLER_LISTEN_ADDR: ":8080"
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"
@@ -20,6 +21,8 @@ data:
   NODE_EXPORTER_URL: "http://localhost:9100/metrics"
   CONTROLLER_URL: "http://angryduck-controller.angryduck.svc.cluster.local:8080"
   REPORT_INTERVAL_S: "15"
+  PREHEAT_ATTRIBUTION_INTERVAL_S: "300"
+  PREHEAT_ATTRIBUTION_RETENTION_S: "3600"
   GC_CHECK_INTERVAL_S: "60"
   GC_MISS_THRESHOLD: "5"
   GC_GRACE_PERIOD_S: "60"

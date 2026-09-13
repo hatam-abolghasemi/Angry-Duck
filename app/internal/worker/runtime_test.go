@@ -240,3 +240,69 @@ func TestParseApproxBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestCountRunningReposByContainer proves the crictl backend's
+// RunningImageRepos counts each CONTAINER once, not once per alias —
+// ListRunningImages deliberately returns both Image.Image and ImageRef
+// per container, and naively counting that list would double every
+// result, since real containers almost always have both fields set (as
+// this fixture, with two containers of the same repo plus one of
+// another, does).
+func TestCountRunningReposByContainer(t *testing.T) {
+	realShapeOutput := `{
+  "containers": [
+    {
+      "id": "abc123",
+      "image": {"image": "docker.io/library/nginx:1.25"},
+      "imageRef": "sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36abdcea77152208e4a79b4",
+      "state": "CONTAINER_RUNNING"
+    },
+    {
+      "id": "def456",
+      "image": {"image": "docker.io/library/nginx:1.25"},
+      "imageRef": "sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36abdcea77152208e4a79b4",
+      "state": "CONTAINER_RUNNING"
+    },
+    {
+      "id": "ghi789",
+      "image": {"image": "repo-sahand.internal-dev.example.com/pause:3.10.1"},
+      "imageRef": "sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c",
+      "state": "CONTAINER_RUNNING"
+    }
+  ]
+}`
+	var parsed crictlPsOutput
+	if err := json.Unmarshal([]byte(realShapeOutput), &parsed); err != nil {
+		t.Fatalf("failed to parse crictl ps output: %v", err)
+	}
+
+	counts := countRunningReposByContainer(parsed)
+
+	if got := counts["docker.io/library/nginx"]; got != 2 {
+		t.Errorf("nginx repo count = %d, want 2 (one per container, not one per alias)", got)
+	}
+	if got := counts["repo-sahand.internal-dev.example.com/pause"]; got != 1 {
+		t.Errorf("pause repo count = %d, want 1", got)
+	}
+	if len(counts) != 2 {
+		t.Errorf("got %d distinct repos, want 2", len(counts))
+	}
+}
+
+// TestCountRunningReposByContainerMissingImageRef falls back to
+// Image.Image when the CRI runtime hasn't resolved an ImageRef.
+func TestCountRunningReposByContainerMissingImageRef(t *testing.T) {
+	out := `{
+  "containers": [
+    {"id": "abc123", "image": {"image": "docker.io/library/redis:7"}, "imageRef": "", "state": "CONTAINER_RUNNING"}
+  ]
+}`
+	var parsed crictlPsOutput
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("failed to parse crictl ps output: %v", err)
+	}
+	counts := countRunningReposByContainer(parsed)
+	if got := counts["docker.io/library/redis"]; got != 1 {
+		t.Errorf("redis repo count = %d, want 1", got)
+	}
+}

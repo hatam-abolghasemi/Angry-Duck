@@ -59,6 +59,35 @@ whatever apt or Kubespray installed is exactly what runs, statically or
 dynamically linked, always the current version, with no files copied
 onto or mounted over the node.
 
+**Observability:** `angryduck_worker_pull_duration_seconds` times every
+preheat pull (this is the only path Angry Duck pulls images through —
+Rescue uses a separate mechanism), alongside the existing
+`angryduck_worker_pulls_total`. When `SPEGEL_IMAGE_SUBSTRING` is set, that
+histogram also gets a `spegel` label (`true`/`false`/`unknown`) — was a
+container matching that substring running on this node at pull time —
+determined entirely from the local container runtime, no Kubernetes API
+call or extra RBAC involved, and checked only once per pull (a
+low-frequency event) rather than on any timer. Separately,
+`angryduck_worker_preheated_containers_running{node,repo}` samples, every
+`PREHEAT_ATTRIBUTION_INTERVAL_S`, how many currently-running containers on
+each node belong to a repo that worker preheated within
+`PREHEAT_ATTRIBUTION_RETENTION_S` — a coarse, repo-level answer to "is
+preheat pulling its weight," without watching every pod's scheduling or
+pull events. This sampler already skips its own runtime call entirely on
+any node with nothing preheated recently (true for most nodes in a fleet
+at any given moment, since only `RANK_TOP_N` are ever seeds), and
+`PREHEAT_ATTRIBUTION_INTERVAL_S=0` disables it outright if that's still
+too much on `CONTAINER_RUNTIME=containerd`, whose per-container-subprocess
+cost this reuses. It's necessarily approximate: a fast pull on a node
+Angry Duck *didn't* seed could still be Spegel finding some other peer,
+and this has no visibility into that. Spegel itself exposes
+`spegel_mirror_requests_total`, `spegel_resolve_duration_seconds`, and a
+few `spegel_advertised_*` gauges (see its own `/metrics`) — none labeled
+per-image or per-pod, and none timing an actual transfer, only peer
+resolution. For a real before/after answer, a one-off benchmark against
+kubelet's own `Pulled` events (pull duration, scheduling excluded) is more
+trustworthy than any steady-state counter here or in Spegel.
+
 ## 2. Garbage collection
 
 **What it does:** every `GC_CHECK_INTERVAL_S`, each worker scans *every*
@@ -264,6 +293,9 @@ for the full annotated list. The highlights:
 | `RESCUE_PEER_TOKEN` | (empty) | shared secret for `/rescue-export`; optional (soft-fail without it), from the `angryduck-rescue` Secret |
 | `RESCUE_EXCLUDE_NAMESPACE_SUBSTRINGS` / `RESCUE_EXCLUDE_IMAGE_SUBSTRINGS` | (empty) | ignore stuck pods matching these entirely — no log, no metric, no attempt |
 | `METRICS_LABEL_REGISTRY` | false | add a `registry` label (image registry host, "docker.io" for unqualified refs) to the image-related counters; off by default since registry host isn't a bounded set like node — read by both controller and worker |
+| `PREHEAT_ATTRIBUTION_INTERVAL_S` | 300 | how often to sample running containers against recently-preheated repos (`angryduck_worker_preheated_containers_running`); 0 disables the monitor entirely |
+| `PREHEAT_ATTRIBUTION_RETENTION_S` | 3600 | how long a repo still counts as "preheated" after its last successful preheat pull here |
+| `SPEGEL_IMAGE_SUBSTRING` | (empty) | when set, labels `angryduck_worker_pull_duration_seconds` with whether a container matching this substring was running at pull time (`true`/`false`/`unknown`) — no Kubernetes API call, checked once per pull |
 
 Real environment variables (a k8s ConfigMap, in practice — see
 `deploy/stg/configmap.yaml`) always win over `.env` file values.
@@ -272,10 +304,10 @@ Real environment variables (a k8s ConfigMap, in practice — see
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.3 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.3 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.3
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.3
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.4 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.4 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.4
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.4
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. The rescue token — before the DaemonSet (once per cluster). Rescue
