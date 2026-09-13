@@ -37,12 +37,17 @@ func main() {
 	// utilization-only ranking. Set to false to restore the old
 	// utilization-only behavior if this ever needs a quick rollback.
 	preferImageLocality := config.Bool("RANK_PREFER_IMAGE_LOCALITY", true)
+	// Same flag, same default, as the worker's METRICS_LABEL_REGISTRY —
+	// both binaries read it from the same ConfigMap so
+	// angryduck_controller_pull_orders_total and the worker-side pull/GC
+	// metrics turn their registry-host label on or off together.
+	labelRegistry := config.Bool("METRICS_LABEL_REGISTRY", false)
 
-	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v",
-		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality)
+	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v metrics_label_registry=%v",
+		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 
 	registry := controller.NewRegistry(staleAfter, targetTTL)
-	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality)
+	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 	server := controller.NewServer(registry, ranker)
 
 	ctx, cancel := context.WithCancel(context.Background())

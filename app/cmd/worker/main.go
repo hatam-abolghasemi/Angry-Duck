@@ -69,6 +69,13 @@ func main() {
 	gcMissThreshold := config.Int("GC_MISS_THRESHOLD", 5)
 	gracePeriod := config.Duration("GC_GRACE_PERIOD_S", 60)
 	gcExcludeSubstrings := config.StringSlice("GC_EXCLUDE_IMAGE_SUBSTRINGS", nil)
+	// Off by default: registry host is an unbounded-ish label (unlike
+	// node), so it's opt-in — flip on for troubleshooting which
+	// registries' images are filling disk, flip back off if it makes the
+	// worker's /metrics too large for your Prometheus setup. Shared with
+	// the controller's angryduck_controller_pull_orders_total, since both
+	// read the same ConfigMap.
+	labelRegistry := config.Bool("METRICS_LABEL_REGISTRY", false)
 	// crictl is the default: unlike ctr, it lists every running
 	// container's image in one call instead of one subprocess per
 	// container — see the comment on NewRuntime for why this matters.
@@ -118,8 +125,8 @@ func main() {
 	rescueToken := config.String("RESCUE_PEER_TOKEN", "")
 	rescueMaxConcurrentExports := config.Int("RESCUE_MAX_CONCURRENT_EXPORTS", 1)
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v metrics_label_registry=%v",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled, labelRegistry)
 
 	hx, err := worker.NewHostExec(hostRoot)
 	if err != nil {
@@ -136,8 +143,8 @@ func main() {
 
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, hx)
 	inv := worker.NewInventory(rt)
-	puller := worker.NewPuller(rt, gracePeriod, nodeID)
-	gc := worker.NewGC(rt, inv, reportInterval, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID)
+	puller := worker.NewPuller(rt, gracePeriod, nodeID, labelRegistry)
+	gc := worker.NewGC(rt, inv, reportInterval, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID, labelRegistry)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, inv)
 	puller.OnSuccess(reporter.Kick)
 
