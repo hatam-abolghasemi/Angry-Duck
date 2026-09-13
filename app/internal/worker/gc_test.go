@@ -19,6 +19,7 @@ type fakeRuntime struct {
 	local    map[string]bool
 	running  map[string]bool
 	digests  map[string]string // ref (any alias) -> digest
+	sizes    map[string]int64  // ref (any alias) -> byte size, for freed-bytes metric tests
 	removed  []string
 	pullErrs map[string]error
 }
@@ -28,6 +29,7 @@ func newFakeRuntime() *fakeRuntime {
 		local:    make(map[string]bool),
 		running:  make(map[string]bool),
 		digests:  make(map[string]string),
+		sizes:    make(map[string]int64),
 		pullErrs: make(map[string]error),
 	}
 }
@@ -42,7 +44,7 @@ func (f *fakeRuntime) PullImage(image string) error {
 	return nil
 }
 
-func (f *fakeRuntime) LocalImages() ([]string, map[string]string, error) {
+func (f *fakeRuntime) LocalImages() ([]string, map[string]string, map[string]int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var refs []string
@@ -53,7 +55,11 @@ func (f *fakeRuntime) LocalImages() ([]string, map[string]string, error) {
 	for k, v := range f.digests {
 		digests[k] = v
 	}
-	return refs, digests, nil
+	sizes := make(map[string]int64, len(f.sizes))
+	for k, v := range f.sizes {
+		sizes[k] = v
+	}
+	return refs, digests, sizes, nil
 }
 
 func (f *fakeRuntime) ListRunningImages() ([]string, error) {
@@ -99,7 +105,7 @@ func orderPull(t *testing.T, p *Puller, rt *fakeRuntime, image string) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		local, _, _ := rt.LocalImages()
+		local, _, _, _ := rt.LocalImages()
 		for _, img := range local {
 			if img == image {
 				return
@@ -377,7 +383,7 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 		t.Fatalf("dry-run GC actually removed an image — dry-run must never call RemoveImage")
 	}
 	// The image should still be reported as present, since nothing removed it.
-	local, _, _ := rt.LocalImages()
+	local, _, _, _ := rt.LocalImages()
 	found := false
 	for _, img := range local {
 		if img == "some-image:v1" {

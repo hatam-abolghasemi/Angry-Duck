@@ -20,6 +20,21 @@ var imagesDeletedTotal = metrics.NewCounterVec(
 	"node",
 )
 
+// imagesDeletedBytesTotal tracks how much disk space GC has actually
+// freed on this worker. crictl reports each image's size exactly, since
+// it's already part of the same JSON LocalImages() parses; ctr and docker
+// only expose a human-rounded string in their bulk listing ("14.7 MiB",
+// "5.58MB"), so on those two backends this is a best-effort
+// reconstruction of that rounded value, not the original exact size — see
+// parseApproxBytes. When the runtime couldn't report a size at all for an
+// image, the deletion still counts against imagesDeletedTotal but adds
+// nothing here — an undercount is preferable to a fabricated number.
+var imagesDeletedBytesTotal = metrics.NewCounterVec(
+	"angryduck_worker_images_deleted_byte_size_total",
+	"Total bytes freed by images actually removed by GC on this worker (excludes dry-run; exact on crictl, approximate on ctr/docker).",
+	"node",
+)
+
 // GC periodically compares every image present on the node against
 // currently running containers, and removes any image that has gone unused
 // for missThreshold consecutive checks — unless still within its
@@ -155,7 +170,7 @@ func (g *GC) tick() {
 	// than running `crictl images -o json` a second time for the same
 	// answer. Only if the reporter hasn't listed recently (node-exporter
 	// down, say) does GC list for itself.
-	local, digests, err := g.inventory.Get(g.listMaxAge)
+	local, digests, sizes, err := g.inventory.Get(g.listMaxAge)
 	if err != nil {
 		logging.Errorf("angryduck-worker-gc: could not get the list of images on this node, skipping this check: %v", err)
 		return
@@ -237,16 +252,27 @@ func (g *GC) tick() {
 		miss := g.missCounts[img]
 
 		if miss >= g.missThreshold {
+			freed, knownSize := sizes[img]
 			if g.dryRun {
-				logging.Warnf("angryduck-worker-gc: [DRY RUN] image=%s has been unused for %d check(s) in a row and would be removed now — nothing was actually deleted, because dry_run is enabled",
-					img, miss)
+				if knownSize {
+					logging.Warnf("angryduck-worker-gc: [DRY RUN] image=%s has been unused for %d check(s) in a row and would be removed now, freeing an estimated %d bytes — nothing was actually deleted, because dry_run is enabled",
+						img, miss, freed)
+				} else {
+					logging.Warnf("angryduck-worker-gc: [DRY RUN] image=%s has been unused for %d check(s) in a row and would be removed now — nothing was actually deleted, because dry_run is enabled",
+						img, miss)
+				}
 			} else {
 				logging.Warnf("angryduck-worker-gc: image=%s has been unused for %d check(s) in a row, removing it now", img, miss)
 				if err := g.runtime.RemoveImage(img); err != nil {
 					logging.Errorf("angryduck-worker-gc: tried to remove image=%s but it failed: %v", img, err)
 					continue
 				}
-				logging.Infof("angryduck-worker-gc: image=%s removed successfully", img)
+				if knownSize {
+					logging.Infof("angryduck-worker-gc: image=%s removed successfully, freed %d bytes", img, freed)
+					imagesDeletedBytesTotal.Add(freed, g.nodeID)
+				} else {
+					logging.Infof("angryduck-worker-gc: image=%s removed successfully (size unknown)", img)
+				}
 				imagesDeletedTotal.Inc(g.nodeID)
 			}
 			delete(g.missCounts, img)

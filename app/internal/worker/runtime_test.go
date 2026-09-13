@@ -141,10 +141,21 @@ sha256:cd073f4c5f6a8e9dc6f3125ba00cf60819cae95c1ec84a1f146ee4a9cf9e803f         
 `
 
 func TestParseCtrImagesList(t *testing.T) {
-	digests := parseCtrImagesList(realCtrImagesListOutput)
+	digests, sizes := parseCtrImagesList(realCtrImagesListOutput)
 
 	const workerDigest = "sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36abdcea77152208e4a79b4"
 	const pauseDigest = "sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+
+	// 14.7 MiB and 312.9 KiB, reconstructed from the same rounded strings
+	// ctr printed — see parseApproxBytes for why this is approximate.
+	const wantWorkerBytes = int64(14.7 * 1024 * 1024)
+	const wantPauseBytes = int64(312.9 * 1024)
+	if got := sizes["registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2"]; got != wantWorkerBytes {
+		t.Errorf("sizes[worker ref] = %d, want %d", got, wantWorkerBytes)
+	}
+	if got := sizes["repo-sahand.internal-dev.example.com/pause:3.10.1"]; got != wantPauseBytes {
+		t.Errorf("sizes[pause ref] = %d, want %d", got, wantPauseBytes)
+	}
 
 	wantWorker := []string{
 		"registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2",
@@ -178,15 +189,54 @@ func TestParseCtrImagesList(t *testing.T) {
 }
 
 func TestParseCtrImagesListEmpty(t *testing.T) {
-	digests := parseCtrImagesList("")
+	digests, sizes := parseCtrImagesList("")
 	if len(digests) != 0 {
 		t.Errorf("expected no entries from empty input, got %d", len(digests))
+	}
+	if len(sizes) != 0 {
+		t.Errorf("expected no size entries from empty input, got %d", len(sizes))
 	}
 }
 
 func TestParseCtrImagesListHeaderOnly(t *testing.T) {
-	digests := parseCtrImagesList("REF   TYPE   DIGEST   SIZE   PLATFORMS   LABELS\n")
+	digests, sizes := parseCtrImagesList("REF   TYPE   DIGEST   SIZE   PLATFORMS   LABELS\n")
 	if len(digests) != 0 {
 		t.Errorf("expected no entries from header-only input, got %d", len(digests))
+	}
+	if len(sizes) != 0 {
+		t.Errorf("expected no size entries from header-only input, got %d", len(sizes))
+	}
+}
+
+// TestParseApproxBytes covers both unit systems parseApproxBytes has to
+// handle: ctr's binary (IEC) units and docker's decimal (SI) units, plus
+// the "B" ambiguity that motivates checking longest-suffix-first (every
+// unit in both lists ends in "B").
+func TestParseApproxBytes(t *testing.T) {
+	cases := []struct {
+		s     string
+		units []string
+		base  float64
+		want  int64
+		ok    bool
+	}{
+		{"14.7 MiB", binarySizeUnits, binarySizeBase, int64(14.7 * 1024 * 1024), true},
+		{"312.9 KiB", binarySizeUnits, binarySizeBase, int64(312.9 * 1024), true},
+		{"512 B", binarySizeUnits, binarySizeBase, 512, true},
+		{"5.58MB", decimalSizeUnits, decimalSizeBase, int64(5.58 * 1000 * 1000), true},
+		{"312.9kB", decimalSizeUnits, decimalSizeBase, int64(312.9 * 1000), true},
+		{"0B", decimalSizeUnits, decimalSizeBase, 0, true},
+		{"not a size", binarySizeUnits, binarySizeBase, 0, false},
+		{"", binarySizeUnits, binarySizeBase, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseApproxBytes(c.s, c.units, c.base)
+		if ok != c.ok {
+			t.Errorf("parseApproxBytes(%q) ok = %v, want %v", c.s, ok, c.ok)
+			continue
+		}
+		if ok && got != c.want {
+			t.Errorf("parseApproxBytes(%q) = %d, want %d", c.s, got, c.want)
+		}
 	}
 }

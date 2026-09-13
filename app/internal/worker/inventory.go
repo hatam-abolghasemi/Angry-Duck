@@ -25,6 +25,7 @@ type Inventory struct {
 	mu       sync.RWMutex
 	refs     []string
 	digests  map[string]string // any alias -> runtime's canonical id (GC input)
+	sizes    map[string]int64  // any alias -> byte size, exact or approximate (GC's freed-bytes metric input)
 	listedAt time.Time
 	haveData bool
 }
@@ -36,33 +37,33 @@ func NewInventory(rt Runtime) *Inventory {
 
 // Get returns the local image listing, reusing the cached one if it is no
 // older than maxAge, otherwise refreshing it with one runtime call.
-func (inv *Inventory) Get(maxAge time.Duration) ([]string, map[string]string, error) {
-	if refs, digests, ok := inv.cached(maxAge); ok {
-		return refs, digests, nil
+func (inv *Inventory) Get(maxAge time.Duration) ([]string, map[string]string, map[string]int64, error) {
+	if refs, digests, sizes, ok := inv.cached(maxAge); ok {
+		return refs, digests, sizes, nil
 	}
 	inv.fetchMu.Lock()
 	defer inv.fetchMu.Unlock()
 	// Another caller may have refreshed while we waited for fetchMu.
-	if refs, digests, ok := inv.cached(maxAge); ok {
-		return refs, digests, nil
+	if refs, digests, sizes, ok := inv.cached(maxAge); ok {
+		return refs, digests, sizes, nil
 	}
 	started := time.Now()
-	refs, digests, err := inv.runtime.LocalImages()
+	refs, digests, sizes, err := inv.runtime.LocalImages()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	inv.mu.Lock()
-	inv.refs, inv.digests = refs, digests
+	inv.refs, inv.digests, inv.sizes = refs, digests, sizes
 	inv.listedAt, inv.haveData = started, true
 	inv.mu.Unlock()
-	return refs, digests, nil
+	return refs, digests, sizes, nil
 }
 
-func (inv *Inventory) cached(maxAge time.Duration) ([]string, map[string]string, bool) {
+func (inv *Inventory) cached(maxAge time.Duration) ([]string, map[string]string, map[string]int64, bool) {
 	inv.mu.RLock()
 	defer inv.mu.RUnlock()
 	if !inv.haveData || time.Since(inv.listedAt) > maxAge {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
-	return inv.refs, inv.digests, true
+	return inv.refs, inv.digests, inv.sizes, true
 }
