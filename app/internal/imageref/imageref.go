@@ -143,3 +143,48 @@ func Repo(ref string) string {
 	}
 	return ref
 }
+
+// RegistryHost returns the registry host implied by ref, applying the
+// same docker.io-default assumption Normalize applies when pulling: a
+// reference with no explicit host segment ("nginx:latest",
+// "myuser/myimage:tag") is assumed to belong to docker.io, exactly as
+// `docker pull` would resolve it. Unlike Host, this never mistakes an
+// unqualified reference's first path segment for a real host — it falls
+// back to the default instead, using the same "does the first segment
+// look like a host" check qualifyHost uses.
+//
+// A bare content digest ("sha256:...", the alias-only "image ID" form
+// containerd/crictl report alongside a ref's tag and @digest aliases)
+// carries no naming information at all, so this returns "" for it —
+// callers should treat that as "unknown", the same way Repo does.
+func RegistryHost(ref string) string {
+	if strings.HasPrefix(ref, "sha256:") && !strings.Contains(ref, "/") {
+		return ""
+	}
+	idx := strings.Index(ref, "/")
+	if idx < 0 {
+		return "docker.io"
+	}
+	firstSegment := ref[:idx]
+	looksLikeHost := strings.Contains(firstSegment, ".") ||
+		strings.Contains(firstSegment, ":") ||
+		firstSegment == "localhost"
+	if looksLikeHost {
+		return firstSegment
+	}
+	return "docker.io"
+}
+
+// RegistryLabel returns RegistryHost(ref) when enabled is true, or ""
+// otherwise. Metrics that label by registry host use this instead of
+// calling RegistryHost directly, so that toggling the feature off (see
+// METRICS_LABEL_REGISTRY in the worker/controller .env) collapses every
+// series back to one constant label value instead of one per registry —
+// the operator-facing cardinality kill switch, in one place shared by
+// both binaries rather than duplicated at every counter call site.
+func RegistryLabel(ref string, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return RegistryHost(ref)
+}

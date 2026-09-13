@@ -110,7 +110,7 @@ func TestHandleRescueSource_RequiresImage(t *testing.T) {
 
 func newTestControllerServer(t *testing.T, reg *Registry) *httptest.Server {
 	t.Helper()
-	ranker := NewRanker(reg, 1, time.Hour, nil, true)
+	ranker := NewRanker(reg, 1, time.Hour, nil, true, false)
 	srv := httptest.NewServer(NewServer(reg, ranker).Handler())
 	t.Cleanup(srv.Close)
 	return srv

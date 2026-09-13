@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 )
 
@@ -128,8 +130,8 @@ func TestGCRemovesAnyUnusedImageAfterThreshold(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["some-system-image:v1"] = true // never ordered via Angry Duck's puller
 
-	puller := NewPuller(rt, 0, "test-node") // zero grace period
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 3, false, nil, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false) // zero grace period
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 3, false, nil, "test-node", false)
 
 	for i := 0; i < 2; i++ {
 		gc.tick()
@@ -172,8 +174,8 @@ func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
 	rt.local[image] = true
 	rt.running[image] = true // what ListRunningImages() would now correctly report
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	for i := 0; i < 10; i++ {
 		gc.tick()
@@ -220,8 +222,8 @@ func TestGCSparesEveryAliasOfARunningImage(t *testing.T) {
 	rt.running[workerTag] = true
 	rt.running[pauseTag] = true
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	for i := 0; i < 5; i++ {
 		gc.tick()
@@ -244,8 +246,8 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 	rt.running["something-else:v1"] = true
 	rt.digests["something-else:v1"] = "sha256:cafef00d"
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	for i := 0; i < 3; i++ {
 		gc.tick()
@@ -258,8 +260,8 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 
 func TestGCSparesRunningImage(t *testing.T) {
 	rt := newFakeRuntime()
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 	rt.mu.Lock()
@@ -277,8 +279,8 @@ func TestGCSparesRunningImage(t *testing.T) {
 
 func TestGCSparesImageInGracePeriod(t *testing.T) {
 	rt := newFakeRuntime()
-	puller := NewPuller(rt, time.Hour, "test-node") // long grace period
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node")
+	puller := NewPuller(rt, time.Hour, "test-node", false) // long grace period
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
 
@@ -304,8 +306,8 @@ func TestGCNeverRemovesExcludedImageEvenWhenNeverObservedRunning(t *testing.T) {
 	// Deliberately never added to rt.running — simulates crictl ps never
 	// reporting the sandbox container, exactly as in production.
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, []string{"pause"}, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, []string{"pause"}, "test-node", false)
 
 	for i := 0; i < 10; i++ {
 		gc.tick()
@@ -324,8 +326,8 @@ func TestGCExcludeSubstringsOnlyMatchesConfiguredPatterns(t *testing.T) {
 	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
 	rt.local["registry.example.com/some-stale-app:v1"] = true
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 2, false, []string{"pause", "node-exporter"}, "test-node")
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 2, false, []string{"pause", "node-exporter"}, "test-node", false)
 
 	for i := 0; i < 3; i++ {
 		gc.tick()
@@ -347,8 +349,8 @@ func TestGCExcludedImageResetsMissCountIfPreviouslyTracked(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 5, false, nil, "test-node") // no exclusions yet
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 5, false, nil, "test-node", false) // no exclusions yet
 
 	gc.tick()
 	gc.tick()
@@ -372,8 +374,8 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["some-image:v1"] = true
 
-	puller := NewPuller(rt, 0, "test-node")
-	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, true, nil, "test-node") // dryRun=true
+	puller := NewPuller(rt, 0, "test-node", false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, true, nil, "test-node", false) // dryRun=true
 
 	for i := 0; i < 10; i++ {
 		gc.tick()
@@ -392,5 +394,70 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected image to remain present under dry-run")
+	}
+}
+
+// scrapeMetrics returns the full Prometheus exposition text from the
+// package's shared metrics registry, so a test can check for a specific
+// label combination without a getter into the unexported counter maps.
+func scrapeMetrics(t *testing.T) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metrics.Handler().ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+// TestGCLabelsRegistryWhenEnabled proves METRICS_LABEL_REGISTRY=true makes
+// GC's removal metrics carry the removed image's actual registry host.
+// Uses a node ID unique to this test so the assertion can't pass on a
+// stale series left behind by another test sharing the same package-level
+// counters.
+func TestGCLabelsRegistryWhenEnabled(t *testing.T) {
+	rt := newFakeRuntime()
+	const image = "registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2"
+	rt.local[image] = true
+
+	const nodeID = "test-node-registry-on"
+	puller := NewPuller(rt, 0, nodeID, false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, nodeID, true) // labelRegistry=true
+
+	gc.tick()
+	if !rt.wasRemoved(image) {
+		t.Fatalf("expected image to be removed after one miss (threshold=1)")
+	}
+
+	out := scrapeMetrics(t)
+	want := `angryduck_worker_images_deleted_total{node="` + nodeID + `",registry="registry.internal-registry.example.com"} 1`
+	if !strings.Contains(out, want) {
+		t.Errorf("expected metrics output to contain %q, got:\n%s", want, out)
+	}
+}
+
+// TestGCOmitsRegistryLabelWhenDisabled proves the default
+// (METRICS_LABEL_REGISTRY=false) collapses the registry label to a single
+// constant empty value regardless of the removed image's actual registry
+// — the cardinality kill switch this flag exists for.
+func TestGCOmitsRegistryLabelWhenDisabled(t *testing.T) {
+	rt := newFakeRuntime()
+	const image = "registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.0.2"
+	rt.local[image] = true
+
+	const nodeID = "test-node-registry-off"
+	puller := NewPuller(rt, 0, nodeID, false)
+	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, nodeID, false) // labelRegistry=false (default)
+
+	gc.tick()
+	if !rt.wasRemoved(image) {
+		t.Fatalf("expected image to be removed after one miss (threshold=1)")
+	}
+
+	out := scrapeMetrics(t)
+	if strings.Contains(out, `registry="registry.internal-registry.example.com"`) {
+		t.Errorf("expected no registry-host label when disabled, got:\n%s", out)
+	}
+	want := `angryduck_worker_images_deleted_total{node="` + nodeID + `",registry=""} 1`
+	if !strings.Contains(out, want) {
+		t.Errorf("expected metrics output to contain %q, got:\n%s", want, out)
 	}
 }

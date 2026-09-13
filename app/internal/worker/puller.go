@@ -18,10 +18,13 @@ import (
 // angryduck_controller_pull_orders_total in controller/ranker.go. A pull
 // order being accepted and a pull actually succeeding are different
 // events — this counter is the only one that tells you the latter.
+//
+// registry is only populated when METRICS_LABEL_REGISTRY is enabled — see
+// imagesDeletedTotal in gc.go for why this defaults to off.
 var pullsTotal = metrics.NewCounterVec(
 	"angryduck_worker_pulls_total",
-	"Total image pulls executed by this worker, by result.",
-	"node", "result",
+	"Total image pulls executed by this worker, by result. registry is only populated when METRICS_LABEL_REGISTRY=true.",
+	"node", "result", "registry",
 )
 
 // Puller receives pull orders from the controller, executes them
@@ -30,12 +33,13 @@ var pullsTotal = metrics.NewCounterVec(
 // (Argo may not have synced the new pod onto this node the moment the pull
 // lands).
 type Puller struct {
-	runtime     Runtime
-	gracePeriod time.Duration
-	nodeID      string
-	mu          sync.Mutex
-	orderedAt   map[string]time.Time
-	onSuccess   func()
+	runtime       Runtime
+	gracePeriod   time.Duration
+	nodeID        string
+	labelRegistry bool
+	mu            sync.Mutex
+	orderedAt     map[string]time.Time
+	onSuccess     func()
 }
 
 // OnSuccess registers a callback run after every successful pull (the
@@ -44,12 +48,15 @@ type Puller struct {
 func (p *Puller) OnSuccess(fn func()) { p.onSuccess = fn }
 
 // NewPuller builds a Puller. nodeID is only used to label metrics.
-func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string) *Puller {
+// labelRegistry controls whether pulls are labeled by registry host in
+// pullsTotal (METRICS_LABEL_REGISTRY).
+func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string, labelRegistry bool) *Puller {
 	return &Puller{
-		runtime:     runtime,
-		gracePeriod: gracePeriod,
-		nodeID:      nodeID,
-		orderedAt:   make(map[string]time.Time),
+		runtime:       runtime,
+		gracePeriod:   gracePeriod,
+		nodeID:        nodeID,
+		labelRegistry: labelRegistry,
+		orderedAt:     make(map[string]time.Time),
 	}
 }
 
@@ -86,13 +93,14 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		start := time.Now()
 		logging.Infof("angryduck-worker: pulling image=%s", order.Image)
+		registry := imageref.RegistryLabel(order.Image, p.labelRegistry)
 		if err := p.runtime.PullImage(order.Image); err != nil {
 			logging.Errorf("angryduck-worker: pull failed for image=%s after %s: %v", order.Image, time.Since(start).Round(time.Millisecond), err)
-			pullsTotal.Inc(p.nodeID, "failure")
+			pullsTotal.Inc(p.nodeID, "failure", registry)
 			return
 		}
 		logging.Infof("angryduck-worker: pull succeeded for image=%s in %s", order.Image, time.Since(start).Round(time.Millisecond))
-		pullsTotal.Inc(p.nodeID, "success")
+		pullsTotal.Inc(p.nodeID, "success", registry)
 		if p.onSuccess != nil {
 			p.onSuccess()
 		}

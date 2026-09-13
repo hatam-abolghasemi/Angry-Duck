@@ -84,7 +84,7 @@ func TestRankerExcludesMatchingNodesFromSelection(t *testing.T) {
 		Utilization: 0.40, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 2, time.Hour, []string{"master", "control-plane"}, true)
+	rk := NewRanker(registry, 2, time.Hour, []string{"master", "control-plane"}, true, false)
 	ordered := rk.OrderNow("registry.example.com/app:1.0.0")
 
 	waitForPulls(t, master, worker)
@@ -115,7 +115,7 @@ func TestRankerFallsBackWhenAllFreshWorkersAreExcluded(t *testing.T) {
 		Utilization: 0.01, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 2, time.Hour, []string{"master"}, true)
+	rk := NewRanker(registry, 2, time.Hour, []string{"master"}, true, false)
 	ordered := rk.OrderNow("registry.example.com/app:1.0.0")
 
 	if ordered != nil {
@@ -140,7 +140,7 @@ func TestRankerWithNoExclusionsBehavesAsBefore(t *testing.T) {
 		Utilization: 0.01, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil, true) // no exclusions
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false) // no exclusions
 	ordered := rk.OrderNow("registry.example.com/app:1.0.0")
 
 	waitForPulls(t, master)
@@ -168,7 +168,7 @@ func TestRankerDoesNotReorderSameImageToSameNode(t *testing.T) {
 		Utilization: 0.10, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false)
 
 	first := rk.tickForTest("registry.example.com/app:1.0.0")
 	waitForPulls(t, node)
@@ -201,7 +201,7 @@ func TestRankerReordersOnNewTargetImage(t *testing.T) {
 		Utilization: 0.10, Timestamp: time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false)
 
 	rk.tickForTest("registry.example.com/app:1.0.0")
 	waitForPulls(t, node)
@@ -240,7 +240,7 @@ func TestRankerPrefersNodeWithRepoOverLowerUtilization(t *testing.T) {
 		Timestamp:   time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false)
 	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
 
 	waitForPulls(t, hasRepo, empty)
@@ -276,7 +276,7 @@ func TestRankerFallsBackToUtilizationWhenLocalityDisabled(t *testing.T) {
 		Timestamp:   time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil, false)
+	rk := NewRanker(registry, 1, time.Hour, nil, false, false)
 	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
 
 	waitForPulls(t, hasRepo, empty)
@@ -307,7 +307,7 @@ func TestRankerLocalityMatchesByRepoNotTag(t *testing.T) {
 		Timestamp:   time.Now(),
 	})
 
-	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false)
 	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
 
 	waitForPulls(t, oldTag, otherRepo)
@@ -338,7 +338,7 @@ func TestRankerSeedsExactlyTopNPerImage(t *testing.T) {
 			Utilization: float64(i) / 10, Timestamp: time.Now(),
 		})
 	}
-	rk := NewRanker(registry, 2, time.Hour, nil, true)
+	rk := NewRanker(registry, 2, time.Hour, nil, true, false)
 
 	if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 2 {
 		t.Fatalf("first tick should seed 2, got %v", got)
@@ -370,7 +370,7 @@ func TestRankerReplacesAFailedSeed(t *testing.T) {
 	registry := NewRegistry(time.Minute, time.Minute)
 	registry.Update(model.WorkerReport{NodeID: "broken", Address: bad.Listener.Addr().String(), Utilization: 0.01, Timestamp: time.Now()})
 	registry.Update(model.WorkerReport{NodeID: "healthy", Address: good.address, Utilization: 0.50, Timestamp: time.Now()})
-	rk := NewRanker(registry, 1, time.Hour, nil, true)
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false)
 
 	if got := rk.tickForTest("registry.example.com/app:1"); len(got) != 1 || got[0] != "broken" {
 		t.Fatalf("lowest utilization should be tried first, got %v", got)

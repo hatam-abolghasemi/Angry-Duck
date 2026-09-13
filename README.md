@@ -263,6 +263,7 @@ for the full annotated list. The highlights:
 | `RESCUE_MAX_CONCURRENT_EXPORTS` | 1 | at most this many /rescue-export requests served at once per node |
 | `RESCUE_PEER_TOKEN` | (empty) | shared secret for `/rescue-export`; optional (soft-fail without it), from the `angryduck-rescue` Secret |
 | `RESCUE_EXCLUDE_NAMESPACE_SUBSTRINGS` / `RESCUE_EXCLUDE_IMAGE_SUBSTRINGS` | (empty) | ignore stuck pods matching these entirely — no log, no metric, no attempt |
+| `METRICS_LABEL_REGISTRY` | false | add a `registry` label (image registry host, "docker.io" for unqualified refs) to the image-related counters; off by default since registry host isn't a bounded set like node — read by both controller and worker |
 
 Real environment variables (a k8s ConfigMap, in practice — see
 `deploy/stg/configmap.yaml`) always win over `.env` file values.
@@ -271,10 +272,10 @@ Real environment variables (a k8s ConfigMap, in practice — see
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.2 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.2 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.2
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.2
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.3 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.3 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.3
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.3
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. The rescue token — before the DaemonSet (once per cluster). Rescue

@@ -19,10 +19,13 @@ import (
 // workers, split by node and whether the worker accepted it. This is the
 // controller-side half of the pull story; angryduck_worker_pulls_total
 // (see worker/puller.go) is the worker-side half.
+//
+// registry is only populated when METRICS_LABEL_REGISTRY is enabled — see
+// imagesDeletedTotal in worker/gc.go for why this defaults to off.
 var pullOrdersTotal = metrics.NewCounterVec(
 	"angryduck_controller_pull_orders_total",
-	"Total pull orders sent to workers, by node and result.",
-	"node", "result",
+	"Total pull orders sent to workers, by node and result. registry is only populated when METRICS_LABEL_REGISTRY=true.",
+	"node", "result", "registry",
 )
 
 // Ranker periodically re-ranks fresh workers by utilization and orders the
@@ -65,6 +68,11 @@ type Ranker struct {
 	// frees its slot (the node stays in orderedNodes, so it isn't picked
 	// again) and the next tick fills it with the next-best node.
 	slotsUsed int
+	// labelRegistryHost controls whether pullOrdersTotal is labeled by
+	// registry host (METRICS_LABEL_REGISTRY) — named to avoid confusion
+	// with the registry *Registry field above, which is the worker
+	// registry, not a container registry.
+	labelRegistryHost bool
 }
 
 // NewRanker builds a ranker bound to the given registry. excludeSubstrings
@@ -85,13 +93,18 @@ type Ranker struct {
 // that don't, before either group is sorted by utilization — see
 // rankByLocality. Pass false (RANK_PREFER_IMAGE_LOCALITY=false) to fall
 // back to the old utilization-only ordering.
-func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string, preferImageLocality bool) *Ranker {
+//
+// labelRegistryHost controls whether pullOrdersTotal is labeled by
+// container-registry host (METRICS_LABEL_REGISTRY) — see
+// imagesDeletedTotal in worker/gc.go for why this defaults to off.
+func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string, preferImageLocality bool, labelRegistryHost bool) *Ranker {
 	return &Ranker{
 		registry:            registry,
 		topN:                topN,
 		interval:            interval,
 		excludeSubstrings:   excludeSubstrings,
 		preferImageLocality: preferImageLocality,
+		labelRegistryHost:   labelRegistryHost,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -288,6 +301,7 @@ func (rk *Ranker) excludeMatching(workers []*workerEntry) []*workerEntry {
 }
 
 func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
+	registryLabel := imageref.RegistryLabel(image, rk.labelRegistryHost)
 	order := model.PullOrder{Image: image, OrderedAt: time.Now()}
 	body, err := json.Marshal(order)
 	if err != nil {
@@ -305,17 +319,17 @@ func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
 	resp, err := rk.httpClient.Do(req)
 	if err != nil {
 		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s failed: %v", nodeID, addr, err)
-		pullOrdersTotal.Inc(nodeID, "failure")
+		pullOrdersTotal.Inc(nodeID, "failure", registryLabel)
 		rk.releaseSlot(image)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		logging.Warnf("angryduck-controller: pull order to node=%s addr=%s rejected: status=%d", nodeID, addr, resp.StatusCode)
-		pullOrdersTotal.Inc(nodeID, "failure")
+		pullOrdersTotal.Inc(nodeID, "failure", registryLabel)
 		rk.releaseSlot(image)
 		return
 	}
 	logging.Infof("angryduck-controller: ordered node=%s to pull image=%s", nodeID, image)
-	pullOrdersTotal.Inc(nodeID, "success")
+	pullOrdersTotal.Inc(nodeID, "success", registryLabel)
 }

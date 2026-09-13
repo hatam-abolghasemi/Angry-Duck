@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 )
@@ -14,10 +15,17 @@ import (
 // Dry-run "would remove" decisions are deliberately not counted here —
 // this metric answers "how much did GC actually delete," and a dry-run
 // pass never touches disk.
+//
+// The registry label is populated only when METRICS_LABEL_REGISTRY is
+// enabled (see imageref.RegistryLabel) — off by default because registry
+// host is, unlike node, not a bounded set: a busy cluster can accumulate
+// many distinct registries over time, and this label multiplies with
+// node, so operators who hit cardinality trouble can flip it back off
+// without a metric rename.
 var imagesDeletedTotal = metrics.NewCounterVec(
 	"angryduck_worker_images_deleted_total",
-	"Total images actually removed by GC on this worker (excludes dry-run).",
-	"node",
+	"Total images actually removed by GC on this worker (excludes dry-run). registry is only populated when METRICS_LABEL_REGISTRY=true.",
+	"node", "registry",
 )
 
 // imagesDeletedBytesTotal tracks how much disk space GC has actually
@@ -29,10 +37,12 @@ var imagesDeletedTotal = metrics.NewCounterVec(
 // parseApproxBytes. When the runtime couldn't report a size at all for an
 // image, the deletion still counts against imagesDeletedTotal but adds
 // nothing here — an undercount is preferable to a fabricated number.
+//
+// See imagesDeletedTotal for the registry label's on/off behavior.
 var imagesDeletedBytesTotal = metrics.NewCounterVec(
 	"angryduck_worker_images_deleted_byte_size_total",
-	"Total bytes freed by images actually removed by GC on this worker (excludes dry-run; exact on crictl, approximate on ctr/docker).",
-	"node",
+	"Total bytes freed by images actually removed by GC on this worker (excludes dry-run; exact on crictl, approximate on ctr/docker). registry is only populated when METRICS_LABEL_REGISTRY=true.",
+	"node", "registry",
 )
 
 // GC periodically compares every image present on the node against
@@ -101,6 +111,7 @@ type GC struct {
 	dryRun            bool
 	excludeSubstrings []string
 	nodeID            string
+	labelRegistry     bool
 }
 
 // NewGC builds a GC loop. When dryRun is true, GC logs exactly what it would
@@ -115,7 +126,11 @@ type GC struct {
 // inventory supplies the local image listing; a listing no older than
 // listMaxAge (the report interval, in practice) is reused instead of
 // running the runtime's image listing again — see Inventory.
-func NewGC(runtime Runtime, inventory *Inventory, listMaxAge time.Duration, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string, nodeID string) *GC {
+//
+// labelRegistry controls whether removals are labeled by registry host in
+// imagesDeletedTotal/imagesDeletedBytesTotal (METRICS_LABEL_REGISTRY) —
+// see those vars' doc comments for why this defaults to false.
+func NewGC(runtime Runtime, inventory *Inventory, listMaxAge time.Duration, puller *Puller, interval time.Duration, missThreshold int, dryRun bool, excludeSubstrings []string, nodeID string, labelRegistry bool) *GC {
 	return &GC{
 		runtime:           runtime,
 		inventory:         inventory,
@@ -127,6 +142,7 @@ func NewGC(runtime Runtime, inventory *Inventory, listMaxAge time.Duration, pull
 		dryRun:            dryRun,
 		excludeSubstrings: excludeSubstrings,
 		nodeID:            nodeID,
+		labelRegistry:     labelRegistry,
 	}
 }
 
@@ -253,6 +269,7 @@ func (g *GC) tick() {
 
 		if miss >= g.missThreshold {
 			freed, knownSize := sizes[img]
+			registry := imageref.RegistryLabel(img, g.labelRegistry)
 			if g.dryRun {
 				if knownSize {
 					logging.Warnf("angryduck-worker-gc: [DRY RUN] image=%s has been unused for %d check(s) in a row and would be removed now, freeing an estimated %d bytes — nothing was actually deleted, because dry_run is enabled",
@@ -269,11 +286,11 @@ func (g *GC) tick() {
 				}
 				if knownSize {
 					logging.Infof("angryduck-worker-gc: image=%s removed successfully, freed %d bytes", img, freed)
-					imagesDeletedBytesTotal.Add(freed, g.nodeID)
+					imagesDeletedBytesTotal.Add(freed, g.nodeID, registry)
 				} else {
 					logging.Infof("angryduck-worker-gc: image=%s removed successfully (size unknown)", img)
 				}
-				imagesDeletedTotal.Inc(g.nodeID)
+				imagesDeletedTotal.Inc(g.nodeID, registry)
 			}
 			delete(g.missCounts, img)
 			removedCount++
