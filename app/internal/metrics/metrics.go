@@ -1,10 +1,10 @@
 // Package metrics is a minimal, dependency-free metrics registry that
 // renders in Prometheus text exposition format. Angry Duck only needs a
-// handful of counters, gauges, and one histogram — pulling in the full
-// client_golang SDK for that would be a heavy dependency for so little.
-// This hand-rolls the exposition format the same way worker/metrics.go
-// hand-parses node exporter's output: no library, just the text format
-// both ends agree on.
+// handful of counters and gauges — pulling in the full client_golang SDK
+// for that would be a heavy dependency for so little. This hand-rolls
+// the exposition format the same way worker/metrics.go hand-parses node
+// exporter's output: no library, just the text format both ends agree
+// on.
 package metrics
 
 import (
@@ -40,8 +40,8 @@ func joinLabels(labelNames, labelValues []string) string {
 	return b.String()
 }
 
-// metric is anything the registry can serve at /metrics. CounterVec,
-// GaugeVec, and HistogramVec all implement it.
+// metric is anything the registry can serve at /metrics. CounterVec and
+// GaugeVec both implement it.
 type metric interface {
 	write(w io.Writer)
 }

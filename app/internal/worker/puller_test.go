@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 // lifetime of the process.
 func TestPruneExpiredDropsOnlyPastGrace(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, 50*time.Millisecond, "test-node", false, "")
+	p := NewPuller(rt, 50*time.Millisecond, "test-node", false, "", 0)
 
 	p.mu.Lock()
 	p.orderedAt["img:expired-1"] = time.Now().Add(-time.Hour)
@@ -48,7 +49,7 @@ func TestPruneExpiredDropsOnlyPastGrace(t *testing.T) {
 // everything still in grace removes nothing and reports zero.
 func TestPruneExpiredNoOpWhenNothingExpired(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, time.Hour, "test-node", false, "")
+	p := NewPuller(rt, time.Hour, "test-node", false, "", 0)
 
 	p.mu.Lock()
 	p.orderedAt["img:a"] = time.Now()
@@ -72,7 +73,7 @@ func TestPruneExpiredNoOpWhenNothingExpired(t *testing.T) {
 // changes.
 func TestGCTickPrunesExpiredOrders(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, 10*time.Millisecond, "test-node", false, "")
+	p := NewPuller(rt, 10*time.Millisecond, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, p, time.Hour, 5, true, nil, "test-node", false)
 
 	p.mu.Lock()
@@ -96,7 +97,7 @@ func TestGCTickPrunesExpiredOrders(t *testing.T) {
 // struct comment for why preheatedAt is separate from orderedAt).
 func TestPreheatedReposPrunesPastRetention(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, time.Minute, "test-node", false, "")
+	p := NewPuller(rt, time.Minute, "test-node", false, "", 0)
 
 	p.mu.Lock()
 	p.preheatedAt["repo/long-gone"] = time.Now().Add(-2 * time.Hour)
@@ -130,7 +131,7 @@ func TestPreheatedReposPrunesPastRetention(t *testing.T) {
 // repo, which is what PreheatMonitor actually depends on in production.
 func TestHandlePullRecordsPreheatedRepoOnSuccess(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, time.Minute, "test-node", false, "")
+	p := NewPuller(rt, time.Minute, "test-node", false, "", 0)
 
 	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
 
@@ -151,7 +152,7 @@ func TestHandlePullRecordsPreheatedRepoOnSuccess(t *testing.T) {
 func TestHandlePullSetsDurationGauge(t *testing.T) {
 	rt := newFakeRuntime()
 	const nodeID = "test-node-duration"
-	p := NewPuller(rt, time.Minute, nodeID, false, "")
+	p := NewPuller(rt, time.Minute, nodeID, false, "", 0)
 
 	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
 
@@ -171,7 +172,7 @@ func TestHandlePullSetsDurationGauge(t *testing.T) {
 // runtime call made at all.
 func TestSpegelPresenceDisabledByDefault(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, time.Minute, "test-node", false, "")
+	p := NewPuller(rt, time.Minute, "test-node", false, "", 0)
 	if got := p.spegelPresence(); got != "" {
 		t.Errorf("spegelPresence() = %q, want empty string when disabled", got)
 	}
@@ -184,14 +185,14 @@ func TestSpegelPresenceDetectsRunningContainer(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.running["ghcr.io/spegel-org/spegel:v0.7.4"] = true
 
-	p := NewPuller(rt, time.Minute, "test-node", false, "spegel")
+	p := NewPuller(rt, time.Minute, "test-node", false, "spegel", 0)
 	if got := p.spegelPresence(); got != "true" {
 		t.Errorf("spegelPresence() = %q, want \"true\"", got)
 	}
 
 	rtNoSpegel := newFakeRuntime()
 	rtNoSpegel.running["docker.io/library/nginx:1.25"] = true
-	pNoSpegel := NewPuller(rtNoSpegel, time.Minute, "test-node", false, "spegel")
+	pNoSpegel := NewPuller(rtNoSpegel, time.Minute, "test-node", false, "spegel", 0)
 	if got := pNoSpegel.spegelPresence(); got != "false" {
 		t.Errorf("spegelPresence() = %q, want \"false\"", got)
 	}
@@ -205,7 +206,7 @@ func TestHandlePullLabelsSpegelPresence(t *testing.T) {
 	rt.running["ghcr.io/spegel-org/spegel:v0.7.4"] = true
 
 	const nodeID = "test-node-spegel-label"
-	p := NewPuller(rt, time.Minute, nodeID, false, "spegel")
+	p := NewPuller(rt, time.Minute, nodeID, false, "spegel", 0)
 
 	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
 
@@ -218,4 +219,51 @@ func TestHandlePullLabelsSpegelPresence(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("expected a line starting with %q in metrics output", wantPrefix)
+}
+
+// TestResetPullDurationClearsGauge confirms the extracted reset action
+// itself works — Run's ticker loop just calls this on a timer, so this is
+// the part actually worth a direct test (see PreheatMonitor.tick for the
+// same split-for-testability pattern).
+func TestResetPullDurationClearsGauge(t *testing.T) {
+	rt := newFakeRuntime()
+	const nodeID = "test-node-reset"
+	p := NewPuller(rt, time.Minute, nodeID, false, "", 0)
+
+	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
+
+	wantPrefix := `angryduck_worker_pull_duration_seconds{node="` + nodeID + `",result="success",registry="",image="docker.io/library/nginx",spegel=""} `
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(scrapeMetrics(t), wantPrefix) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.Contains(scrapeMetrics(t), wantPrefix) {
+		t.Fatalf("expected %q to be set before reset", wantPrefix)
+	}
+
+	p.ResetPullDuration()
+
+	if strings.Contains(scrapeMetrics(t), wantPrefix) {
+		t.Fatalf("expected ResetPullDuration to clear the value, but it's still present")
+	}
+}
+
+// TestPullerRunDisabledWithZeroInterval confirms Run returns immediately
+// (no ticker started, no panic from time.NewTicker(0)) when
+// pullDurationResetInterval is 0.
+func TestPullerRunDisabledWithZeroInterval(t *testing.T) {
+	rt := newFakeRuntime()
+	p := NewPuller(rt, time.Minute, "test-node", false, "", 0)
+
+	done := make(chan struct{})
+	go func() {
+		p.Run(context.Background()) // must return on its own; a real ticker would block forever
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("expected Run to return immediately when pullDurationResetInterval is 0")
+	}
 }

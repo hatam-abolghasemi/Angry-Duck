@@ -8,8 +8,9 @@ metadata:
     app.kubernetes.io/name: angryduck
 data:
   LOG_LEVEL: "info"
-  METRICS_LABEL_REGISTRY: "true"
+  METRICS_LABEL_REGISTRY: "false"
   SPEGEL_IMAGE_SUBSTRING: "spegel"
+  PULL_DURATION_RESET_INTERVAL_S: "15"
   CONTROLLER_LISTEN_ADDR: ":8080"
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"

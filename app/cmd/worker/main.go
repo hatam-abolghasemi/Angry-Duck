@@ -28,6 +28,7 @@ import (
 
 	"angryduck/internal/config"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/registryauth"
 	"angryduck/internal/worker"
 )
@@ -38,6 +39,7 @@ func main() {
 		log.Printf("angryduck-worker: warning: failed to load %s: %v", envFile, err)
 	}
 	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
+	memlimit.Apply("worker")
 
 	nodeID := config.String("NODE_ID", "")
 	if nodeID == "" {
@@ -106,6 +108,13 @@ func main() {
 	// without Spegel in place," using only the local container runtime,
 	// no Kubernetes API access.
 	spegelImageSubstring := config.String("SPEGEL_IMAGE_SUBSTRING", "")
+	// How often to clear angryduck_worker_pull_duration_seconds so a
+	// pull's duration is only visible for roughly one scrape instead of
+	// lingering as a stale "last known value" until the next pull. Match
+	// this to your actual Prometheus scrape_interval — Angry Duck has no
+	// way to observe that value itself. 0 disables resetting (the gauge
+	// then holds its last value indefinitely, the old behavior).
+	pullDurationResetInterval := config.Duration("PULL_DURATION_RESET_INTERVAL_S", 15)
 	// crictl is the default: unlike ctr, it lists every running
 	// container's image in one call instead of one subprocess per
 	// container — see the comment on NewRuntime for why this matters.
@@ -155,8 +164,8 @@ func main() {
 	rescueToken := config.String("RESCUE_PEER_TOKEN", "")
 	rescueMaxConcurrentExports := config.Int("RESCUE_MAX_CONCURRENT_EXPORTS", 1)
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v metrics_label_registry=%v preheat_attribution_interval=%s preheat_attribution_retention=%s spegel_image_substring=%q",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled, labelRegistry, preheatAttributionInterval, preheatAttributionRetention, spegelImageSubstring)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s gc_interval=%s gc_miss_threshold=%d grace_period=%s runtime=%s runtime_endpoint=%s gc_dry_run=%v gc_exclude_image_substrings=%v host_root=%s rescue_feature_enabled=%v metrics_label_registry=%v preheat_attribution_interval=%s preheat_attribution_retention=%s spegel_image_substring=%q pull_duration_reset_interval=%s",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, gcInterval, gcMissThreshold, gracePeriod, runtimeKind, runtimeEndpoint, gcDryRun, gcExcludeSubstrings, hostRoot, rescueEnabled, labelRegistry, preheatAttributionInterval, preheatAttributionRetention, spegelImageSubstring, pullDurationResetInterval)
 
 	hx, err := worker.NewHostExec(hostRoot)
 	if err != nil {
@@ -173,7 +182,7 @@ func main() {
 
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, hx)
 	inv := worker.NewInventory(rt)
-	puller := worker.NewPuller(rt, gracePeriod, nodeID, labelRegistry, spegelImageSubstring)
+	puller := worker.NewPuller(rt, gracePeriod, nodeID, labelRegistry, spegelImageSubstring, pullDurationResetInterval)
 	gc := worker.NewGC(rt, inv, reportInterval, puller, gcInterval, gcMissThreshold, gcDryRun, gcExcludeSubstrings, nodeID, labelRegistry)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, inv)
 	puller.OnSuccess(reporter.Kick)
@@ -183,6 +192,7 @@ func main() {
 
 	go reporter.Run(ctx)
 	go gc.Run(ctx)
+	go puller.Run(ctx)
 	if preheatAttributionInterval > 0 {
 		preheatMonitor := worker.NewPreheatMonitor(rt, puller, preheatAttributionInterval, preheatAttributionRetention, nodeID)
 		go preheatMonitor.Run(ctx)

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -40,17 +41,19 @@ var pullsTotal = metrics.NewCounterVec(
 // overwrite each other's value. It does NOT fully eliminate gauge
 // overwrite: if the SAME repo is pulled to the SAME node twice before a
 // scrape catches the first value (a rapid hotfix-then-redeploy, say),
-// only the later duration survives to be scraped. Accepted deliberately
-// here in exchange for simplicity — for the full distribution (not just
-// "last observed"), aggregate pullsTotal counts and reason about rates,
-// or watch this value trend over successive scrapes.
+// only the later duration survives to be scraped.
+//
+// Puller.Run periodically clears this (PULL_DURATION_RESET_INTERVAL_S)
+// so a value is visible for roughly one scrape rather than sitting as a
+// stale "last known duration" indefinitely between pulls — see Run's own
+// doc comment for the timing tradeoff that involves.
 //
 // registry is only populated when METRICS_LABEL_REGISTRY is enabled;
 // spegel only when SPEGEL_IMAGE_SUBSTRING is set — see imagesDeletedTotal
 // in gc.go and spegelPresence respectively.
 var pullDurationSeconds = metrics.NewGaugeVec(
 	"angryduck_worker_pull_duration_seconds",
-	"Most recent preheat pull duration in seconds (a gauge, not a histogram — last value per label combination, not a distribution). registry only when METRICS_LABEL_REGISTRY=true; spegel only when SPEGEL_IMAGE_SUBSTRING is set.",
+	"Most recent preheat pull duration in seconds (a gauge, not a histogram — last value per label combination, periodically reset — see PULL_DURATION_RESET_INTERVAL_S). registry only when METRICS_LABEL_REGISTRY=true; spegel only when SPEGEL_IMAGE_SUBSTRING is set.",
 	"node", "result", "registry", "image", "spegel",
 )
 
@@ -60,11 +63,12 @@ var pullDurationSeconds = metrics.NewGaugeVec(
 // (Argo may not have synced the new pod onto this node the moment the pull
 // lands).
 type Puller struct {
-	runtime              Runtime
-	gracePeriod          time.Duration
-	nodeID               string
-	labelRegistry        bool
-	spegelImageSubstring string
+	runtime                   Runtime
+	gracePeriod               time.Duration
+	nodeID                    string
+	labelRegistry             bool
+	spegelImageSubstring      string
+	pullDurationResetInterval time.Duration
 
 	mu        sync.Mutex
 	orderedAt map[string]time.Time
@@ -89,15 +93,62 @@ func (p *Puller) OnSuccess(fn func()) { p.onSuccess = fn }
 // pullsTotal/pullDurationSeconds (METRICS_LABEL_REGISTRY).
 // spegelImageSubstring enables Spegel-presence detection on
 // pullDurationSeconds when non-empty — see spegelPresence.
-func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string, labelRegistry bool, spegelImageSubstring string) *Puller {
+// pullDurationResetInterval controls how often Run clears
+// pullDurationSeconds (0 disables resetting — see Run).
+func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string, labelRegistry bool, spegelImageSubstring string, pullDurationResetInterval time.Duration) *Puller {
 	return &Puller{
-		runtime:              runtime,
-		gracePeriod:          gracePeriod,
-		nodeID:               nodeID,
-		labelRegistry:        labelRegistry,
-		spegelImageSubstring: spegelImageSubstring,
-		orderedAt:            make(map[string]time.Time),
-		preheatedAt:          make(map[string]time.Time),
+		runtime:                   runtime,
+		gracePeriod:               gracePeriod,
+		nodeID:                    nodeID,
+		labelRegistry:             labelRegistry,
+		spegelImageSubstring:      spegelImageSubstring,
+		pullDurationResetInterval: pullDurationResetInterval,
+		orderedAt:                 make(map[string]time.Time),
+		preheatedAt:               make(map[string]time.Time),
+	}
+}
+
+// ResetPullDuration clears every label combination pullDurationSeconds
+// currently holds. Split out from Run so the reset action itself is
+// directly unit-testable without waiting on a real ticker.
+func (p *Puller) ResetPullDuration() {
+	pullDurationSeconds.Reset()
+}
+
+// Run periodically clears pullDurationSeconds (see ResetPullDuration) so
+// a pull's duration is visible for roughly one scrape interval instead of
+// lingering indefinitely as a "last known value" until the next pull
+// happens — which could be minutes or hours later, long after the number
+// stopped meaning anything current. Match pullDurationResetInterval to
+// your actual Prometheus scrape_interval; Angry Duck has no way to
+// observe that value itself.
+//
+// This has one unavoidable, narrow race: resetting on a fixed timer that
+// isn't coordinated with the real scrape means a Reset could occasionally
+// fire in the small window between a pull's Set and a delayed scrape,
+// erasing a value just before it would have been read. Tightening this
+// further would mean synchronizing with Prometheus's own scrape timing,
+// which this process has no visibility into — the timer is an
+// approximation of scrape cadence, not a guarantee every value survives
+// to be scraped at least once.
+//
+// Does nothing (never starts a ticker) if pullDurationResetInterval <= 0.
+func (p *Puller) Run(ctx context.Context) {
+	if p.pullDurationResetInterval <= 0 {
+		logging.Infof("angryduck-worker-puller: pull-duration reset disabled (PULL_DURATION_RESET_INTERVAL_S<=0) — pullDurationSeconds will hold its last value indefinitely")
+		return
+	}
+	ticker := time.NewTicker(p.pullDurationResetInterval)
+	defer ticker.Stop()
+	logging.Infof("angryduck-worker-puller: resetting pull-duration gauge every %s", p.pullDurationResetInterval)
+	for {
+		select {
+		case <-ctx.Done():
+			logging.Infof("angryduck-worker-puller: stopped")
+			return
+		case <-ticker.C:
+			p.ResetPullDuration()
+		}
 	}
 }
 

@@ -146,7 +146,7 @@ func TestGCRemovesAnyUnusedImageAfterThreshold(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["some-system-image:v1"] = true // never ordered via Angry Duck's puller
 
-	puller := NewPuller(rt, 0, "test-node", false, "") // zero grace period
+	puller := NewPuller(rt, 0, "test-node", false, "", 0) // zero grace period
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 3, false, nil, "test-node", false)
 
 	for i := 0; i < 2; i++ {
@@ -190,7 +190,7 @@ func TestGCNeverRemovesImageThatIsActuallyRunning(t *testing.T) {
 	rt.local[image] = true
 	rt.running[image] = true // what ListRunningImages() would now correctly report
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	for i := 0; i < 10; i++ {
@@ -238,7 +238,7 @@ func TestGCSparesEveryAliasOfARunningImage(t *testing.T) {
 	rt.running[workerTag] = true
 	rt.running[pauseTag] = true
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	for i := 0; i < 5; i++ {
@@ -262,7 +262,7 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 	rt.running["something-else:v1"] = true
 	rt.digests["something-else:v1"] = "sha256:cafef00d"
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	for i := 0; i < 3; i++ {
@@ -276,7 +276,7 @@ func TestGCRemovesTrulyUnusedImageEvenWithDigestMatchingEnabled(t *testing.T) {
 
 func TestGCSparesRunningImage(t *testing.T) {
 	rt := newFakeRuntime()
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
@@ -295,7 +295,7 @@ func TestGCSparesRunningImage(t *testing.T) {
 
 func TestGCSparesImageInGracePeriod(t *testing.T) {
 	rt := newFakeRuntime()
-	puller := NewPuller(rt, time.Hour, "test-node", false, "") // long grace period
+	puller := NewPuller(rt, time.Hour, "test-node", false, "", 0) // long grace period
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, "test-node", false)
 
 	orderPull(t, puller, rt, "registry.example.com/myapp:1.0.0")
@@ -322,7 +322,7 @@ func TestGCNeverRemovesExcludedImageEvenWhenNeverObservedRunning(t *testing.T) {
 	// Deliberately never added to rt.running — simulates crictl ps never
 	// reporting the sandbox container, exactly as in production.
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, []string{"pause"}, "test-node", false)
 
 	for i := 0; i < 10; i++ {
@@ -342,7 +342,7 @@ func TestGCExcludeSubstringsOnlyMatchesConfiguredPatterns(t *testing.T) {
 	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
 	rt.local["registry.example.com/some-stale-app:v1"] = true
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 2, false, []string{"pause", "node-exporter"}, "test-node", false)
 
 	for i := 0; i < 3; i++ {
@@ -365,7 +365,7 @@ func TestGCExcludedImageResetsMissCountIfPreviouslyTracked(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["repo-sahand.internal-dev.example.com/pause:3.10"] = true
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 5, false, nil, "test-node", false) // no exclusions yet
 
 	gc.tick()
@@ -390,7 +390,7 @@ func TestGCDryRunNeverActuallyRemoves(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.local["some-image:v1"] = true
 
-	puller := NewPuller(rt, 0, "test-node", false, "")
+	puller := NewPuller(rt, 0, "test-node", false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, true, nil, "test-node", false) // dryRun=true
 
 	for i := 0; i < 10; i++ {
@@ -435,7 +435,7 @@ func TestGCLabelsRegistryWhenEnabled(t *testing.T) {
 	rt.local[image] = true
 
 	const nodeID = "test-node-registry-on"
-	puller := NewPuller(rt, 0, nodeID, false, "")
+	puller := NewPuller(rt, 0, nodeID, false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, nodeID, true) // labelRegistry=true
 
 	gc.tick()
@@ -460,7 +460,7 @@ func TestGCOmitsRegistryLabelWhenDisabled(t *testing.T) {
 	rt.local[image] = true
 
 	const nodeID = "test-node-registry-off"
-	puller := NewPuller(rt, 0, nodeID, false, "")
+	puller := NewPuller(rt, 0, nodeID, false, "", 0)
 	gc := NewGC(rt, NewInventory(rt), 0, puller, time.Millisecond, 1, false, nil, nodeID, false) // labelRegistry=false (default)
 
 	gc.tick()

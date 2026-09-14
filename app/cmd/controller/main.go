@@ -17,6 +17,7 @@ import (
 	"angryduck/internal/config"
 	"angryduck/internal/controller"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 )
 
 func main() {
@@ -25,6 +26,7 @@ func main() {
 		log.Printf("angryduck-controller: warning: failed to load %s: %v", envFile, err)
 	}
 	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
+	memlimit.Apply("controller")
 
 	listenAddr := config.String("CONTROLLER_LISTEN_ADDR", ":8080")
 	staleAfter := config.Duration("WORKER_STALE_AFTER_S", 30)

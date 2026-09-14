@@ -91,43 +91,9 @@ func TestGaugeVecSetAndReset(t *testing.T) {
 	}
 }
 
-func TestHistogramVecObserveAndExposition(t *testing.T) {
-	h := NewHistogramVec("test_duration_seconds", "a test histogram", []float64{1, 5, 10}, "node")
-	h.Observe(0.5, "node-a")  // falls in le="1"
-	h.Observe(3, "node-a")    // falls in le="5"
-	h.Observe(3, "node-a")    // falls in le="5"
-	h.Observe(100, "node-a")  // falls in le="+Inf" only
-
-	var buf strings.Builder
-	h.write(&buf)
-	out := buf.String()
-
-	checks := []string{
-		`# HELP test_duration_seconds a test histogram`,
-		`# TYPE test_duration_seconds histogram`,
-		// cumulative: le=1 sees only the 0.5 observation
-		`test_duration_seconds_bucket{node="node-a",le="1"} 1`,
-		// le=5 is cumulative: the 0.5 PLUS both 3s observations
-		`test_duration_seconds_bucket{node="node-a",le="5"} 3`,
-		// le=10 unchanged from le=5 since nothing new falls in (5,10]
-		`test_duration_seconds_bucket{node="node-a",le="10"} 3`,
-		// +Inf includes the 100 observation too
-		`test_duration_seconds_bucket{node="node-a",le="+Inf"} 4`,
-		`test_duration_seconds_count{node="node-a"} 4`,
-		`test_duration_seconds_sum{node="node-a"} 106.5`,
-	}
-	for _, want := range checks {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected exposition output to contain %q, got:\n%s", want, out)
-		}
-	}
-}
-
-func TestHandlerServesGaugesAndHistogramsToo(t *testing.T) {
+func TestHandlerServesGaugesToo(t *testing.T) {
 	g := NewGaugeVec("test_handler_gauge", "gauge", "node")
-	h := NewHistogramVec("test_handler_histogram_seconds", "hist", []float64{1}, "node")
 	g.Set(5, "node-z")
-	h.Observe(0.1, "node-z")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
@@ -136,8 +102,5 @@ func TestHandlerServesGaugesAndHistogramsToo(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `test_handler_gauge{node="node-z"} 5`) {
 		t.Fatalf("expected handler output to include the gauge, got:\n%s", body)
-	}
-	if !strings.Contains(body, `test_handler_histogram_seconds_bucket{node="node-z",le="1"} 1`) {
-		t.Fatalf("expected handler output to include the histogram, got:\n%s", body)
 	}
 }

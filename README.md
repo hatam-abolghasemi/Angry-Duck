@@ -69,9 +69,14 @@ pull time, determined entirely from the local container runtime, no
 Kubernetes API call or extra RBAC, checked once per pull). It's a gauge,
 not a histogram: it holds the *last* observed duration per label
 combination, not a distribution, so the same repo pulled twice to the
-same node before a scrape only leaves the later value visible. For a
-distribution across the fleet, use `angryduck_worker_pulls_total`'s rate
-and reason about counts, or trend this value scrape-over-scrape. The
+same node before a scrape only leaves the later value visible. It's also
+cleared every `PULL_DURATION_RESET_INTERVAL_S` (match this to your
+Prometheus `scrape_interval`) so a value is visible for roughly one
+scrape rather than sitting as a stale "last known duration" indefinitely
+between pulls — an approximation, not a guarantee, since this process has
+no way to observe the actual scrape timing. For a distribution across the
+fleet, use `angryduck_worker_pulls_total`'s rate and reason about counts,
+or trend this value scrape-over-scrape. The
 `image` label bounds cardinality to roughly "how many distinct apps get
 preheated," not one series per pod or tag, but it's still worth watching
 if your fleet pushes a very large number of distinct repos. Separately,
@@ -311,6 +316,7 @@ for the full annotated list. The highlights:
 | `PREHEAT_ATTRIBUTION_INTERVAL_S` | 300 | how often to sample running containers against recently-preheated repos (`angryduck_worker_preheated_containers_running`); 0 disables the monitor entirely |
 | `PREHEAT_ATTRIBUTION_RETENTION_S` | 360 | how long a repo still counts as "preheated"; set to roughly `GC_GRACE_PERIOD_S + GC_MISS_THRESHOLD × GC_CHECK_INTERVAL_S` for your GC settings — past that, an untouched preheated image is already GC'd |
 | `SPEGEL_IMAGE_SUBSTRING` | (empty) | when set, labels `angryduck_worker_pull_duration_seconds` with whether a container matching this substring was running at pull time (`true`/`false`/`unknown`) — no Kubernetes API call, checked once per pull |
+| `PULL_DURATION_RESET_INTERVAL_S` | 15 | how often to clear `angryduck_worker_pull_duration_seconds` so a value is visible for roughly one scrape rather than lingering indefinitely; match to your Prometheus `scrape_interval`; 0 disables resetting |
 
 Real environment variables (a k8s ConfigMap, in practice — see
 `deploy/stg/configmap.yaml`) always win over `.env` file values.
@@ -319,10 +325,10 @@ Real environment variables (a k8s ConfigMap, in practice — see
 
 ```bash
 # 1. Build and push both images
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.5 -f Dockerfile.controller .
-sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.5 -f Dockerfile.worker .
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.5
-sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.5
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.6 -f Dockerfile.controller .
+sudo docker build --no-cache -t registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.6 -f Dockerfile.worker .
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.6
+sudo docker push registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.6
 # (bump the tag in deploy/stg/controller.yaml and worker-daemonset.yaml too)
 
 # 2. The rescue token — before the DaemonSet (once per cluster). Rescue
@@ -405,6 +411,21 @@ loop — so the limit only needs to absorb one burst, not throughput; `1`
 core was provisioned for the old always-on mirror's concurrent-transfer
 model and was reduced to `500m` for the worker and `150m` for the
 controller now that neither runs one.
+
+Both binaries read their own cgroup memory limit at startup
+(`internal/memlimit`) and apply it to the Go runtime via `GOMEMLIMIT`
+(`runtime/debug.SetMemoryLimit`, 90% of the cgroup limit — headroom for
+GC pause behavior and non-heap memory). Go's default behavior without
+this is to size the heap using its own `GOGC=100` heuristic and hold onto
+freed pages indefinitely absent real memory pressure — which, under
+cgroup accounting, shows up as memory usage that jumps during a burst
+(several concurrent preheat pulls, a big `crictl` listing) and then never
+visibly comes back down, even though nothing is actually leaking. Once
+GOMEMLIMIT is set, the runtime's scavenger becomes considerably more
+aggressive about returning idle memory to the OS on its own, without
+needing a manual `debug.FreeOSMemory()` call anywhere. If no cgroup
+memory limit is set at all, `Apply` logs that and leaves Go's default
+behavior untouched rather than guessing at a number.
 
 ## Metrics
 
