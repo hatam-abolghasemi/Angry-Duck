@@ -20,23 +20,8 @@ type WorkerReport struct {
 	// between tags of the same image. Omitted (nil/empty) is always safe
 	// — the ranker just falls back to utilization-only ranking for that
 	// node, identical to its behavior before this field existed.
-	Repos []string `json:"repos,omitempty"`
-	// Images is the exact set of local image references (repo:tag) this
-	// node currently holds — used only so the controller can point a
-	// stuck pod's node at ONE source for a one-shot rescue import (see
-	// RescueSourceResponse). Bounded by how many images actually sit on
-	// one node (tens, not thousands), so this stays a few KB at most, not
-	// something that grows without bound over time.
-	Images    []string  `json:"images,omitempty"`
+	Repos     []string  `json:"repos,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
-}
-
-// RescueSourceResponse is the controller's answer to
-// GET /rescue-source?image=...: the address of one fresh worker known to
-// have this exact image reference locally, for a one-shot rescue import.
-// Empty Address means nobody has it.
-type RescueSourceResponse struct {
-	Address string `json:"address,omitempty"`
 }
 
 // ReportAck is returned to a worker after it submits a report.

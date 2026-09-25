@@ -16,10 +16,10 @@ func TestPreheatMonitorTickCountsOnlyPreheatedRepos(t *testing.T) {
 	rt.running["docker.io/library/nginx:1.25"] = true
 	rt.running["docker.io/library/nginx:1.26"] = true
 	// A different repo entirely, never preheated.
-	rt.running["repo-sahand.internal-dev.example.com/pause:3.10.1"] = true
+	rt.running["registry.example.com/pause:3.10.1"] = true
 
 	const nodeID = "test-node-preheat-monitor"
-	p := NewPuller(rt, time.Minute, nodeID, false, "", 0)
+	p := NewPuller(rt, nodeID, false, "", 0)
 	p.mu.Lock()
 	p.preheatedAt["docker.io/library/nginx"] = time.Now()
 	p.mu.Unlock()
@@ -32,7 +32,7 @@ func TestPreheatMonitorTickCountsOnlyPreheatedRepos(t *testing.T) {
 	if !strings.Contains(out, want) {
 		t.Errorf("expected %q in output, got:\n%s", want, out)
 	}
-	if strings.Contains(out, `node="`+nodeID+`",repo="repo-sahand.internal-dev.example.com/pause"`) {
+	if strings.Contains(out, `node="`+nodeID+`",repo="registry.example.com/pause"`) {
 		t.Errorf("expected the non-preheated pause repo to be absent entirely, got:\n%s", out)
 	}
 }
@@ -45,7 +45,7 @@ func TestPreheatMonitorTickResetsWhenNothingPreheated(t *testing.T) {
 	rt.running["docker.io/library/redis:7"] = true
 
 	const nodeID = "test-node-preheat-monitor-empty"
-	p := NewPuller(rt, time.Minute, nodeID, false, "", 0)
+	p := NewPuller(rt, nodeID, false, "", 0)
 	// No preheatedAt entries at all.
 
 	m := NewPreheatMonitor(rt, p, time.Hour, time.Hour, nodeID)
@@ -65,7 +65,7 @@ func TestPreheatMonitorTickExpiresOldPreheats(t *testing.T) {
 	rt.running["docker.io/library/nginx:1.25"] = true
 
 	const nodeID = "test-node-preheat-monitor-expired"
-	p := NewPuller(rt, time.Minute, nodeID, false, "", 0)
+	p := NewPuller(rt, nodeID, false, "", 0)
 	p.mu.Lock()
 	p.preheatedAt["docker.io/library/nginx"] = time.Now().Add(-2 * time.Hour)
 	p.mu.Unlock()

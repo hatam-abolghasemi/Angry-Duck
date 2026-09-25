@@ -21,8 +21,8 @@ import (
 // order being accepted and a pull actually succeeding are different
 // events — this counter is the only one that tells you the latter.
 //
-// registry is only populated when METRICS_LABEL_REGISTRY is enabled — see
-// imagesDeletedTotal in gc.go for why this defaults to off.
+// registry is only populated when METRICS_LABEL_REGISTRY is enabled —
+// registry host is an unbounded-ish label (unlike node), so it's opt-in.
 var pullsTotal = metrics.NewCounterVec(
 	"angryduck_worker_pulls_total",
 	"Total image pulls executed by this worker, by result. registry is only populated when METRICS_LABEL_REGISTRY=true.",
@@ -32,8 +32,7 @@ var pullsTotal = metrics.NewCounterVec(
 // pullDurationSeconds is the most recent preheat pull duration, per
 // node/result/registry/image/spegel combination — a gauge, not a
 // histogram: this times exactly the same event pullsTotal counts (this
-// is the ONLY path Angry Duck pulls images through — rescue uses a
-// separate export/import mechanism, not PullImage), so the two are
+// is the ONLY path Angry Duck pulls images through), so the two are
 // always consistent with each other.
 //
 // image is the bare repo (imageref.Repo — no tag, no digest), added
@@ -49,36 +48,26 @@ var pullsTotal = metrics.NewCounterVec(
 // doc comment for the timing tradeoff that involves.
 //
 // registry is only populated when METRICS_LABEL_REGISTRY is enabled;
-// spegel only when SPEGEL_IMAGE_SUBSTRING is set — see imagesDeletedTotal
-// in gc.go and spegelPresence respectively.
+// spegel only when SPEGEL_IMAGE_SUBSTRING is set — see spegelPresence.
 var pullDurationSeconds = metrics.NewGaugeVec(
 	"angryduck_worker_pull_duration_seconds",
 	"Most recent preheat pull duration in seconds (a gauge, not a histogram — last value per label combination, periodically reset — see PULL_DURATION_RESET_INTERVAL_S). registry only when METRICS_LABEL_REGISTRY=true; spegel only when SPEGEL_IMAGE_SUBSTRING is set.",
 	"node", "result", "registry", "image", "spegel",
 )
 
-// Puller receives pull orders from the controller, executes them
-// asynchronously, and remembers when each image was ordered so the GC loop
-// can grant it a grace period even if nothing has actually run it yet
-// (Argo may not have synced the new pod onto this node the moment the pull
-// lands).
+// Puller receives pull orders from the controller and executes them
+// asynchronously.
 type Puller struct {
 	runtime                   Runtime
-	gracePeriod               time.Duration
 	nodeID                    string
 	labelRegistry             bool
 	spegelImageSubstring      string
 	pullDurationResetInterval time.Duration
 
-	mu        sync.Mutex
-	orderedAt map[string]time.Time
+	mu sync.Mutex
 	// preheatedAt tracks, per REPO (not full ref — see PreheatedRepos),
 	// the last time a preheat pull for that repo succeeded on this node.
-	// Deliberately separate from orderedAt: orderedAt exists to protect
-	// an image from GC for one short gracePeriod, while this backs the
-	// preheat-attribution sample (see PreheatMonitor) over a much longer
-	// window — the two have unrelated lifetimes and shouldn't share one
-	// prune policy.
+	// Backs the preheat-attribution sample (see PreheatMonitor).
 	preheatedAt map[string]time.Time
 	onSuccess   func()
 }
@@ -95,15 +84,13 @@ func (p *Puller) OnSuccess(fn func()) { p.onSuccess = fn }
 // pullDurationSeconds when non-empty — see spegelPresence.
 // pullDurationResetInterval controls how often Run clears
 // pullDurationSeconds (0 disables resetting — see Run).
-func NewPuller(runtime Runtime, gracePeriod time.Duration, nodeID string, labelRegistry bool, spegelImageSubstring string, pullDurationResetInterval time.Duration) *Puller {
+func NewPuller(runtime Runtime, nodeID string, labelRegistry bool, spegelImageSubstring string, pullDurationResetInterval time.Duration) *Puller {
 	return &Puller{
 		runtime:                   runtime,
-		gracePeriod:               gracePeriod,
 		nodeID:                    nodeID,
 		labelRegistry:             labelRegistry,
 		spegelImageSubstring:      spegelImageSubstring,
 		pullDurationResetInterval: pullDurationResetInterval,
-		orderedAt:                 make(map[string]time.Time),
 		preheatedAt:               make(map[string]time.Time),
 	}
 }
@@ -154,8 +141,7 @@ func (p *Puller) Run(ctx context.Context) {
 
 // spegelPresence reports whether a container whose image reference
 // contains spegelImageSubstring is currently running on this node — using
-// only the local container runtime (the same source GC already trusts
-// for "what's running here"), no Kubernetes API call and no extra RBAC.
+// only the local container runtime, no Kubernetes API call and no extra RBAC.
 // Checked once per pull rather than on a timer: a pull is already a much
 // rarer event than any periodic sample would be (bounded by RANK_TOP_N
 // per push), so this stays cheap even on the costlier ctr backend.
@@ -204,10 +190,6 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	order.Image = normalized
 
-	p.mu.Lock()
-	p.orderedAt[order.Image] = time.Now()
-	p.mu.Unlock()
-
 	logging.Infof("angryduck-worker: received pull order for image=%s", order.Image)
 
 	go func() {
@@ -241,45 +223,9 @@ func (p *Puller) HandlePull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, model.PullAck{Accepted: true})
 }
 
-// InGracePeriod reports whether an image was ordered pulled recently enough
-// that the GC loop should not remove it yet, even if nothing is currently
-// running it.
-func (p *Puller) InGracePeriod(image string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	t, ok := p.orderedAt[image]
-	if !ok {
-		return false
-	}
-	return time.Since(t) <= p.gracePeriod
-}
-
-// PruneExpired drops orderedAt entries whose grace period has fully
-// elapsed. Without this, orderedAt grows by one entry per unique image
-// reference ever ordered, for the lifetime of the process — harmless at
-// small scale, but unbounded on a long-lived pod in a repo with a steady
-// stream of new tags. Safe to call on a timer (the GC loop already ticks
-// on one); an entry past its grace period has nothing left to protect, so
-// dropping it changes no GC decision.
-func (p *Puller) PruneExpired() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := time.Now()
-	pruned := 0
-	for img, t := range p.orderedAt {
-		if now.Sub(t) > p.gracePeriod {
-			delete(p.orderedAt, img)
-			pruned++
-		}
-	}
-	return pruned
-}
-
 // PreheatedRepos returns the set of repos this worker has successfully
 // preheated within the last `within`, pruning anything older while it's
-// at it. Used only by PreheatMonitor's periodic sample — a much coarser,
-// longer-lived read than InGracePeriod's per-pull check, which is why
-// it's backed by its own map instead of reusing orderedAt.
+// at it. Used only by PreheatMonitor's periodic sample.
 func (p *Puller) PreheatedRepos(within time.Duration) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

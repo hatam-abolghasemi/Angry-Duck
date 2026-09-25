@@ -18,15 +18,7 @@ type workerEntry struct {
 	// because the ranker's only use of it is an O(1) "does this node
 	// already have repo X" membership check per candidate, per preheat —
 	// never iteration over the full list.
-	Repos map[string]struct{}
-	// Images is the set of exact local image references (repo:tag) this
-	// node last reported — used only to find a single rescue source for a
-	// pod stuck in ImagePullBackOff (see RescueSourceFor). Deliberately a
-	// set of exact strings, not a digest index: rescue matches by exact
-	// reference, the same one the stuck pod itself is waiting on, so
-	// there's no need to track manifest digests or resolve tags at all —
-	// that whole layer of bookkeeping goes away with it.
-	Images   map[string]struct{}
+	Repos    map[string]struct{}
 	LastSeen time.Time
 }
 
@@ -74,7 +66,7 @@ func (r *Registry) Update(rep model.WorkerReport) {
 	w.LastSeen = rep.Timestamp
 
 	// Rebuild rather than mutate the existing map in place: a worker that
-	// removed a repo since its last report (GC'd it) must stop showing up
+	// removed a repo since its last report (kubelet's image GC, say) must stop showing up
 	// as having it, and a fresh map per report is the simplest way to
 	// guarantee that without diffing old vs new. A previously-taken
 	// FreshWorkers() snapshot still holds a reference to the OLD map, so
@@ -87,37 +79,6 @@ func (r *Registry) Update(rep model.WorkerReport) {
 		}
 	}
 	w.Repos = repos
-
-	images := make(map[string]struct{}, len(rep.Images))
-	for _, img := range rep.Images {
-		if img != "" {
-			images[img] = struct{}{}
-		}
-	}
-	w.Images = images
-}
-
-// RescueSourceFor returns the address of ONE fresh worker (other than
-// excludeNode) that currently reports having image exactly, or ok=false if
-// none does. Deliberately singular, not a list: rescue is a single
-// best-effort attempt, not a search — if this one source can't actually
-// serve it, the caller waits for its own retry cooldown rather than
-// hunting through alternatives. Which fresh worker is returned when
-// several qualify is unspecified (map iteration order); nothing here
-// needs it to be deterministic.
-func (r *Registry) RescueSourceFor(image, excludeNode string) (address string, ok bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	now := time.Now()
-	for id, w := range r.workers {
-		if id == excludeNode || !r.isFresh(w, now) {
-			continue
-		}
-		if _, has := w.Images[image]; has {
-			return w.Address, true
-		}
-	}
-	return "", false
 }
 
 // isFresh reports whether a worker has reported within staleAfter of now.

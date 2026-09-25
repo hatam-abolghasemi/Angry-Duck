@@ -32,8 +32,8 @@ type Reporter struct {
 // pulling a new tag onto a node that already has an older tag of the same
 // repo is typically far cheaper than a cold pull.
 //
-// The listing goes through the shared Inventory, which also feeds GC, so
-// one `crictl images -o json` per interval serves both.
+// The listing goes through the shared Inventory, so a report right after
+// a recent listing reuses it instead of running the command again.
 func NewReporter(nodeID, selfAddress, metricsURL, controllerURL string, interval time.Duration, inv *Inventory) *Reporter {
 	return &Reporter{
 		nodeID:        nodeID,
@@ -81,8 +81,8 @@ func (rp *Reporter) Run(ctx context.Context) {
 	}
 }
 
-// reportOnce sends one report. listMaxAge lets a tick reuse a listing GC
-// took moments ago instead of running the same command again.
+// reportOnce sends one report. listMaxAge lets a tick reuse a listing
+// taken moments ago instead of running the same command again.
 func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	result, err := FetchRootUtilization(rp.metricsURL, 5*time.Second)
 	if err != nil {
@@ -97,14 +97,13 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: computed root fs utilization: used=%.0f bytes, free=%.0f bytes, size=%.0f bytes, utilization=%.4f (%.1f%%)",
 		rp.nodeID, result.UsedBytes, result.FreeBytes, result.SizeBytes, result.Utilization, result.Utilization*100)
 
-	repos, images := rp.localRefs(listMaxAge)
+	repos := rp.localRepos(listMaxAge)
 
 	report := model.WorkerReport{
 		NodeID:      rp.nodeID,
 		Address:     rp.selfAddress,
 		Utilization: result.Utilization,
 		Repos:       repos,
-		Images:      images,
 		Timestamp:   time.Now(),
 	}
 	body, err := json.Marshal(report)
@@ -127,20 +126,19 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: report accepted by controller: utilization=%.1f%%, repos=%d", rp.nodeID, result.Utilization*100, len(repos))
 }
 
-// localRefs asks the runtime for every local image reference once, and
-// returns two small, cheap-to-report views of it: the deduplicated set of
-// bare repo identities (Repos, for preheat locality ranking) and the
-// exact tag-form references (Images, for one-shot rescue sourcing). Both
-// are bounded by how many images actually sit on this node — tens, not
-// thousands — so neither grows without bound over the node's lifetime.
+// localRepos asks the runtime for every local image reference once, and
+// returns the deduplicated set of bare repo identities (for preheat
+// locality ranking) among them. Bounded by how many images actually sit
+// on this node — tens, not thousands — so this doesn't grow without
+// bound over the node's lifetime.
 //
-// The listing comes from the shared Inventory: GC uses the same one, so
-// this is the only regular image listing the worker performs.
-func (rp *Reporter) localRefs(listMaxAge time.Duration) (repos, images []string) {
-	refs, _, _, err := rp.inventory.Get(listMaxAge)
+// The listing comes from the shared Inventory — the only regular image
+// listing the worker performs.
+func (rp *Reporter) localRepos(listMaxAge time.Duration) (repos []string) {
+	refs, err := rp.inventory.Get(listMaxAge)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: failed to list local images for report: %v", rp.nodeID, err)
-		return nil, nil
+		return nil
 	}
 
 	seenRepo := make(map[string]struct{}, len(refs))
@@ -148,7 +146,6 @@ func (rp *Reporter) localRefs(listMaxAge time.Duration) (repos, images []string)
 		if ref == "" || strings.HasPrefix(ref, "sha256:") || strings.Contains(ref, "@sha256:") {
 			continue // bare digest or digest-pinned alias: no repo identity, not a tag a pod would reference
 		}
-		images = append(images, ref)
 
 		repo := imageref.Repo(ref)
 		if repo == "" {
@@ -160,5 +157,5 @@ func (rp *Reporter) localRefs(listMaxAge time.Duration) (repos, images []string)
 		seenRepo[repo] = struct{}{}
 		repos = append(repos, repo)
 	}
-	return repos, images
+	return repos
 }

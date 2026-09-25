@@ -19,14 +19,14 @@ func writeTempConfig(t *testing.T, content string) string {
 
 func TestLoadWithAuthField(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte("myuser:mypass"))
-	content := `{"auths": {"registry.internal-registry.example.com": {"auth": "` + encoded + `"}}}`
+	content := `{"auths": {"registry.example.com": {"auth": "` + encoded + `"}}}`
 	path := writeTempConfig(t, content)
 
 	store, err := Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got, ok := store.CredentialsFor("registry.internal-registry.example.com")
+	got, ok := store.CredentialsFor("registry.example.com")
 	if !ok {
 		t.Fatalf("expected credentials to be found")
 	}
@@ -39,14 +39,14 @@ func TestLoadWithAuthField(t *testing.T) {
 }
 
 func TestLoadWithExplicitUsernamePassword(t *testing.T) {
-	content := `{"auths": {"git.internal-registry.example.com": {"username": "u", "password": "p"}}}`
+	content := `{"auths": {"git.example.com": {"username": "u", "password": "p"}}}`
 	path := writeTempConfig(t, content)
 
 	store, err := Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got, ok := store.CredentialsFor("git.internal-registry.example.com")
+	got, ok := store.CredentialsFor("git.example.com")
 	if !ok || got != "u:p" {
 		t.Fatalf("got (%q, %v), want (\"u:p\", true)", got, ok)
 	}
@@ -56,8 +56,8 @@ func TestLoadMultipleRegistries(t *testing.T) {
 	enc1 := base64.StdEncoding.EncodeToString([]byte("user1:pass1"))
 	enc2 := base64.StdEncoding.EncodeToString([]byte("user2:pass2"))
 	content := `{"auths": {
-		"registry.internal-registry.example.com": {"auth": "` + enc1 + `"},
-		"registry.example.com": {"auth": "` + enc2 + `"}
+		"registry-a.example.com": {"auth": "` + enc1 + `"},
+		"registry-b.example.com": {"auth": "` + enc2 + `"}
 	}}`
 	path := writeTempConfig(t, content)
 
@@ -68,11 +68,11 @@ func TestLoadMultipleRegistries(t *testing.T) {
 	if store.Count() != 2 {
 		t.Fatalf("got Count()=%d, want 2", store.Count())
 	}
-	if got, _ := store.CredentialsFor("registry.internal-registry.example.com"); got != "user1:pass1" {
-		t.Errorf("registry.internal-registry.example.com: got %q", got)
+	if got, _ := store.CredentialsFor("registry-a.example.com"); got != "user1:pass1" {
+		t.Errorf("registry-a.example.com: got %q", got)
 	}
-	if got, _ := store.CredentialsFor("registry.example.com"); got != "user2:pass2" {
-		t.Errorf("registry.example.com: got %q", got)
+	if got, _ := store.CredentialsFor("registry-b.example.com"); got != "user2:pass2" {
+		t.Errorf("registry-b.example.com: got %q", got)
 	}
 }
 
@@ -80,14 +80,14 @@ func TestLoadNormalizesSchemeInAuthsKey(t *testing.T) {
 	// Some tools write the auths key with a scheme prefix — image
 	// references never have one, so lookups must still succeed.
 	encoded := base64.StdEncoding.EncodeToString([]byte("u:p"))
-	content := `{"auths": {"https://registry.internal-registry.example.com/": {"auth": "` + encoded + `"}}}`
+	content := `{"auths": {"https://registry.example.com/": {"auth": "` + encoded + `"}}}`
 	path := writeTempConfig(t, content)
 
 	store, err := Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got, ok := store.CredentialsFor("registry.internal-registry.example.com"); !ok || got != "u:p" {
+	if got, ok := store.CredentialsFor("registry.example.com"); !ok || got != "u:p" {
 		t.Fatalf("got (%q, %v), want (\"u:p\", true)", got, ok)
 	}
 }

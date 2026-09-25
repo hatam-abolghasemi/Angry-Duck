@@ -20,8 +20,8 @@ import (
 // controller-side half of the pull story; angryduck_worker_pulls_total
 // (see worker/puller.go) is the worker-side half.
 //
-// registry is only populated when METRICS_LABEL_REGISTRY is enabled — see
-// imagesDeletedTotal in worker/gc.go for why this defaults to off.
+// registry is only populated when METRICS_LABEL_REGISTRY is enabled —
+// registry host is an unbounded-ish label (unlike node), so it's opt-in.
 var pullOrdersTotal = metrics.NewCounterVec(
 	"angryduck_controller_pull_orders_total",
 	"Total pull orders sent to workers, by node and result. registry is only populated when METRICS_LABEL_REGISTRY=true.",
@@ -77,16 +77,15 @@ type Ranker struct {
 
 // NewRanker builds a ranker bound to the given registry. excludeSubstrings
 // is a list of case-sensitive substrings (e.g. "master", "control-plane");
-// any worker whose NodeID contains one is still tracked and still runs its
-// own local GC loop as normal — it's simply never selected as a preheat
-// target. This exists because master/control-plane nodes still need
-// Angry Duck's worker running on them for disk GC, but pass nil here (or
-// an empty slice) to disable the behavior entirely.
+// any worker whose NodeID contains one is still tracked and still reports
+// in as normal — it's simply never selected as a preheat target. This
+// exists because master/control-plane nodes still need Angry Duck's
+// worker running on them for its disk-utilization/locality reporting, but
+// pass nil here (or an empty slice) to disable the behavior entirely.
 //
 // Matching is done here, at selection time, rather than by keeping masters
-// out of the registry or off the DaemonSet: excluding them from scheduling
-// entirely would mean nobody GCs their disk, which is a real regression —
-// the constraint is "never pick them as a target," not "never run there."
+// out of the registry or off the DaemonSet: the constraint is "never pick
+// them as a target," not "never run there."
 //
 // preferImageLocality controls whether candidates that already have the
 // target image's repo present locally (any tag) are ranked ahead of ones
@@ -95,8 +94,8 @@ type Ranker struct {
 // back to the old utilization-only ordering.
 //
 // labelRegistryHost controls whether pullOrdersTotal is labeled by
-// container-registry host (METRICS_LABEL_REGISTRY) — see
-// imagesDeletedTotal in worker/gc.go for why this defaults to off.
+// container-registry host (METRICS_LABEL_REGISTRY) — off by default
+// since registry host is an unbounded-ish label, unlike node.
 func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string, preferImageLocality bool, labelRegistryHost bool) *Ranker {
 	return &Ranker{
 		registry:            registry,
@@ -274,10 +273,10 @@ func (rk *Ranker) rankByLocality(image string, candidates []*workerEntry) []*wor
 
 // excludeMatching drops any worker whose NodeID contains one of
 // rk.excludeSubstrings, preserving the input's utilization ordering.
-// Excluded workers are still fresh, still reporting, and still running
-// their own local GC — they're just never handed a pull order, since
-// master/control-plane nodes will never actually have a real pod
-// scheduled onto them to benefit from the pre-pull.
+// Excluded workers are still fresh and still reporting — they're just
+// never handed a pull order, since master/control-plane nodes will never
+// actually have a real pod scheduled onto them to benefit from the
+// pre-pull.
 func (rk *Ranker) excludeMatching(workers []*workerEntry) []*workerEntry {
 	if len(rk.excludeSubstrings) == 0 {
 		return workers

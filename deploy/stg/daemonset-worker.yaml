@@ -21,14 +21,15 @@ spec:
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: angryduck-worker
+      automountServiceAccountToken: false
       hostNetwork: true
       hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
-        - name: gitlab-docker-registry
+        - name: registry-pull-secret
       containers:
         - name: worker
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-worker:1.4.6
+          image: registry.example.com/devops/generic/angry-duck-worker:1.5.0
           env:
             - name: NODE_ID
               valueFrom:
@@ -38,12 +39,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: RESCUE_PEER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: angryduck-rescue
-                  key: token
-                  optional: true
           envFrom:
             - configMapRef:
                 name: angryduck-config
@@ -74,10 +69,16 @@ spec:
               cpu: "1"
               memory: 192Mi
           securityContext:
-            privileged: true
+            privileged: false
+            allowPrivilegeEscalation: false
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_CHROOT", "SYS_PTRACE"]
       volumes:
         - name: registry-creds
           secret:
-            secretName: gitlab-registry-pull
+            secretName: angryduck-registry-creds
       tolerations:
         - operator: Exists

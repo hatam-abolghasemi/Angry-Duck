@@ -76,11 +76,11 @@ func TestRankerExcludesMatchingNodesFromSelection(t *testing.T) {
 
 	registry := NewRegistry(time.Minute, time.Minute)
 	registry.Update(model.WorkerReport{
-		NodeID: "sahand-k8s-stg-master2-104025", Address: master.address,
+		NodeID: "k8s-stg-master2", Address: master.address,
 		Utilization: 0.01, Timestamp: time.Now(), // near-empty: would win on utilization alone
 	})
 	registry.Update(model.WorkerReport{
-		NodeID: "sahand-k8s-stg-worker5-104033", Address: worker.address,
+		NodeID: "k8s-stg-worker5", Address: worker.address,
 		Utilization: 0.40, Timestamp: time.Now(),
 	})
 
@@ -96,7 +96,7 @@ func TestRankerExcludesMatchingNodesFromSelection(t *testing.T) {
 		t.Fatalf("expected exactly one pull order to the non-excluded worker, got %v", worker.received())
 	}
 	for _, nodeID := range ordered {
-		if nodeID == "sahand-k8s-stg-master2-104025" {
+		if nodeID == "k8s-stg-master2" {
 			t.Fatalf("OrderNow returned an excluded node in its ordered list: %v", ordered)
 		}
 	}
@@ -111,7 +111,7 @@ func TestRankerFallsBackWhenAllFreshWorkersAreExcluded(t *testing.T) {
 
 	registry := NewRegistry(time.Minute, time.Minute)
 	registry.Update(model.WorkerReport{
-		NodeID: "sahand-k8s-stg-master1-104024", Address: master.address,
+		NodeID: "k8s-stg-master1", Address: master.address,
 		Utilization: 0.01, Timestamp: time.Now(),
 	})
 
@@ -136,7 +136,7 @@ func TestRankerWithNoExclusionsBehavesAsBefore(t *testing.T) {
 
 	registry := NewRegistry(time.Minute, time.Minute)
 	registry.Update(model.WorkerReport{
-		NodeID: "sahand-k8s-stg-master3-104026", Address: master.address,
+		NodeID: "k8s-stg-master3", Address: master.address,
 		Utilization: 0.01, Timestamp: time.Now(),
 	})
 
@@ -145,7 +145,7 @@ func TestRankerWithNoExclusionsBehavesAsBefore(t *testing.T) {
 
 	waitForPulls(t, master)
 
-	if len(ordered) != 1 || ordered[0] != "sahand-k8s-stg-master3-104026" {
+	if len(ordered) != 1 || ordered[0] != "k8s-stg-master3" {
 		t.Fatalf("expected the only fresh worker to be ordered with no exclusions configured, got %v", ordered)
 	}
 	if len(master.received()) != 1 {
@@ -164,7 +164,7 @@ func TestRankerDoesNotReorderSameImageToSameNode(t *testing.T) {
 
 	registry := NewRegistry(time.Minute, time.Minute)
 	registry.Update(model.WorkerReport{
-		NodeID: "sahand2-prd-k8s-worker1", Address: node.address,
+		NodeID: "k8s-prd-worker1", Address: node.address,
 		Utilization: 0.10, Timestamp: time.Now(),
 	})
 
@@ -197,7 +197,7 @@ func TestRankerReordersOnNewTargetImage(t *testing.T) {
 
 	registry := NewRegistry(time.Minute, time.Minute)
 	registry.Update(model.WorkerReport{
-		NodeID: "sahand2-prd-k8s-worker2", Address: node.address,
+		NodeID: "k8s-prd-worker2", Address: node.address,
 		Utilization: 0.10, Timestamp: time.Now(),
 	})
 

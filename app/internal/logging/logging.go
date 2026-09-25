@@ -2,8 +2,9 @@
 // on top of the standard library's log package. It exists because the
 // standard logger has no concept of level, which made it impossible to
 // separate "here's what happened" noise from "here's a decision worth your
-// attention" signal — a real operational problem once GC's per-check
-// reasoning needed to be visible without drowning out everything else.
+// attention" signal — a real operational problem once the controller's and
+// worker's own per-request/per-report reasoning needed to be visible
+// without drowning out everything else.
 package logging
 
 import (

@@ -7,16 +7,10 @@ import (
 
 // Inventory is the one place this worker's view of local images lives.
 //
-// Before it existed the reporter (every 15s) and GC (every 60s) each ran
-// the runtime's full image listing on their own timers — the same
-// subprocess and the same JSON parse, twice, for the same answer. Now
-// whichever of them runs first refreshes the listing and the other reuses
-// it if it's young enough.
-//
-// Reusing a listing that is up to one report interval old is safe for GC:
-// an image pulled after the listing simply isn't evaluated until the next
-// one (it can't be wrongly removed if it isn't seen), and an image removed
-// after it only produces a harmless "not found" from RemoveImage.
+// Before it existed, the reporter (every 15s) ran the runtime's full image
+// listing on its own timer even when a very recent listing was already
+// available. Now a caller reuses the cached listing if it's young enough
+// instead of re-running the same subprocess and JSON parse.
 type Inventory struct {
 	runtime Runtime
 
@@ -24,8 +18,6 @@ type Inventory struct {
 
 	mu       sync.RWMutex
 	refs     []string
-	digests  map[string]string // any alias -> runtime's canonical id (GC input)
-	sizes    map[string]int64  // any alias -> byte size, exact or approximate (GC's freed-bytes metric input)
 	listedAt time.Time
 	haveData bool
 }
@@ -37,33 +29,33 @@ func NewInventory(rt Runtime) *Inventory {
 
 // Get returns the local image listing, reusing the cached one if it is no
 // older than maxAge, otherwise refreshing it with one runtime call.
-func (inv *Inventory) Get(maxAge time.Duration) ([]string, map[string]string, map[string]int64, error) {
-	if refs, digests, sizes, ok := inv.cached(maxAge); ok {
-		return refs, digests, sizes, nil
+func (inv *Inventory) Get(maxAge time.Duration) ([]string, error) {
+	if refs, ok := inv.cached(maxAge); ok {
+		return refs, nil
 	}
 	inv.fetchMu.Lock()
 	defer inv.fetchMu.Unlock()
 	// Another caller may have refreshed while we waited for fetchMu.
-	if refs, digests, sizes, ok := inv.cached(maxAge); ok {
-		return refs, digests, sizes, nil
+	if refs, ok := inv.cached(maxAge); ok {
+		return refs, nil
 	}
 	started := time.Now()
-	refs, digests, sizes, err := inv.runtime.LocalImages()
+	refs, err := inv.runtime.LocalImages()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	inv.mu.Lock()
-	inv.refs, inv.digests, inv.sizes = refs, digests, sizes
+	inv.refs = refs
 	inv.listedAt, inv.haveData = started, true
 	inv.mu.Unlock()
-	return refs, digests, sizes, nil
+	return refs, nil
 }
 
-func (inv *Inventory) cached(maxAge time.Duration) ([]string, map[string]string, map[string]int64, bool) {
+func (inv *Inventory) cached(maxAge time.Duration) ([]string, bool) {
 	inv.mu.RLock()
 	defer inv.mu.RUnlock()
 	if !inv.haveData || time.Since(inv.listedAt) > maxAge {
-		return nil, nil, nil, false
+		return nil, false
 	}
-	return inv.refs, inv.digests, inv.sizes, true
+	return inv.refs, true
 }

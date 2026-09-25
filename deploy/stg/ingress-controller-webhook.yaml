@@ -13,7 +13,7 @@ metadata:
 spec:
   ingressClassName: ingress-nginx
   rules:
-    - host: api-stg.sahand-k8s.internal-dev.example.com
+    - host: angryduck-stg.example.com
       http:
         paths:
           - path: /angryduck/webhook/preheat

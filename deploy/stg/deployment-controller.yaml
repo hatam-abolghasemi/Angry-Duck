@@ -22,10 +22,10 @@ spec:
         app.kubernetes.io/component: controller
     spec:
       imagePullSecrets:
-        - name: gitlab-docker-registry
+        - name: registry-pull-secret
       containers:
         - name: controller
-          image: registry.internal-registry.example.com/devops/generic/angry-duck-controller:1.4.6
+          image: registry.example.com/devops/generic/angry-duck-controller:1.5.0
           ports:
             - containerPort: 8080
               name: http

@@ -13,9 +13,8 @@ import (
 // node belong to a repo Angry Duck itself preheated onto this node within
 // PREHEAT_ATTRIBUTION_RETENTION_S. It's the closest thing to "how many
 // pods are benefiting from our preheat" Angry Duck can answer without
-// watching every pod's scheduling and pull events in real time (which
-// nothing here does today — Rescue only watches for one specific failure
-// state).
+// watching every pod's scheduling and pull events in real time (nothing
+// here does that today).
 //
 // Labeled by node and repo ONLY — deliberately not by pod name or full
 // image reference. Repo already bounds this to roughly "how many distinct
@@ -38,11 +37,10 @@ var preheatedContainersRunning = metrics.NewGaugeVec(
 
 // PreheatMonitor periodically samples which repos Angry Duck has
 // preheated onto this node are still backing running containers. It
-// deliberately runs on its own, much coarser interval than GC or the
-// reporter (PREHEAT_ATTRIBUTION_INTERVAL_S, default 300s): this is a
-// periodic sample for a dashboard question ("is preheat pulling its
-// weight"), not an event a rollout needs to react to immediately, so
-// there's no reason to pay for it on GC's 60s cadence.
+// deliberately runs on its own, coarser interval than the reporter
+// (PREHEAT_ATTRIBUTION_INTERVAL_S, default 300s): this is a periodic
+// sample for a dashboard question ("is preheat pulling its weight"), not
+// an event a rollout needs to react to immediately.
 type PreheatMonitor struct {
 	runtime   Runtime
 	puller    *Puller

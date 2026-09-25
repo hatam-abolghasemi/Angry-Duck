@@ -51,7 +51,7 @@ func NewHostExec(root string) (*HostExec, error) {
 	root = strings.TrimRight(root, "/")
 	if root != "" {
 		if _, err := os.Stat(root + "/"); err != nil {
-			return nil, fmt.Errorf("host root %q is not accessible (needs hostPID: true and a privileged container): %w", root, err)
+			return nil, fmt.Errorf("host root %q is not accessible (needs hostPID: true, CAP_SYS_CHROOT/CAP_SYS_PTRACE and an unconfined AppArmor profile): %w", root, err)
 		}
 	}
 	return &HostExec{root: root, paths: make(map[string]string)}, nil

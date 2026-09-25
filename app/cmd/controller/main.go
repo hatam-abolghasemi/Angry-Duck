@@ -41,7 +41,7 @@ func main() {
 	preferImageLocality := config.Bool("RANK_PREFER_IMAGE_LOCALITY", true)
 	// Same flag, same default, as the worker's METRICS_LABEL_REGISTRY —
 	// both binaries read it from the same ConfigMap so
-	// angryduck_controller_pull_orders_total and the worker-side pull/GC
+	// angryduck_controller_pull_orders_total and the worker-side pull
 	// metrics turn their registry-host label on or off together.
 	labelRegistry := config.Bool("METRICS_LABEL_REGISTRY", false)
 

@@ -24,7 +24,6 @@ func NewServer(registry *Registry, ranker *Ranker) *Server {
 	s := &Server{registry: registry, ranker: ranker, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
 	s.mux.HandleFunc("/report", s.handleReport)
-	s.mux.HandleFunc("/rescue-source", s.handleRescueSource)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.Handle("/metrics", metrics.Handler())
 	s.mux.HandleFunc("/healthz", s.handleHealth)
@@ -60,13 +59,13 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Normalize short Docker-style references ("nginx", "nginx:latest")
 	// into fully-qualified ones ("docker.io/library/nginx:latest") here,
-	// once, at the entry point. `ctr` (the worker's default runtime) does
-	// not do this expansion itself and fails with a confusing
+	// once, at the entry point. `ctr` (one of the worker's runtime
+	// backends) does not do this expansion itself and fails with a confusing
 	// "invalid port after host" error on short references — normalizing
 	// centrally means every downstream consumer (ranking, the pull order
-	// sent to workers, GC's tracking of what it pulled) sees the same
-	// canonical reference throughout, rather than each having to repeat
-	// this logic or risk seeing inconsistent forms of the same image.
+	// sent to workers) sees the same canonical reference throughout,
+	// rather than each having to repeat this logic or risk seeing
+	// inconsistent forms of the same image.
 	normalized := imageref.Normalize(req.Image)
 	if normalized != req.Image {
 		logging.Infof("angryduck-controller: normalized image reference %q to %q", req.Image, normalized)
@@ -114,32 +113,6 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	s.registry.Update(rep)
 	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%%", rep.NodeID, rep.Address, rep.Utilization*100)
 	writeJSON(w, http.StatusOK, model.ReportAck{Accepted: true})
-}
-
-// handleRescueSource answers "does any fresh node already have this exact
-// image" — used only when a pod is stuck in ImagePullBackOff, to find a
-// single source for a one-shot rescue import (see internal/worker's
-// Rescuer). Deliberately singular: at most one address, never a list —
-// there is no fan-out, no retry-through-alternatives here, matching the
-// "try once" nature of the whole mechanism.
-func (s *Server) handleRescueSource(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	image := r.URL.Query().Get("image")
-	if image == "" {
-		http.Error(w, "image required", http.StatusBadRequest)
-		return
-	}
-	addr, ok := s.registry.RescueSourceFor(image, r.URL.Query().Get("node"))
-	if !ok {
-		logging.Debugf("angryduck-controller: no rescue source found for image=%s", image)
-		writeJSON(w, http.StatusOK, model.RescueSourceResponse{})
-		return
-	}
-	logging.Infof("angryduck-controller: offering %s as a rescue source for image=%s", addr, image)
-	writeJSON(w, http.StatusOK, model.RescueSourceResponse{Address: addr})
 }
 
 // handleStatus is a debug endpoint showing the full worker registry and

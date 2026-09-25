@@ -7,11 +7,9 @@ import (
 )
 
 // NewServer builds the worker's HTTP handler: /pull to receive orders from
-// the controller, /metrics for pull/GC/rescue counters, /healthz for
-// liveness/readiness probes. With a non-nil exporter it also serves
-// /rescue-export, the token-protected one-shot image handoff used to
-// rescue a pod stuck in ImagePullBackOff elsewhere in the fleet.
-func NewServer(puller *Puller, exporter *RescueExporter) http.Handler {
+// the controller, /metrics for pull metrics, /healthz for
+// liveness/readiness probes.
+func NewServer(puller *Puller) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/pull", puller.HandlePull)
 	mux.Handle("/metrics", metrics.Handler())
@@ -19,8 +17,5 @@ func NewServer(puller *Puller, exporter *RescueExporter) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	if exporter != nil {
-		mux.HandleFunc("/rescue-export", exporter.ServeExport)
-	}
 	return mux
 }
