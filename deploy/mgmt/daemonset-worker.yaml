@@ -26,10 +26,10 @@ spec:
       hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
-        - name: registry-pull-secret
+        - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.example.com/devops/generic/angry-duck-worker:1.5.0
+          image: registry.example.com/devops/generic/angry-duck-worker:1.8.0
           env:
             - name: NODE_ID
               valueFrom:
@@ -48,6 +48,9 @@ spec:
           volumeMounts:
             - name: registry-creds
               mountPath: /etc/angryduck/registry-creds
+              readOnly: true
+            - name: rescue-token
+              mountPath: /etc/angryduck/rescue-token
               readOnly: true
           readinessProbe:
             httpGet:
@@ -75,10 +78,26 @@ spec:
               type: Unconfined
             capabilities:
               drop: ["ALL"]
-              add: ["SYS_CHROOT", "SYS_PTRACE"]
+              # SYS_CHROOT, SYS_PTRACE: run the node's crictl/ctr/tar
+              # (see HOST_ROOT). The rest are for rescue's snapshot
+              # shipping, which copies overlayfs snapshot directories with
+              # the node's tar: reading any file (DAC_READ_SEARCH), writing
+              # it back with its owner, mode and file capabilities (CHOWN,
+              # DAC_OVERRIDE, FOWNER, FSETID, SETFCAP), recreating deleted-
+              # file markers (MKNOD) and trusted.overlay.* attributes
+              # (SYS_ADMIN). The worker can already drive containerd, which
+              # is root-equivalent on the node, so this adds no new level
+              # of trust.
+              add: ["SYS_CHROOT", "SYS_PTRACE", "DAC_READ_SEARCH", "DAC_OVERRIDE", "CHOWN", "FOWNER", "FSETID", "SETFCAP", "MKNOD", "SYS_ADMIN"]
       volumes:
         - name: registry-creds
           secret:
-            secretName: angryduck-registry-creds
+            secretName: gitlab-registry-pull
+        # Guards /rescue and /blobs/*. optional: without it the worker still
+        # starts, but never serves or receives blobs.
+        - name: rescue-token
+          secret:
+            secretName: angryduck-rescue-token
+            optional: true
       tolerations:
         - operator: Exists

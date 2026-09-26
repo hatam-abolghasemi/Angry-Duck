@@ -97,13 +97,14 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: computed root fs utilization: used=%.0f bytes, free=%.0f bytes, size=%.0f bytes, utilization=%.4f (%.1f%%)",
 		rp.nodeID, result.UsedBytes, result.FreeBytes, result.SizeBytes, result.Utilization, result.Utilization*100)
 
-	repos := rp.localRepos(listMaxAge)
+	repos, images := rp.localInventory(listMaxAge)
 
 	report := model.WorkerReport{
 		NodeID:      rp.nodeID,
 		Address:     rp.selfAddress,
 		Utilization: result.Utilization,
 		Repos:       repos,
+		Images:      images,
 		Timestamp:   time.Now(),
 	}
 	body, err := json.Marshal(report)
@@ -126,25 +127,34 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: report accepted by controller: utilization=%.1f%%, repos=%d", rp.nodeID, result.Utilization*100, len(repos))
 }
 
-// localRepos asks the runtime for every local image reference once, and
-// returns the deduplicated set of bare repo identities (for preheat
-// locality ranking) among them. Bounded by how many images actually sit
+// localInventory asks the runtime for every local image reference once,
+// and returns the deduplicated set of bare repo identities (for preheat
+// locality ranking) plus every full reference except bare image IDs (for
+// finding rescue sources). Bounded by how many images actually sit
 // on this node — tens, not thousands — so this doesn't grow without
 // bound over the node's lifetime.
 //
 // The listing comes from the shared Inventory — the only regular image
 // listing the worker performs.
-func (rp *Reporter) localRepos(listMaxAge time.Duration) (repos []string) {
+func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []string) {
 	refs, err := rp.inventory.Get(listMaxAge)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: failed to list local images for report: %v", rp.nodeID, err)
-		return nil
+		return nil, nil
 	}
 
 	seenRepo := make(map[string]struct{}, len(refs))
+	seenImage := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if ref == "" || strings.HasPrefix(ref, "sha256:") || strings.Contains(ref, "@sha256:") {
-			continue // bare digest or digest-pinned alias: no repo identity, not a tag a pod would reference
+		if ref == "" || strings.HasPrefix(ref, "sha256:") {
+			continue // bare image ID: no name at all
+		}
+		if _, ok := seenImage[ref]; !ok {
+			seenImage[ref] = struct{}{}
+			images = append(images, ref)
+		}
+		if strings.Contains(ref, "@sha256:") {
+			continue // digest-pinned alias: kept in images above, but not a tag for repo locality
 		}
 
 		repo := imageref.Repo(ref)
@@ -157,5 +167,5 @@ func (rp *Reporter) localRepos(listMaxAge time.Duration) (repos []string) {
 		seenRepo[repo] = struct{}{}
 		repos = append(repos, repo)
 	}
-	return repos
+	return repos, images
 }

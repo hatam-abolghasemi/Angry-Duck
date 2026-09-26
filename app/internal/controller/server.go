@@ -14,10 +14,19 @@ import (
 
 // Server wires the registry + ranker up to HTTP handlers.
 type Server struct {
-	registry *Registry
-	ranker   *Ranker
-	mux      *http.ServeMux
+	registry   *Registry
+	ranker     *Ranker
+	rescuer    *Rescuer    // nil when rescue is off
+	propagator *Propagator // nil when propagation is off
+	mux        *http.ServeMux
 }
+
+// SetPropagator makes accepted preheats also start a propagation, and adds
+// propagation state to /status.
+func (s *Server) SetPropagator(p *Propagator) { s.propagator = p }
+
+// SetRescuer adds the rescuer's state to /status.
+func (s *Server) SetRescuer(rs *Rescuer) { s.rescuer = rs }
 
 // NewServer builds a Server with routes registered.
 func NewServer(registry *Registry, ranker *Ranker) *Server {
@@ -83,6 +92,9 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 
 	s.registry.SetTarget(req.Image)
 	ordered := s.ranker.OrderNow(req.Image)
+	if s.propagator != nil {
+		s.propagator.Start(req.Image)
+	}
 
 	logging.Infof("angryduck-controller: accepted preheat for image=%s, ordered %d node(s): %v", req.Image, len(ordered), ordered)
 	writeJSON(w, http.StatusAccepted, model.PreheatResponse{
@@ -118,7 +130,14 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 // handleStatus is a debug endpoint showing the full worker registry and
 // current preheat target.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.registry.Snapshot())
+	status := s.registry.Snapshot()
+	if s.rescuer != nil {
+		status.Rescues = s.rescuer.Status()
+	}
+	if s.propagator != nil {
+		status.Propagations = s.propagator.Status()
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

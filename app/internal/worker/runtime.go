@@ -37,10 +37,10 @@ type Runtime interface {
 	PullImage(image string) error
 	// LocalImages returns every local image reference (in any alias form
 	// the runtime reports — a tag, a digest-pinned form, a bare digest)
-	// present on this node. Used only for the repo-locality signal the
-	// reporter sends the controller (see Reporter.localRepos) — nothing
-	// in this worker compares these against running containers or deletes
-	// any of them.
+	// present on this node. Used only for what the reporter sends the
+	// controller (see Reporter.localInventory): the repo-locality signal
+	// and the rescue source lookup. Nothing in this worker compares these
+	// against running containers or deletes any of them.
 	LocalImages() (refs []string, err error)
 	ListRunningImages() ([]string, error)
 	// RunningImageRepos counts currently-running containers on this node,
@@ -150,7 +150,7 @@ func (r containerdRuntime) LocalImages() ([]string, error) {
 //
 // containerd lists the SAME content under multiple REF aliases at once (a
 // tag, a digest-pinned ref, and a bare digest "image ID") — all returned
-// here; the caller (Reporter.localRepos) already knows how to collapse
+// here; the caller (Reporter.localInventory) already knows how to collapse
 // aliases down to a bare repo identity and discard the ones with none.
 // Splitting each line on whitespace and taking only fields[0] is safe even
 // though later columns (SIZE, e.g. "14.7 MiB") contain an internal space,
@@ -271,17 +271,18 @@ func (r crictlRuntime) PullImage(image string) error {
 
 // crictlImagesOutput matches the shape of `crictl images -o json`:
 //
-//	{"images": [{"repoTags": [...]}]}
+//	{"images": [{"repoTags": [...], "repoDigests": [...]}]}
 type crictlImagesOutput struct {
 	Images []struct {
-		RepoTags []string `json:"repoTags"`
+		RepoTags    []string `json:"repoTags"`
+		RepoDigests []string `json:"repoDigests"`
 	} `json:"images"`
 }
 
 // LocalImages runs `crictl images -o json` and returns every image's
-// tag-form references. Bare image IDs and digest-pinned aliases aren't
-// included — the only consumer is the reporter's repo-locality signal,
-// which needs repo names, not digests.
+// tag-form and repo@digest references. The reporter's repo-locality signal
+// skips the digest forms; the rescue source lookup needs them, for pods
+// that pin an image by digest.
 func (r crictlRuntime) LocalImages() ([]string, error) {
 	out, err := r.hx.Run("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
@@ -295,6 +296,7 @@ func (r crictlRuntime) LocalImages() ([]string, error) {
 	var refs []string
 	for _, img := range parsed.Images {
 		refs = append(refs, img.RepoTags...)
+		refs = append(refs, img.RepoDigests...)
 	}
 	return refs, nil
 }

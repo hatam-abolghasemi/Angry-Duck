@@ -1,16 +1,16 @@
 // Command angryduck-worker runs on every node (typically as a DaemonSet
-// pod). It reports root-filesystem utilization to the controller and
-// executes pull orders the controller sends it.
+// pod). It reports root-filesystem utilization and local images to the
+// controller, executes pull orders the controller sends it, and takes part
+// in ImagePullBackOff rescue: as a receiver it copies a missing image from
+// a peer worker, and as a source it serves image blobs to peers (see
+// internal/worker/rescue.go).
 //
 // It carries no container CLIs of its own: crictl/ctr/docker are the
 // node's binaries, run chrooted into HOST_ROOT (see worker.HostExec).
 //
-// Peer-to-peer image distribution for a running fleet is Spegel's job,
-// not this one — Angry Duck only ever does the initial preheat pull onto
-// a few seed nodes. Never a standing mirror in front of containerd, and
-// it never deletes anything: image lifecycle (disk-pressure avoidance,
-// idle-image cleanup) is kubelet's own job — see its
-// imageGCHighThresholdPercent/imageGCLowThresholdPercent/
+// It is not a standing mirror in front of containerd (that is Spegel's
+// job), and it never deletes anything: image lifecycle is kubelet's own
+// job — see its imageGCHighThresholdPercent/imageGCLowThresholdPercent/
 // imageMaximumGCAge configuration.
 package main
 
@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +31,7 @@ import (
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
 	"angryduck/internal/registryauth"
+	"angryduck/internal/sharedtoken"
 	"angryduck/internal/worker"
 )
 
@@ -171,9 +174,14 @@ func main() {
 		log.Printf("angryduck-worker[%s]: preheat-attribution monitor disabled (PREHEAT_ATTRIBUTION_INTERVAL_S=0)", nodeID)
 	}
 
+	rescue := newRescue(ctx, nodeID, runtimeKind, runtimeEndpoint, hostRoot, hx)
+	if rescue != nil {
+		rescue.OnSuccess(reporter.Kick)
+	}
+
 	httpServer := &http.Server{
 		Addr:    listenAddr,
-		Handler: worker.NewServer(puller),
+		Handler: worker.NewServer(puller, rescue),
 	}
 
 	go func() {
@@ -191,6 +199,55 @@ func main() {
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	cancel()
+}
+
+// newRescue sets up ImagePullBackOff rescue, or returns nil (feature off)
+// with a log line saying why. It fails closed: without a valid token the
+// blob endpoints are never mounted, because they would hand image content
+// to anyone on the node network.
+func newRescue(ctx context.Context, nodeID, runtimeKind, runtimeEndpoint, hostRoot string, hx *worker.HostExec) *worker.Rescue {
+	if !config.Bool("RESCUE_ENABLED", true) {
+		log.Printf("angryduck-worker[%s]: rescue disabled (RESCUE_ENABLED=false)", nodeID)
+		return nil
+	}
+	if strings.EqualFold(runtimeKind, "docker") {
+		log.Printf("angryduck-worker[%s]: rescue disabled: it needs containerd, CONTAINER_RUNTIME=docker", nodeID)
+		return nil
+	}
+	if _, err := hx.Resolve("ctr"); err != nil {
+		log.Printf("angryduck-worker[%s]: rescue disabled: %v", nodeID, err)
+		return nil
+	}
+	tokenPath := config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token")
+	token, err := sharedtoken.Load(tokenPath)
+	if err != nil {
+		log.Printf("angryduck-worker[%s]: WARNING: rescue disabled, no usable token: %v", nodeID, err)
+		return nil
+	}
+	// The worker binary is built for the node's architecture, so its own
+	// GOARCH is the platform to import. Override only for odd cases (arm
+	// variants).
+	platform := config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH)
+	namespace := config.String("RESCUE_CONTAINERD_NAMESPACE", "k8s.io")
+	maxConcurrent := config.Int("RESCUE_NODE_MAX_CONCURRENT", 2)
+	// How long snapshots shipped by a failed attempt stay pinned, so a
+	// retry within that window doesn't ship them again.
+	pinTTL := config.Duration("RESCUE_PIN_TTL_S", 3600)
+	// Node directory for the small pin list, so pins survive a restart.
+	stateDir := config.String("RESCUE_STATE_DIR", "/var/lib/angryduck")
+	pinFile := filepath.Join(hostRoot, stateDir, "rescue-pins.json")
+	log.Printf("angryduck-worker[%s]: rescue enabled: platform=%s namespace=%s max_concurrent=%d pin_ttl=%s pin_file=%s",
+		nodeID, platform, namespace, maxConcurrent, pinTTL, pinFile)
+
+	store := worker.NewCtrStore(hx, namespace, runtimeEndpoint)
+	pins := worker.NewPins(store, nodeID, pinTTL, pinFile)
+	// Before serving anything: whatever a previous worker left mid-rescue
+	// is garbage now.
+	cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	worker.CleanupLeftovers(cleanupCtx, store, pins, nodeID)
+	cancel()
+	go pins.Run(ctx, 5*time.Minute)
+	return worker.NewRescue(store, pins, token, nodeID, platform, maxConcurrent)
 }
 
 // listenPort extracts the port from a listen address like ":18081" or
