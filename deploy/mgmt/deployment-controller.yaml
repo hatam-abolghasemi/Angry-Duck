@@ -21,17 +21,22 @@ spec:
         app.kubernetes.io/name: angryduck
         app.kubernetes.io/component: controller
     spec:
+      serviceAccountName: angryduck-controller
       imagePullSecrets:
-        - name: registry-pull-secret
+        - name: gitlab-docker-registry
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.5.0
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.0
           ports:
             - containerPort: 8080
               name: http
           envFrom:
             - configMapRef:
                 name: angryduck-config
+          volumeMounts:
+            - name: rescue-token
+              mountPath: /etc/angryduck/rescue-token
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -51,3 +56,10 @@ spec:
             limits:
               cpu: 150m
               memory: 32Mi
+      volumes:
+        # Shared with the workers. optional: without it the pod still
+        # starts and rescue logs a warning and stays off.
+        - name: rescue-token
+          secret:
+            secretName: angryduck-rescue-token
+            optional: true

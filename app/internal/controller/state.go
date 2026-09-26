@@ -18,7 +18,11 @@ type workerEntry struct {
 	// because the ranker's only use of it is an O(1) "does this node
 	// already have repo X" membership check per candidate, per preheat —
 	// never iteration over the full list.
-	Repos    map[string]struct{}
+	Repos map[string]struct{}
+	// Images is every full image reference this node last reported
+	// (tag and repo@digest forms). The rescuer uses it to find nodes that
+	// hold the exact image a stuck pod needs.
+	Images   map[string]struct{}
 	LastSeen time.Time
 }
 
@@ -29,6 +33,16 @@ func (w *workerEntry) HasRepo(repo string) bool {
 		return false
 	}
 	_, ok := w.Repos[repo]
+	return ok
+}
+
+// HasImage reports whether this worker last reported having exactly image
+// (a normalized reference) locally.
+func (w *workerEntry) HasImage(image string) bool {
+	if image == "" {
+		return false
+	}
+	_, ok := w.Images[image]
 	return ok
 }
 
@@ -79,6 +93,14 @@ func (r *Registry) Update(rep model.WorkerReport) {
 		}
 	}
 	w.Repos = repos
+
+	images := make(map[string]struct{}, len(rep.Images))
+	for _, img := range rep.Images {
+		if img != "" {
+			images[img] = struct{}{}
+		}
+	}
+	w.Images = images
 }
 
 // isFresh reports whether a worker has reported within staleAfter of now.
