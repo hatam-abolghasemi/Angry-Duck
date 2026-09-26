@@ -5,7 +5,14 @@ import (
 	"sync"
 	"time"
 
+	"angryduck/internal/layerindex"
+	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+)
+
+var layerIndexDigests = metrics.NewGaugeVec(
+	"angryduck_controller_layer_index_digests",
+	"Distinct blob digests and snapshot chainIDs held in the controller's layer index, across all nodes.",
 )
 
 // workerEntry is the controller's internal record of a single worker.
@@ -13,17 +20,23 @@ type workerEntry struct {
 	NodeID      string
 	Address     string
 	Utilization float64
-	// Repos is the set of bare repo identities (imageref.Repo) this node
-	// last reported having locally, any tag. A map (rather than a slice)
-	// because the ranker's only use of it is an O(1) "does this node
-	// already have repo X" membership check per candidate, per preheat —
-	// never iteration over the full list.
-	Repos map[string]struct{}
-	// Images is every full image reference this node last reported
-	// (tag and repo@digest forms). The rescuer uses it to find nodes that
-	// hold the exact image a stuck pod needs.
-	Images   map[string]struct{}
+	// Repos is the sorted set of bare repo identities (imageref.Repo)
+	// this node last reported having locally, any tag. Images is every
+	// full image reference it reported (tag and repo@digest forms), also
+	// sorted; the rescuer uses it to find nodes holding the exact image a
+	// stuck pod needs. Both hold interned strings shared across nodes,
+	// since most nodes run the same images, and are replaced, never
+	// modified, so a copy taken by FreshWorkers stays valid.
+	Repos    []string
+	Images   []string
+	invHash  string // InventoryHash of the inventory held
 	LastSeen time.Time
+}
+
+// hasSorted reports whether sorted list contains s.
+func hasSorted(list []string, s string) bool {
+	i := sort.SearchStrings(list, s)
+	return i < len(list) && list[i] == s
 }
 
 // HasRepo reports whether this worker last reported having repo present
@@ -32,8 +45,7 @@ func (w *workerEntry) HasRepo(repo string) bool {
 	if repo == "" {
 		return false
 	}
-	_, ok := w.Repos[repo]
-	return ok
+	return hasSorted(w.Repos, repo)
 }
 
 // HasImage reports whether this worker last reported having exactly image
@@ -42,8 +54,7 @@ func (w *workerEntry) HasImage(image string) bool {
 	if image == "" {
 		return false
 	}
-	_, ok := w.Images[image]
-	return ok
+	return hasSorted(w.Images, image)
 }
 
 // Registry tracks all workers the controller has heard from, and the
@@ -55,6 +66,89 @@ type Registry struct {
 	targetImage string
 	targetSetAt time.Time
 	targetTTL   time.Duration
+	// layers is which image layers each node holds. It has its own lock
+	// and lives outside workerEntry, which FreshWorkers copies.
+	layers *layerindex.Index
+	// names interns repo and image strings across workers. Guarded by mu.
+	names interner
+}
+
+// interner keeps one copy of each string held by any worker's inventory,
+// with a count of the lists holding it.
+type interner struct{ m map[string]internEntry }
+
+type internEntry struct {
+	s string // the canonical copy
+	n int32
+}
+
+// intern returns the canonical copy of s and takes a reference.
+func (in *interner) intern(s string) string {
+	if in.m == nil {
+		in.m = make(map[string]internEntry)
+	}
+	e, ok := in.m[s]
+	if !ok {
+		e.s = s
+	}
+	e.n++
+	in.m[s] = e
+	return e.s
+}
+
+// release drops one reference to s.
+func (in *interner) release(s string) {
+	e, ok := in.m[s]
+	if !ok {
+		return
+	}
+	if e.n--; e.n <= 0 {
+		delete(in.m, s)
+		return
+	}
+	in.m[s] = e
+}
+
+// internList returns list sorted, deduplicated, without empty entries and
+// interned. If that equals old, old itself is returned and no references
+// change; otherwise the new list's references are taken and old's dropped.
+func (in *interner) internList(old, list []string) []string {
+	clean := make([]string, 0, len(list))
+	for _, s := range list {
+		if s != "" {
+			clean = append(clean, s)
+		}
+	}
+	sort.Strings(clean)
+	uniq := clean[:0]
+	for i, s := range clean {
+		if i == 0 || s != clean[i-1] {
+			uniq = append(uniq, s)
+		}
+	}
+	if equalStrings(uniq, old) {
+		return old
+	}
+	out := make([]string, len(uniq)) // exact size: this is what's kept
+	for i, s := range uniq {
+		out[i] = in.intern(s)
+	}
+	for _, s := range old {
+		in.release(s)
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // NewRegistry builds an empty worker registry.
@@ -63,11 +157,26 @@ func NewRegistry(staleAfter, targetTTL time.Duration) *Registry {
 		workers:    make(map[string]*workerEntry),
 		staleAfter: staleAfter,
 		targetTTL:  targetTTL,
+		layers:     layerindex.New(),
 	}
 }
 
-// Update records (or refreshes) a worker's latest report.
-func (r *Registry) Update(rep model.WorkerReport) {
+// Layers returns the layer index.
+func (r *Registry) Layers() *layerindex.Index { return r.layers }
+
+// Update records (or refreshes) a worker's latest report and returns the
+// ack to send back, which tells the worker where its layer sync stands.
+func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
+	ack := model.ReportAck{Accepted: true}
+	if rep.Layers != nil {
+		ack.LayersSeq, ack.LayersResync = r.layers.Apply(rep.NodeID, rep.Layers)
+		layerIndexDigests.Set(float64(r.layers.Unique()))
+	} else if _, _, known := r.layers.Counts(rep.NodeID); known {
+		// Unchanged since the last sync: confirm what we hold, so the
+		// worker can tell a controller that restarted (holds nothing,
+		// resync) from one that simply had nothing new.
+		ack.LayersSeq = r.layers.Seq(rep.NodeID)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	w, ok := r.workers[rep.NodeID]
@@ -79,28 +188,21 @@ func (r *Registry) Update(rep model.WorkerReport) {
 	w.Utilization = rep.Utilization
 	w.LastSeen = rep.Timestamp
 
-	// Rebuild rather than mutate the existing map in place: a worker that
-	// removed a repo since its last report (kubelet's image GC, say) must stop showing up
-	// as having it, and a fresh map per report is the simplest way to
-	// guarantee that without diffing old vs new. A previously-taken
-	// FreshWorkers() snapshot still holds a reference to the OLD map, so
-	// replacing it here is safe and never mutates data a caller is
-	// concurrently reading.
-	repos := make(map[string]struct{}, len(rep.Repos))
-	for _, repo := range rep.Repos {
-		if repo != "" {
-			repos[repo] = struct{}{}
+	// A worker omits an unchanged inventory once we've echoed its hash.
+	// Workers that predate this never omit it.
+	if rep.InventoryOmitted {
+		if rep.InventoryHash == "" || rep.InventoryHash != w.invHash {
+			// Not what we hold (we restarted, say): keep what we have
+			// and don't echo, so the worker sends the full lists next.
+			return ack
 		}
+	} else {
+		w.Repos = r.names.internList(w.Repos, rep.Repos)
+		w.Images = r.names.internList(w.Images, rep.Images)
+		w.invHash = rep.InventoryHash
 	}
-	w.Repos = repos
-
-	images := make(map[string]struct{}, len(rep.Images))
-	for _, img := range rep.Images {
-		if img != "" {
-			images[img] = struct{}{}
-		}
-	}
-	w.Images = images
+	ack.InventoryHash = w.invHash
+	return ack
 }
 
 // isFresh reports whether a worker has reported within staleAfter of now.
@@ -167,12 +269,9 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 	for _, w := range r.workers {
 		var repos []string
 		if len(w.Repos) > 0 {
-			repos = make([]string, 0, len(w.Repos))
-			for repo := range w.Repos {
-				repos = append(repos, repo)
-			}
-			sort.Strings(repos)
+			repos = append([]string(nil), w.Repos...) // already sorted
 		}
+		blobs, snaps, known := r.layers.Counts(w.NodeID)
 		out = append(out, model.WorkerStatus{
 			NodeID:      w.NodeID,
 			Address:     w.Address,
@@ -180,6 +279,9 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 			Repos:       repos,
 			LastSeen:    w.LastSeen,
 			Fresh:       r.isFresh(w, now),
+			LayersKnown: known,
+			Blobs:       blobs,
+			Snapshots:   snaps,
 		})
 	}
 	target := r.targetImage
@@ -205,4 +307,26 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 		status.TargetSetAt = &t
 	}
 	return status
+}
+
+// Holders returns up to max fresh workers (least full first) whose layer
+// inventory holds blob digest, leaving out exclude.
+func (r *Registry) Holders(digest, exclude string, max int) []model.Holder {
+	fresh := r.FreshWorkers()
+	ids := make([]string, 0, len(fresh))
+	addr := make(map[string]string, len(fresh))
+	for _, w := range fresh {
+		if w.NodeID != exclude {
+			ids = append(ids, w.NodeID)
+			addr[w.NodeID] = w.Address
+		}
+	}
+	var out []model.Holder
+	for _, n := range r.layers.Holders(digest, ids) {
+		out = append(out, model.Holder{NodeID: n, Address: addr[n]})
+		if len(out) == max {
+			break
+		}
+	}
+	return out
 }

@@ -9,13 +9,17 @@ metadata:
 data:
   LOG_LEVEL: "info"
   METRICS_LABEL_REGISTRY: "true"
-  SPEGEL_IMAGE_SUBSTRING: "spegel"
-  PULL_DURATION_RESET_INTERVAL_S: "15"
   CONTROLLER_LISTEN_ADDR: ":8080"
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
-  RANK_TOP_N: "2"
+  RANK_TOP_N: "5"
+  # Seeds are the nodes already holding the most bytes of the pushed image
+  # (layer inventory + the image's manifest, read from its registry).
+  RANK_BY_LAYERS: "true"
+  RANK_PLATFORM: "linux/amd64"
+  RANK_RESOLVE_TIMEOUT_S: "5"
+  RANK_RESOLVE_CACHE_S: "600"
   RANK_PREFER_IMAGE_LOCALITY: "true"
   RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
   WORKER_LISTEN_ADDR: ":18081"
@@ -40,9 +44,39 @@ data:
   RESCUE_MAX_SOURCES: "3"
   RESCUE_NODE_MAX_CONCURRENT: "2"
   RESCUE_CONTAINERD_NAMESPACE: "k8s.io"
+  # Layer inventory: blob digests + snapshot chainIDs per node, sent as
+  # deltas. Used to pick seed nodes and to plan cleanup.
+  LAYER_INVENTORY_ENABLED: "true"
+  LAYER_SCAN_INTERVAL_S: "60"
   PROPAGATE_ENABLED: "true"
   PROPAGATE_INTERVAL_S: "10"
-  PROPAGATE_WINDOW_S: "3600"
-  PROPAGATE_MAX_CONCURRENT: "4"
-  PROPAGATE_PER_SOURCE: "2"
+  # 0: spread until every eligible node has it (or a newer tag replaces it).
+  PROPAGATE_WINDOW_S: "0"
+  PROPAGATE_MAX_CONCURRENT: "8"
+  # 1: a source finishes one node completely before starting the next.
+  PROPAGATE_PER_SOURCE: "1"
   PROPAGATE_MAX_UTILIZATION: "0.70"
+  # A seed still pulling after max(MIN, FACTOR x the first seed's pull
+  # time) (MAX while none finished) is cancelled and served from peers.
+  PROPAGATE_SEED_TIMEOUT_MIN_S: "120"
+  PROPAGATE_SEED_TIMEOUT_MAX_S: "600"
+  PROPAGATE_SEED_TIMEOUT_FACTOR: "3"
+  # Image cleanup, per node. An image not running here is removed if it was
+  # unused for GC_UNUSED_FOR_S (any disk usage) OR the disk is above HIGH
+  # (oldest first, down to LOW). The newest GC_ROLLBACK_KEEP per repo are
+  # kept, and go last, only while still above HIGH.
+  GC_ENABLED: "true"
+  GC_INTERVAL_S: "60"
+  GC_HIGH_UTILIZATION: "0.70"
+  GC_LOW_UTILIZATION: "0.60"
+  GC_UNUSED_FOR_S: "21600"
+  GC_ROLLBACK_KEEP: "3"
+  GC_BATCH: "5"
+  GC_SETTLE_S: "10"
+  GC_PROTECT_SUBSTRINGS: "pause"
+  # Pull-only P2P mirror for each node's containerd (127.0.0.1 only).
+  # Needs containerd's CRI registry config_path = MIRROR_CONTAINERD_CONFIG_DIR.
+  MIRROR_ENABLED: "true"
+  MIRROR_LISTEN_ADDR: "127.0.0.1:18082"
+  MIRROR_CONTAINERD_CONFIG_DIR: "/etc/containerd/certs.d"
+  MIRROR_REGISTRIES: "registry.example.com"

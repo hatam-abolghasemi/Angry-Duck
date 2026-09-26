@@ -26,7 +26,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.8.0
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.4
           ports:
             - containerPort: 8080
               name: http
@@ -34,6 +34,11 @@ spec:
             - configMapRef:
                 name: angryduck-config
           volumeMounts:
+            # Same pull secret as the workers: the controller reads pushed
+            # images' manifests (a few KB) to pick seeds by layers.
+            - name: registry-creds
+              mountPath: /etc/angryduck/registry-creds
+              readOnly: true
             - name: rescue-token
               mountPath: /etc/angryduck/rescue-token
               readOnly: true
@@ -50,13 +55,20 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
+            # Measured with 150 nodes (1.8.4): ~13m CPU, 22Mi steady, 26Mi
+            # right after a restart, when every worker resends its full
+            # layer inventory. Memory grows roughly linearly with nodes.
             requests:
               cpu: 20m
-              memory: 16Mi
+              memory: 32Mi
             limits:
               cpu: 150m
-              memory: 32Mi
+              memory: 64Mi
       volumes:
+        - name: registry-creds
+          secret:
+            secretName: gitlab-registry-pull
+            optional: true
         # Shared with the workers. optional: without it the pod still
         # starts and rescue logs a warning and stays off.
         - name: rescue-token

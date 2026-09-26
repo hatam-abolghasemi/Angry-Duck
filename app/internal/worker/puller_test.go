@@ -1,184 +1,95 @@
 package worker
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"angryduck/internal/model"
 )
 
-// TestPreheatedReposPrunesPastRetention confirms PreheatedRepos returns
-// only repos preheated within the given retention window, and prunes
-// anything older while it's at it.
 func TestPreheatedReposPrunesPastRetention(t *testing.T) {
-	rt := newFakeRuntime()
-	p := NewPuller(rt, "test-node", false, "", 0)
-
+	p := NewPuller(newFakeRuntime(), "test-node", false)
 	p.mu.Lock()
 	p.preheatedAt["repo/long-gone"] = time.Now().Add(-2 * time.Hour)
 	p.preheatedAt["repo/recent"] = time.Now()
 	p.mu.Unlock()
 
 	got := p.PreheatedRepos(time.Hour)
-	if got["repo/long-gone"] {
-		t.Errorf("expected repo/long-gone to be pruned (past retention), got present")
+	if got["repo/long-gone"] || !got["repo/recent"] || len(got) != 1 {
+		t.Fatalf("got %v", got)
 	}
-	if !got["repo/recent"] {
-		t.Errorf("expected repo/recent to be present (within retention)")
-	}
-	if len(got) != 1 {
-		t.Errorf("got %d repos, want 1", len(got))
-	}
-
-	// The stale entry should actually be gone from the map now, not just
-	// excluded from this one result.
 	p.mu.Lock()
 	_, stillPresent := p.preheatedAt["repo/long-gone"]
 	p.mu.Unlock()
 	if stillPresent {
-		t.Errorf("expected PreheatedRepos to prune the stale entry, but it's still in the map")
+		t.Fatal("stale entry not pruned from the map")
 	}
 }
 
-// TestHandlePullRecordsPreheatedRepoOnSuccess confirms a successful pull
-// through the normal HandlePull path (not a direct map write, like the
-// test above) ends up recorded in preheatedAt under the image's bare
-// repo, which is what PreheatMonitor actually depends on in production.
-func TestHandlePullRecordsPreheatedRepoOnSuccess(t *testing.T) {
+func TestHandlePullRecordsPreheatedRepoAndCounts(t *testing.T) {
 	rt := newFakeRuntime()
-	p := NewPuller(rt, "test-node", false, "", 0)
-
+	const node = "test-node-pull"
+	p := NewPuller(rt, node, false)
 	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
-
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.PreheatedRepos(time.Hour)["docker.io/library/nginx"] {
-			return
-		}
+	for time.Now().Before(deadline) && !p.PreheatedRepos(time.Hour)["docker.io/library/nginx"] {
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("expected repo docker.io/library/nginx to be recorded as preheated after a successful pull")
-}
-
-// TestHandlePullSetsDurationGauge confirms a successful pull sets
-// pullDurationSeconds under the same node/result/registry labels
-// pullsTotal uses, plus the bare-repo image label — the two metrics time
-// and count the same event, from the same call site.
-func TestHandlePullSetsDurationGauge(t *testing.T) {
-	rt := newFakeRuntime()
-	const nodeID = "test-node-duration"
-	p := NewPuller(rt, nodeID, false, "", 0)
-
-	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
-
-	wantPrefix := `angryduck_worker_pull_duration_seconds{node="` + nodeID + `",result="success",registry="",image="docker.io/library/nginx",spegel=""} `
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(scrapeMetrics(t), wantPrefix) {
-			return
-		}
+	if !p.PreheatedRepos(time.Hour)["docker.io/library/nginx"] {
+		t.Fatal("repo not recorded as preheated")
+	}
+	for time.Now().Before(deadline) && !strings.Contains(scrapeMetrics(t), `angryduck_worker_pulls_total{node="`+node+`",result="success",registry=""} 1`) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("expected a line starting with %q in metrics output after a successful pull", wantPrefix)
-}
-
-// TestSpegelPresenceDisabledByDefault confirms an empty
-// spegelImageSubstring (the default) reports "" — detection off, no
-// runtime call made at all.
-func TestSpegelPresenceDisabledByDefault(t *testing.T) {
-	rt := newFakeRuntime()
-	p := NewPuller(rt, "test-node", false, "", 0)
-	if got := p.spegelPresence(); got != "" {
-		t.Errorf("spegelPresence() = %q, want empty string when disabled", got)
+	if !strings.Contains(scrapeMetrics(t), `angryduck_worker_pulls_total{node="`+node+`",result="success",registry=""} 1`) {
+		t.Fatal("pull not counted")
 	}
 }
 
-// TestSpegelPresenceDetectsRunningContainer confirms enabling detection
-// with a substring correctly reports "true" when a matching container is
-// running, and "false" when none is.
-func TestSpegelPresenceDetectsRunningContainer(t *testing.T) {
+func TestCancelStopsARunningPull(t *testing.T) {
 	rt := newFakeRuntime()
-	rt.running["ghcr.io/spegel-org/spegel:v0.7.4"] = true
+	const image = "registry.example.com/team/app:9"
+	rt.block[image] = true
+	const node = "test-node-cancel"
+	p := NewPuller(rt, node, false)
 
-	p := NewPuller(rt, "test-node", false, "spegel", 0)
-	if got := p.spegelPresence(); got != "true" {
-		t.Errorf("spegelPresence() = %q, want \"true\"", got)
+	body, _ := json.Marshal(model.PullOrder{Image: image})
+	rec := httptest.NewRecorder()
+	p.HandlePull(rec, httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body)))
+	if rec.Code != http.StatusAccepted || !p.Pulling(image) {
+		t.Fatalf("pull not running: %d", rec.Code)
+	}
+	// A second order joins the running pull.
+	rec = httptest.NewRecorder()
+	p.HandlePull(rec, httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body)))
+	if !strings.Contains(rec.Body.String(), "already pulling") {
+		t.Fatalf("second order: %s", rec.Body.String())
 	}
 
-	rtNoSpegel := newFakeRuntime()
-	rtNoSpegel.running["docker.io/library/nginx:1.25"] = true
-	pNoSpegel := NewPuller(rtNoSpegel, "test-node", false, "spegel", 0)
-	if got := pNoSpegel.spegelPresence(); got != "false" {
-		t.Errorf("spegelPresence() = %q, want \"false\"", got)
+	rec = httptest.NewRecorder()
+	p.HandleCancel(rec, httptest.NewRequest(http.MethodPost, "/pull/cancel", bytes.NewReader(body)))
+	var ack model.PullAck
+	_ = json.NewDecoder(rec.Body).Decode(&ack)
+	if !ack.Accepted {
+		t.Fatal("cancel should report a running pull")
 	}
-}
-
-// TestHandlePullLabelsSpegelPresence confirms a real pull through
-// HandlePull actually threads the Spegel-presence label into the
-// duration gauge, not just that the standalone method works.
-func TestHandlePullLabelsSpegelPresence(t *testing.T) {
-	rt := newFakeRuntime()
-	rt.running["ghcr.io/spegel-org/spegel:v0.7.4"] = true
-
-	const nodeID = "test-node-spegel-label"
-	p := NewPuller(rt, nodeID, false, "spegel", 0)
-
-	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
-
-	wantPrefix := `angryduck_worker_pull_duration_seconds{node="` + nodeID + `",result="success",registry="",image="docker.io/library/nginx",spegel="true"} `
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(scrapeMetrics(t), wantPrefix) {
-			return
-		}
+	for time.Now().Before(deadline) && p.Pulling(image) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("expected a line starting with %q in metrics output", wantPrefix)
-}
-
-// TestResetPullDurationClearsGauge confirms the extracted reset action
-// itself works — Run's ticker loop just calls this on a timer, so this is
-// the part actually worth a direct test (see PreheatMonitor.tick for the
-// same split-for-testability pattern).
-func TestResetPullDurationClearsGauge(t *testing.T) {
-	rt := newFakeRuntime()
-	const nodeID = "test-node-reset"
-	p := NewPuller(rt, nodeID, false, "", 0)
-
-	orderPull(t, p, rt, "docker.io/library/nginx:1.25")
-
-	wantPrefix := `angryduck_worker_pull_duration_seconds{node="` + nodeID + `",result="success",registry="",image="docker.io/library/nginx",spegel=""} `
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(scrapeMetrics(t), wantPrefix) {
+	if p.Pulling(image) {
+		t.Fatal("pull still running after cancel")
+	}
+	want := `angryduck_worker_pulls_total{node="` + node + `",result="cancelled",registry=""} 1`
+	for time.Now().Before(deadline) && !strings.Contains(scrapeMetrics(t), want) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !strings.Contains(scrapeMetrics(t), wantPrefix) {
-		t.Fatalf("expected %q to be set before reset", wantPrefix)
-	}
-
-	p.ResetPullDuration()
-
-	if strings.Contains(scrapeMetrics(t), wantPrefix) {
-		t.Fatalf("expected ResetPullDuration to clear the value, but it's still present")
-	}
-}
-
-// TestPullerRunDisabledWithZeroInterval confirms Run returns immediately
-// (no ticker started, no panic from time.NewTicker(0)) when
-// pullDurationResetInterval is 0.
-func TestPullerRunDisabledWithZeroInterval(t *testing.T) {
-	rt := newFakeRuntime()
-	p := NewPuller(rt, "test-node", false, "", 0)
-
-	done := make(chan struct{})
-	go func() {
-		p.Run(context.Background()) // must return on its own; a real ticker would block forever
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatalf("expected Run to return immediately when pullDurationResetInterval is 0")
+	if !strings.Contains(scrapeMetrics(t), want) {
+		t.Fatal("cancelled pull not counted")
 	}
 }

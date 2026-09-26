@@ -135,7 +135,7 @@ func TestRescue_BlobsAboveTheHighestSnapshotStillTravelAsBlobs(t *testing.T) {
 	}
 }
 
-func TestRescue_FallsBackWhenSourceHasNeitherBlobNorSnapshot(t *testing.T) {
+func TestRescue_CombinesSourcesWhenPrimaryLacksALayer(t *testing.T) {
 	brokenStore := blobship.NewMemStore()
 	ti := brokenStore.AddTestImage(testImage, "base", "app")
 	brokenStore.Delete(ti.Layers[1])
@@ -151,8 +151,10 @@ func TestRescue_FallsBackWhenSourceHasNeitherBlobNorSnapshot(t *testing.T) {
 		{NodeID: "worker3", Address: addr(broken)},
 		{NodeID: "worker14", Address: addr(good)},
 	}}, testToken)
-	if code != http.StatusOK || res.Source != "worker14" {
-		t.Fatalf("expected fallback to worker14, got %d %+v", code, res)
+	// worker3 names the image and serves what it has; worker14 fills in
+	// the layer worker3 lost, as a blob.
+	if code != http.StatusOK || res.Source != "worker3,worker14" || res.Snapshots != 0 {
+		t.Fatalf("expected worker3+worker14 with no snapshots, got %d %+v", code, res)
 	}
 }
 
@@ -302,4 +304,69 @@ registry.example.com/devops/generic/angry-duck-worker:1.5.0                     
 	if _, _, ok := parseCtrImageRow(out, "registry.example.com/devops/generic/angry-duck-worker:1.5"); ok {
 		t.Fatal("prefix of a ref must not match")
 	}
+}
+
+func TestRescue_PrefersAnotherSourcesBlobOverPrimarySnapshot(t *testing.T) {
+	// The primary pulled with discard_unpacked_layers=true (snapshots
+	// only); the second source still has the blobs. No snapshot travels.
+	snapOnly := blobship.NewMemStore()
+	ti := snapOnly.AddTestImage(testImage, "base", "app")
+	for _, l := range ti.Layers {
+		snapOnly.Delete(l)
+	}
+	_, primary := peer(t, "worker3", snapOnly)
+	withBlobs := blobship.NewMemStore()
+	withBlobs.AddTestImage(testImage, "base", "app")
+	_, second := peer(t, "worker14", withBlobs)
+
+	dstStore := blobship.NewMemStore()
+	_, dstSrv := peer(t, "worker20", dstStore)
+	code, res := order(t, dstSrv, model.RescueOrder{Image: testImage, Sources: []model.RescueSource{
+		{NodeID: "worker3", Address: addr(primary)},
+		{NodeID: "worker14", Address: addr(second)},
+	}}, testToken)
+	if code != http.StatusOK || res.Snapshots != 0 || len(dstStore.Applied) != 0 {
+		t.Fatalf("snapshots shipped although a blob source existed: %d %+v applied=%v", code, res, dstStore.Applied)
+	}
+}
+
+func TestRescue_BlobLayersBelowASnapshotGoThroughABaseImport(t *testing.T) {
+	// Only the top layer's blob is gone everywhere. The two layers below
+	// still travel as blobs: a synthetic base image unpacks them, then
+	// the top layer's snapshot lands on them.
+	srcStore := blobship.NewMemStore()
+	ti := srcStore.AddTestImage(testImage, "base", "mid", "app")
+	srcStore.Delete(ti.Layers[2])
+	_, src := peer(t, "worker7", srcStore)
+
+	dstStore := blobship.NewMemStore()
+	_, dstSrv := peer(t, "worker20", dstStore)
+	code, res := order(t, dstSrv, model.RescueOrder{Image: testImage, Sources: []model.RescueSource{{NodeID: "worker7", Address: addr(src)}}}, testToken)
+	if code != http.StatusOK || !res.OK {
+		t.Fatalf("got %d %+v", code, res)
+	}
+	if res.Snapshots != 1 || strings.Join(dstStore.Applied, ",") != ti.Chains[2] {
+		t.Fatalf("want only the top layer as a snapshot, applied=%v res=%+v", dstStore.Applied, res)
+	}
+	if len(dstStore.Deleted) != 1 || !strings.HasPrefix(dstStore.Deleted[0], baseImagePrefix) {
+		t.Fatalf("temporary base image not removed: %v", dstStore.Deleted)
+	}
+	if _, d, err := dstStore.Resolve(context.Background(), testImage); err != nil || d != ti.Index {
+		t.Fatalf("image not registered: %s %v", d, err)
+	}
+	// Base layers arrived as blobs.
+	for _, l := range ti.Layers[:2] {
+		if !contains(dstStore.Imports[0], l) {
+			t.Fatalf("layer %s not shipped as a blob in the base import: %v", l, dstStore.Imports[0])
+		}
+	}
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }

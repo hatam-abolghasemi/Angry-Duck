@@ -1,17 +1,17 @@
-// Command angryduck-worker runs on every node (typically as a DaemonSet
-// pod). It reports root-filesystem utilization and local images to the
-// controller, executes pull orders the controller sends it, and takes part
-// in ImagePullBackOff rescue: as a receiver it copies a missing image from
-// a peer worker, and as a source it serves image blobs to peers (see
-// internal/worker/rescue.go).
+// Command angryduck-worker runs on every node (as a DaemonSet pod). It
+//
+//   - reports disk utilization, local images and its layer inventory to
+//     the controller;
+//   - pulls images from the registry when the controller makes it a seed;
+//   - ships images to and from peer workers (rescue and propagation),
+//     blobs first, snapshots only as a last resort;
+//   - runs a pull-only registry mirror for its own containerd, answering
+//     from this node or a peer before the registry;
+//   - cleans up images nothing has run here for a while, when the disk is
+//     getting full.
 //
 // It carries no container CLIs of its own: crictl/ctr/docker are the
 // node's binaries, run chrooted into HOST_ROOT (see worker.HostExec).
-//
-// It is not a standing mirror in front of containerd (that is Spegel's
-// job), and it never deletes anything: image lifecycle is kubelet's own
-// job — see its imageGCHighThresholdPercent/imageGCLowThresholdPercent/
-// imageMaximumGCAge configuration.
 package main
 
 import (
@@ -51,79 +51,24 @@ func main() {
 		}
 		nodeID = hostname
 	}
-
 	selfAddress := config.String("SELF_ADDRESS", "")
 	if selfAddress == "" {
 		log.Fatalf("angryduck-worker: SELF_ADDRESS must be set to a controller-reachable host or host:port (e.g. pod IP via downward API)")
 	}
-
 	listenAddr := config.String("WORKER_LISTEN_ADDR", ":18081")
-
-	// SELF_ADDRESS is commonly injected via the k8s downward API as a bare
-	// IP (status.podIP), which has no port. If it's missing one, append the
-	// port this worker's HTTP server actually listens on so the controller
-	// can dial it back correctly.
 	if !strings.Contains(selfAddress, ":") {
 		selfAddress = selfAddress + ":" + listenPort(listenAddr)
 	}
 	metricsURL := config.String("NODE_EXPORTER_URL", "http://localhost:9100/metrics")
 	controllerURL := config.String("CONTROLLER_URL", "http://angryduck-controller:8080")
 	reportInterval := config.Duration("REPORT_INTERVAL_S", 15)
-	// Off by default: registry host is an unbounded-ish label (unlike
-	// node), so it's opt-in — flip on for troubleshooting pulls per
-	// registry, flip back off if it makes the
-	// worker's /metrics too large for your Prometheus setup. Shared with
-	// the controller's angryduck_controller_pull_orders_total, since both
-	// read the same ConfigMap.
 	labelRegistry := config.Bool("METRICS_LABEL_REGISTRY", false)
-	// How often PreheatMonitor samples running containers against
-	// recently-preheated repos, and how long a repo counts as
-	// "recently preheated" once a pull for it succeeds here. This is a
-	// dashboard sample, not a decision that needs to react quickly. On
-	// the crictl backend this is already close to free (the monitor
-	// skips its runtime call entirely on any node with nothing preheated
-	// recently — see PreheatMonitor.tick), but on
-	// CONTAINER_RUNTIME=containerd it's an N+1-subprocess pass; set this
-	// to 0 to disable the monitor entirely if that ever matters more than
-	// the visibility it buys.
 	preheatAttributionInterval := config.Duration("PREHEAT_ATTRIBUTION_INTERVAL_S", 300)
-	// How long after a successful preheat pull its repo still counts as
-	// "preheated" for PreheatMonitor's sample.
 	preheatAttributionRetention := config.Duration("PREHEAT_ATTRIBUTION_RETENTION_S", 360)
-	// Empty (the default) disables Spegel-presence detection entirely —
-	// no extra cost paid unless set. When non-empty, every preheat pull
-	// does ONE extra ListRunningImages() call (not a periodic poll: pulls
-	// are already a low-frequency event, bounded by RANK_TOP_N per push,
-	// so this stays cheap even on the ctr backend) to check whether a
-	// container whose image contains this substring is running on this
-	// node, and labels angryduck_worker_pull_duration_seconds with the
-	// result — answering "was this pull's timing measured with or
-	// without Spegel in place," using only the local container runtime,
-	// no Kubernetes API access.
-	spegelImageSubstring := config.String("SPEGEL_IMAGE_SUBSTRING", "")
-	// How often to clear angryduck_worker_pull_duration_seconds so a
-	// pull's duration is only visible for roughly one scrape instead of
-	// lingering as a stale "last known value" until the next pull. Match
-	// this to your actual Prometheus scrape_interval — Angry Duck has no
-	// way to observe that value itself. 0 disables resetting (the gauge
-	// then holds its last value indefinitely, the old behavior).
-	pullDurationResetInterval := config.Duration("PULL_DURATION_RESET_INTERVAL_S", 15)
-	// crictl is the default: unlike ctr, it lists every running
-	// container's image in one call instead of one subprocess per
-	// container — see the comment on NewRuntime for why this matters.
+	// crictl lists every running container's image in one call; ctr
+	// needs one subprocess per container.
 	runtimeKind := config.String("CONTAINER_RUNTIME", "crictl")
-	// Only consulted by the crictl backend. Defaults to the socket every
-	// deploy manifest already mounts, so this normally doesn't need to be
-	// set explicitly.
 	runtimeEndpoint := config.String("CONTAINER_RUNTIME_ENDPOINT", "unix:///run/containerd/containerd.sock")
-
-	// The worker pulls images by shelling out directly to the container
-	// runtime CLI, bypassing kubelet's CRI plumbing entirely — so
-	// kubelet's own imagePullSecrets never apply here. Point this at a
-	// mounted dockerconfigjson secret (the same format imagePullSecrets
-	// use) to give preheat pulls credentials for private registries. Not
-	// setting this is fine for public images; private ones will fail with
-	// a 401/403 until it's configured.
 	credsPath := config.String("REGISTRY_CREDENTIALS_PATH", "")
 	creds, err := registryauth.Load(credsPath)
 	if err != nil {
@@ -132,23 +77,18 @@ func main() {
 	if credsPath != "" {
 		log.Printf("angryduck-worker: loaded credentials for %d registr(y/ies) from %s", creds.Count(), credsPath)
 	}
-
-	// Where the node's filesystem is visible from inside this container.
-	// /proc/1/root is the node's real root (with hostPID: true), live
-	// mounts included, and needs no hostPath volume. Set to "/" for local
-	// runs outside Kubernetes.
+	// The node's filesystem as seen from here: /proc/1/root with hostPID.
 	hostRoot := config.String("HOST_ROOT", "/proc/1/root")
+	stateDir := config.String("RESCUE_STATE_DIR", "/var/lib/angryduck")
+	namespace := config.String("RESCUE_CONTAINERD_NAMESPACE", "k8s.io")
 
-	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s runtime=%s runtime_endpoint=%s host_root=%s metrics_label_registry=%v preheat_attribution_interval=%s preheat_attribution_retention=%s spegel_image_substring=%q pull_duration_reset_interval=%s",
-		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, runtimeKind, runtimeEndpoint, hostRoot, labelRegistry, preheatAttributionInterval, preheatAttributionRetention, spegelImageSubstring, pullDurationResetInterval)
+	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s runtime=%s runtime_endpoint=%s host_root=%s",
+		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, runtimeKind, runtimeEndpoint, hostRoot)
 
 	hx, err := worker.NewHostExec(hostRoot)
 	if err != nil {
 		log.Fatalf("angryduck-worker[%s]: %v", nodeID, err)
 	}
-	// Fail fast: a worker that can't find its runtime CLI on the node can
-	// neither pull nor list images, and a crash loop is louder than a log
-	// line.
 	bin := worker.RuntimeBinary(runtimeKind)
 	binPath, err := hx.Resolve(bin)
 	if err != nil {
@@ -158,32 +98,122 @@ func main() {
 
 	rt := worker.NewRuntime(runtimeKind, creds, runtimeEndpoint, hx)
 	inv := worker.NewInventory(rt)
-	puller := worker.NewPuller(rt, nodeID, labelRegistry, spegelImageSubstring, pullDurationResetInterval)
+	puller := worker.NewPuller(rt, nodeID, labelRegistry)
 	reporter := worker.NewReporter(nodeID, selfAddress, metricsURL, controllerURL, reportInterval, inv)
 	puller.OnSuccess(reporter.Kick)
+
+	// One containerd store shared by everything below, so its short
+	// listing cache is shared too.
+	var store *worker.CtrStore
+	if strings.EqualFold(runtimeKind, "docker") {
+		log.Printf("angryduck-worker[%s]: CONTAINER_RUNTIME=docker: layer inventory, rescue, mirror and image cleanup need containerd and are off", nodeID)
+	} else if _, err := hx.Resolve("ctr"); err != nil {
+		log.Printf("angryduck-worker[%s]: no ctr on the node, so layer inventory, rescue, mirror and image cleanup are off: %v", nodeID, err)
+	} else {
+		store = worker.NewCtrStore(hx, namespace, runtimeEndpoint)
+		if dir := store.UseBlobDir(config.String("CONTAINERD_ROOT", "")); dir != "" {
+			log.Printf("angryduck-worker[%s]: reading blobs directly from %s", nodeID, dir)
+		} else {
+			log.Printf("angryduck-worker[%s]: containerd's content store not found (set CONTAINERD_ROOT if it isn't under /var/lib/containerd): serving blobs through ctr", nodeID)
+		}
+	}
+	token, tokenErr := sharedtoken.Load(config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token"))
+	if tokenErr != nil {
+		log.Printf("angryduck-worker[%s]: WARNING: no usable token (%v): rescue, propagation and the mirror's peer lookups are off", nodeID, tokenErr)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if store != nil && config.Bool("LAYER_INVENTORY_ENABLED", true) {
+		interval := config.Duration("LAYER_SCAN_INTERVAL_S", 60)
+		log.Printf("angryduck-worker[%s]: layer inventory enabled: scan_interval=%s", nodeID, interval)
+		reporter.SetLayerTracker(worker.NewLayerTracker(store, nodeID, interval))
+	}
 	go reporter.Run(ctx)
-	go puller.Run(ctx)
 	if preheatAttributionInterval > 0 {
-		preheatMonitor := worker.NewPreheatMonitor(rt, puller, preheatAttributionInterval, preheatAttributionRetention, nodeID)
-		go preheatMonitor.Run(ctx)
-	} else {
-		log.Printf("angryduck-worker[%s]: preheat-attribution monitor disabled (PREHEAT_ATTRIBUTION_INTERVAL_S=0)", nodeID)
+		go worker.NewPreheatMonitor(rt, puller, preheatAttributionInterval, preheatAttributionRetention, nodeID).Run(ctx)
 	}
 
-	rescue := newRescue(ctx, nodeID, runtimeKind, runtimeEndpoint, hostRoot, hx)
-	if rescue != nil {
+	var rescue *worker.Rescue
+	if store != nil && tokenErr == nil && config.Bool("RESCUE_ENABLED", true) {
+		rescue = newRescue(ctx, nodeID, hostRoot, stateDir, store, token)
 		rescue.OnSuccess(reporter.Kick)
 	}
+	var extra []func(*http.ServeMux)
 
-	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: worker.NewServer(puller, rescue),
+	if store != nil && config.Bool("GC_ENABLED", true) {
+		gc := worker.NewImageGC(store,
+			rt.ListRunningImages,
+			func() (float64, error) {
+				r, err := worker.FetchRootUtilization(metricsURL, 5*time.Second)
+				return r.Utilization, err
+			},
+			func(names []string) bool {
+				for _, n := range names {
+					if puller.Pulling(n) {
+						return true
+					}
+				}
+				return rescue != nil && rescue.Busy(names)
+			},
+			nodeID,
+			worker.GCConfig{
+				Interval:          config.Duration("GC_INTERVAL_S", 60),
+				High:              config.Float("GC_HIGH_UTILIZATION", 0.70),
+				Low:               config.Float("GC_LOW_UTILIZATION", 0.60),
+				UnusedFor:         config.Duration("GC_UNUSED_FOR_S", 21600),
+				RollbackKeep:      config.Int("GC_ROLLBACK_KEEP", 3),
+				Batch:             config.Int("GC_BATCH", 5),
+				Settle:            config.Duration("GC_SETTLE_S", 10),
+				ProtectSubstrings: config.StringSlice("GC_PROTECT_SUBSTRINGS", []string{"pause"}),
+				StatePath:         filepath.Join(hostRoot, stateDir, "image-usage.json"),
+			})
+		gc.OnDone(reporter.Kick)
+		go gc.Run(ctx)
+	} else if store != nil {
+		log.Printf("angryduck-worker[%s]: image cleanup disabled (GC_ENABLED=false): kubelet's own image GC is all there is", nodeID)
 	}
 
+	if store != nil {
+		mirrorOn := config.Bool("MIRROR_ENABLED", false) && tokenErr == nil
+		hosts := &worker.HostsConfig{
+			HostRoot:  hostRoot,
+			ConfigDir: config.String("MIRROR_CONTAINERD_CONFIG_DIR", "/etc/containerd/certs.d"),
+			Mirror:    config.String("MIRROR_LISTEN_ADDR", "127.0.0.1:18082"),
+			Extra:     config.StringSlice("MIRROR_REGISTRIES", nil),
+			NodeID:    nodeID,
+		}
+		if mirrorOn {
+			m := worker.NewMirror(store, nodeID, token, controllerURL)
+			extra = append(extra, m.RegisterPeer)
+			go func() {
+				srv := &http.Server{Addr: hosts.Mirror, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second}
+				log.Printf("angryduck-worker[%s]: mirror listening on %s", nodeID, hosts.Mirror)
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("angryduck-worker[%s]: WARNING: mirror stopped: %v", nodeID, err)
+				}
+			}()
+		}
+		// Keep containerd's hosts.toml in step with the registries this
+		// node pulls from (or remove ours when the mirror is off).
+		go func() {
+			for {
+				refs, _ := inv.Get(5 * time.Minute)
+				hosts.Sync(refs, mirrorOn)
+				if !mirrorOn {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Minute):
+				}
+			}
+		}()
+	}
+
+	httpServer := &http.Server{Addr: listenAddr, Handler: worker.NewServer(puller, rescue, extra...)}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("angryduck-worker[%s]: http server failed: %v", nodeID, err)
@@ -194,55 +224,23 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	log.Printf("angryduck-worker[%s]: shutting down", nodeID)
-
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	cancel()
 }
 
-// newRescue sets up ImagePullBackOff rescue, or returns nil (feature off)
-// with a log line saying why. It fails closed: without a valid token the
-// blob endpoints are never mounted, because they would hand image content
-// to anyone on the node network.
-func newRescue(ctx context.Context, nodeID, runtimeKind, runtimeEndpoint, hostRoot string, hx *worker.HostExec) *worker.Rescue {
-	if !config.Bool("RESCUE_ENABLED", true) {
-		log.Printf("angryduck-worker[%s]: rescue disabled (RESCUE_ENABLED=false)", nodeID)
-		return nil
-	}
-	if strings.EqualFold(runtimeKind, "docker") {
-		log.Printf("angryduck-worker[%s]: rescue disabled: it needs containerd, CONTAINER_RUNTIME=docker", nodeID)
-		return nil
-	}
-	if _, err := hx.Resolve("ctr"); err != nil {
-		log.Printf("angryduck-worker[%s]: rescue disabled: %v", nodeID, err)
-		return nil
-	}
-	tokenPath := config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token")
-	token, err := sharedtoken.Load(tokenPath)
-	if err != nil {
-		log.Printf("angryduck-worker[%s]: WARNING: rescue disabled, no usable token: %v", nodeID, err)
-		return nil
-	}
-	// The worker binary is built for the node's architecture, so its own
-	// GOARCH is the platform to import. Override only for odd cases (arm
-	// variants).
+// newRescue sets up the peer-to-peer image transfer used by rescue and
+// propagation. It is mounted only with a valid token: its endpoints hand
+// out image content.
+func newRescue(ctx context.Context, nodeID, hostRoot, stateDir string, store *worker.CtrStore, token string) *worker.Rescue {
+	// The worker binary is built for the node's architecture.
 	platform := config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH)
-	namespace := config.String("RESCUE_CONTAINERD_NAMESPACE", "k8s.io")
 	maxConcurrent := config.Int("RESCUE_NODE_MAX_CONCURRENT", 2)
-	// How long snapshots shipped by a failed attempt stay pinned, so a
-	// retry within that window doesn't ship them again.
 	pinTTL := config.Duration("RESCUE_PIN_TTL_S", 3600)
-	// Node directory for the small pin list, so pins survive a restart.
-	stateDir := config.String("RESCUE_STATE_DIR", "/var/lib/angryduck")
 	pinFile := filepath.Join(hostRoot, stateDir, "rescue-pins.json")
-	log.Printf("angryduck-worker[%s]: rescue enabled: platform=%s namespace=%s max_concurrent=%d pin_ttl=%s pin_file=%s",
-		nodeID, platform, namespace, maxConcurrent, pinTTL, pinFile)
-
-	store := worker.NewCtrStore(hx, namespace, runtimeEndpoint)
+	log.Printf("angryduck-worker[%s]: rescue enabled: platform=%s max_concurrent=%d pin_ttl=%s pin_file=%s", nodeID, platform, maxConcurrent, pinTTL, pinFile)
 	pins := worker.NewPins(store, nodeID, pinTTL, pinFile)
-	// Before serving anything: whatever a previous worker left mid-rescue
-	// is garbage now.
 	cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	worker.CleanupLeftovers(cleanupCtx, store, pins, nodeID)
 	cancel()
@@ -250,8 +248,7 @@ func newRescue(ctx context.Context, nodeID, runtimeKind, runtimeEndpoint, hostRo
 	return worker.NewRescue(store, pins, token, nodeID, platform, maxConcurrent)
 }
 
-// listenPort extracts the port from a listen address like ":18081" or
-// "0.0.0.0:18081". Falls back to "18081" if it can't parse one.
+// listenPort extracts the port from a listen address like ":18081".
 func listenPort(listenAddr string) string {
 	idx := strings.LastIndex(listenAddr, ":")
 	if idx < 0 || idx == len(listenAddr)-1 {

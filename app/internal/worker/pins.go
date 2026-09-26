@@ -22,7 +22,7 @@ var (
 	)
 	rescueCleanupsTotal = metrics.NewCounterVec(
 		"angryduck_worker_rescue_cleanups_total",
-		"Leftovers removed: \"temp_snapshot\" (from an interrupted rescue) or \"expired_pin\".",
+		"Leftovers removed: \"temp_snapshot\" or \"temp_image\" (from an interrupted rescue) or \"expired_pin\".",
 		"node", "kind",
 	)
 )
@@ -185,6 +185,28 @@ func CleanupLeftovers(ctx context.Context, store blobship.Store, pins *Pins, nod
 				}
 				logging.Infof("angryduck-worker[%s]: startup cleanup: removed leftover snapshot %s", nodeID, key)
 				rescueCleanupsTotal.Inc(nodeID, "temp_snapshot")
+			}
+		}
+	}
+	if lister, ok := store.(interface {
+		ImageNames(ctx context.Context) ([]string, error)
+	}); ok {
+		names, err := lister.ImageNames(ctx)
+		if err != nil {
+			logging.Warnf("angryduck-worker[%s]: startup cleanup: listing images: %v", nodeID, err)
+		}
+		var temps []string
+		for _, n := range names {
+			if strings.HasPrefix(n, baseImagePrefix) {
+				temps = append(temps, n)
+			}
+		}
+		if len(temps) > 0 {
+			if err := store.DeleteImages(ctx, temps...); err != nil {
+				logging.Warnf("angryduck-worker[%s]: startup cleanup: removing base images %v: %v", nodeID, temps, err)
+			} else {
+				logging.Infof("angryduck-worker[%s]: startup cleanup: removed %d leftover base image(s)", nodeID, len(temps))
+				rescueCleanupsTotal.Add(int64(len(temps)), nodeID, "temp_image")
 			}
 		}
 	}

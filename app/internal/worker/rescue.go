@@ -5,10 +5,13 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -191,16 +194,35 @@ func (rs *Rescue) receive(ctx context.Context, order model.RescueOrder) model.Re
 		return model.RescueResult{Error: "no sources in order"}
 	}
 
+	// Plans are fetched lazily: the first source alone usually covers
+	// everything with blobs, and each plan costs the source a few ctr
+	// calls.
+	plans := make([]blobship.Plan, len(order.Sources))
+	planErr := make([]error, len(order.Sources))
+	fetched := make([]bool, len(order.Sources))
+	getPlan := func(i int) error {
+		if !fetched[i] {
+			fetched[i] = true
+			plans[i], planErr[i] = rs.fetchPlan(ctx, order.Image, order.Sources[i])
+		}
+		return planErr[i]
+	}
+
 	var errs []string
-	for _, src := range order.Sources {
-		res, err := rs.receiveFrom(ctx, order.Image, src)
+	for primary, src := range order.Sources {
+		if err := getPlan(primary); err != nil {
+			logging.Warnf("angryduck-worker[%s]: rescue image=%s: plan from node=%s failed: %v", rs.nodeID, order.Image, src.NodeID, err)
+			errs = append(errs, src.NodeID+": plan: "+err.Error())
+			continue
+		}
+		res, err := rs.receiveFrom(ctx, order, primary, plans, getPlan)
 		if err != nil {
-			logging.Warnf("angryduck-worker[%s]: rescue image=%s from node=%s failed: %v", rs.nodeID, order.Image, src.NodeID, err)
+			logging.Warnf("angryduck-worker[%s]: rescue image=%s with node=%s as primary source failed: %v", rs.nodeID, order.Image, src.NodeID, err)
 			errs = append(errs, src.NodeID+": "+err.Error())
 			continue
 		}
-		logging.Infof("angryduck-worker[%s]: %s: got image=%s from node=%s: %d blob(s), %d snapshot(s), %d bytes in %s",
-			rs.nodeID, order.Reason, order.Image, src.NodeID, res.Blobs, res.Snapshots, res.Bytes, time.Since(start).Round(time.Millisecond))
+		logging.Infof("angryduck-worker[%s]: %s: got image=%s from %s: %d blob(s), %d snapshot(s), %d bytes in %s",
+			rs.nodeID, order.Reason, order.Image, res.Source, res.Blobs, res.Snapshots, res.Bytes, time.Since(start).Round(time.Millisecond))
 		rescuesTotal.Inc(rs.nodeID, order.Reason, "success")
 		if rs.onSuccess != nil {
 			rs.onSuccess()
@@ -211,11 +233,11 @@ func (rs *Rescue) receive(ctx context.Context, order model.RescueOrder) model.Re
 	return model.RescueResult{Error: strings.Join(errs, "; ")}
 }
 
-func (rs *Rescue) receiveFrom(ctx context.Context, image string, src model.RescueSource) (model.RescueResult, error) {
-	plan, err := rs.fetchPlan(ctx, image, src)
-	if err != nil {
-		return model.RescueResult{}, fmt.Errorf("plan: %w", err)
-	}
+// receiveFrom builds the image with order.Sources[primary] naming it, and
+// the other sources as extra places to get blobs from. Snapshots are the
+// last resort: only for a layer no source has the blob of.
+func (rs *Rescue) receiveFrom(ctx context.Context, order model.RescueOrder, primary int, plans []blobship.Plan, getPlan func(int) error) (model.RescueResult, error) {
+	plan := plans[primary]
 	haveBlobs, err := rs.store.Digests(ctx)
 	if err != nil {
 		return model.RescueResult{}, fmt.Errorf("listing local content: %w", err)
@@ -226,56 +248,82 @@ func (rs *Rescue) receiveFrom(ctx context.Context, image string, src model.Rescu
 			return model.RescueResult{}, fmt.Errorf("listing local snapshots: %w", err)
 		}
 	}
-	dec, err := blobship.Decide(plan, haveBlobs, haveSnaps)
+	asm, err := blobship.Assemble(plans, primary, haveBlobs, haveSnaps)
+	if (err != nil || asm.SnapshotCount() > 0) && len(order.Sources) > 1 {
+		// Ask the other sources before settling for snapshots (or for
+		// failing): one of them may hold the blobs.
+		for i := range order.Sources {
+			if i != primary {
+				_ = getPlan(i)
+			}
+		}
+		asm, err = blobship.Assemble(plans, primary, haveBlobs, haveSnaps)
+	}
 	if err != nil {
 		return model.RescueResult{}, err
 	}
-	logging.Infof("angryduck-worker[%s]: rescue image=%s from node=%s: %d layer(s) already here, %d to ship as snapshot, %d blob(s) to ship (%d bytes)",
-		rs.nodeID, image, src.NodeID, dec.Present, len(dec.Snapshots), len(dec.Blobs), sizeOf(dec.Blobs))
+	logging.Infof("angryduck-worker[%s]: rescue image=%s primary=%s: %d layer(s) already here, %d by blob, %d by snapshot (last resort), %d base import(s), %d blob(s) to ship",
+		rs.nodeID, order.Image, order.Sources[primary].NodeID, asm.Present, asm.BlobLayers, asm.SnapshotLayers, len(asm.Steps)-asm.SnapshotCount(), asm.BlobCount())
 
+	used := map[int]bool{primary: true}
+	var received int64
+	var temps []string
+	defer func() {
+		if len(temps) > 0 {
+			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := rs.store.DeleteImages(cctx, temps...); err != nil {
+				logging.Warnf("angryduck-worker[%s]: removing temporary base image(s) %v: %v", rs.nodeID, temps, err)
+			}
+			cancel()
+		}
+	}()
 	// Every shipped snapshot stays pinned until the import makes the
 	// image reference it. If this attempt fails later, the pins are kept
 	// (until RESCUE_PIN_TTL_S) so the retry skips what already arrived.
-	var received int64
-	for _, l := range dec.Snapshots {
-		n, err := rs.receiveSnapshot(ctx, plan, l, src)
+	for _, st := range asm.Steps {
+		if st.Base {
+			top, inline, err := blobship.BaseImage(plan, st.UpTo, rs.platform)
+			if err != nil {
+				return model.RescueResult{}, err
+			}
+			name := baseImagePrefix + randomSuffix() + ":layers-0-" + strconv.Itoa(st.UpTo)
+			n, err := rs.importMerged(ctx, order.Image, top, name, inline, st.Blobs, order.Sources)
+			received += n
+			if err != nil {
+				rescueBytesTotal.Add(received, rs.nodeID, "received")
+				return model.RescueResult{}, fmt.Errorf("base import of layers 0-%d: %w", st.UpTo, err)
+			}
+			temps = append(temps, name)
+			for i := range st.Blobs {
+				used[i] = true
+			}
+			continue
+		}
+		n, err := rs.receiveSnapshot(ctx, plan, st.Layer, order.Sources[st.Source])
 		received += n
 		if err != nil {
 			rescueBytesTotal.Add(received, rs.nodeID, "received")
-			return model.RescueResult{}, fmt.Errorf("snapshot %s: %w", l.ChainID, err)
+			return model.RescueResult{}, fmt.Errorf("snapshot %s: %w", st.Layer.ChainID, err)
 		}
-		rs.pins.Add(l.ChainID)
+		rs.pins.Add(st.Layer.ChainID)
+		used[st.Source] = true
 	}
 
 	// The import runs even with nothing to ship: index.json alone is what
 	// registers the image name.
-	digests := make([]string, len(dec.Blobs))
-	for i, b := range dec.Blobs {
-		digests[i] = b.Digest
-	}
-	body, err := json.Marshal(model.BlobExportRequest{Image: image, Platform: rs.platform, Digests: digests})
-	if err != nil {
-		return model.RescueResult{}, err
-	}
-	resp, err := rs.post(ctx, src.Address, "/blobs/export", body)
-	if err != nil {
-		return model.RescueResult{}, fmt.Errorf("export: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return model.RescueResult{}, fmt.Errorf("export: %s", readError(resp))
-	}
-	counted := &countReader{r: resp.Body}
-	importErr := rs.store.Import(ctx, counted, rs.platform)
-	received += counted.n
+	n, importErr := rs.importMerged(ctx, order.Image, plan.Top, order.Image, nil, asm.Final, order.Sources)
+	received += n
 	rescueBytesTotal.Add(received, rs.nodeID, "received")
 	if importErr != nil {
 		return model.RescueResult{}, fmt.Errorf("import: %w", importErr)
 	}
+	for i := range asm.Final {
+		used[i] = true
+	}
 
 	// Trust, but check: the name must now point at what the source has.
-	if _, digest, err := rs.store.Resolve(ctx, image); err != nil || digest != plan.Top.Digest {
-		return model.RescueResult{}, fmt.Errorf("after import, %s resolves to %q (err %v), want %s", image, digest, err, plan.Top.Digest)
+	if _, digest, err := rs.store.Resolve(ctx, order.Image); err != nil || digest != plan.Top.Digest {
+		return model.RescueResult{}, fmt.Errorf("after import, %s resolves to %q (err %v), want %s", order.Image, digest, err, plan.Top.Digest)
 	}
 	// The image references its snapshots now; drop our pins, including
 	// any left by earlier failed attempts.
@@ -285,10 +333,105 @@ func (rs *Rescue) receiveFrom(ctx context.Context, image string, src model.Rescu
 	}
 	rs.pins.Release(ctx, chains)
 
-	rescueLayersTotal.Add(int64(dec.Present), rs.nodeID, "present")
-	rescueLayersTotal.Add(int64(len(dec.Snapshots)), rs.nodeID, "snapshot")
-	rescueLayersTotal.Add(int64(len(plan.Layers)-dec.Present-len(dec.Snapshots)), rs.nodeID, "blob")
-	return model.RescueResult{OK: true, Source: src.NodeID, Blobs: len(dec.Blobs), Snapshots: len(dec.Snapshots), Bytes: received}, nil
+	rescueLayersTotal.Add(int64(asm.Present), rs.nodeID, "present")
+	rescueLayersTotal.Add(int64(asm.SnapshotLayers), rs.nodeID, "snapshot")
+	rescueLayersTotal.Add(int64(asm.BlobLayers), rs.nodeID, "blob")
+	var names []string
+	for i, src := range order.Sources {
+		if used[i] {
+			names = append(names, src.NodeID)
+		}
+	}
+	return model.RescueResult{OK: true, Source: strings.Join(names, ","), Blobs: asm.BlobCount(), Snapshots: asm.SnapshotCount(), Bytes: received}, nil
+}
+
+// baseImagePrefix names the temporary images a base step imports. They
+// are removed right after the rescue, and at startup if a crash left any.
+const baseImagePrefix = "angryduck.local/rescue-base/"
+
+// importMerged pipes one archive into `ctr images import`: top named as
+// name, the inline blobs, then the blobs each source exports (streamed
+// straight through, never buffered). image is the real image the sources
+// export from; their export refuses digests outside its plan. It returns
+// the bytes read off the wire.
+func (rs *Rescue) importMerged(ctx context.Context, image string, top blobship.Descriptor, name string, inline map[string][]byte, bySource map[int][]blobship.Descriptor, sources []model.RescueSource) (int64, error) {
+	pr, pw := io.Pipe()
+	var wire int64
+	writeErr := make(chan error, 1)
+	go func() {
+		err := func() error {
+			aw, err := blobship.NewArchiveWriter(pw, top, name)
+			if err != nil {
+				return err
+			}
+			for _, d := range sortedKeys(inline) {
+				if err := aw.AddBytes(d, inline[d]); err != nil {
+					return err
+				}
+			}
+			for _, i := range sortedInts(bySource) {
+				want := bySource[i]
+				if len(want) == 0 {
+					continue
+				}
+				digests := make([]string, len(want))
+				for j, b := range want {
+					digests[j] = b.Digest
+				}
+				body, err := json.Marshal(model.BlobExportRequest{Image: image, Platform: rs.platform, Digests: digests})
+				if err != nil {
+					return err
+				}
+				resp, err := rs.post(ctx, sources[i].Address, "/blobs/export", body)
+				if err != nil {
+					return fmt.Errorf("export from %s: %w", sources[i].NodeID, err)
+				}
+				if resp.StatusCode != http.StatusOK {
+					msg := readError(resp)
+					resp.Body.Close()
+					return fmt.Errorf("export from %s: %s", sources[i].NodeID, msg)
+				}
+				counted := &countReader{r: resp.Body}
+				err = aw.CopyBlobsFrom(counted, want)
+				wire += counted.n
+				resp.Body.Close()
+				if err != nil {
+					return fmt.Errorf("export from %s: %w", sources[i].NodeID, err)
+				}
+			}
+			return aw.Close()
+		}()
+		pw.CloseWithError(err)
+		writeErr <- err
+	}()
+	importErr := rs.store.Import(ctx, pr, rs.platform)
+	pr.CloseWithError(errImportEnded)
+	werr := <-writeErr
+	if werr != nil && !errors.Is(werr, errImportEnded) {
+		return wire, werr // the root cause; the import failure follows from it
+	}
+	return wire, importErr
+}
+
+// errImportEnded stops an archive writer whose import already returned.
+var errImportEnded = errors.New("import ended before the archive did")
+
+func sortedKeys(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedInts(m map[int][]blobship.Descriptor) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // receiveSnapshot fetches one layer's snapshot directory from src and
@@ -535,4 +678,16 @@ func (c *countReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// Busy reports whether any of names is being received right now.
+func (rs *Rescue) Busy(names []string) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for _, n := range names {
+		if _, ok := rs.inflight[n]; ok {
+			return true
+		}
+	}
+	return false
 }

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -28,13 +29,12 @@ import (
 // after the colon) — meaning those markers never matched anything, ever.
 // Proper parsing is not a style preference; it was a real, confirmed,
 // reproducible production bug that deleted a worker's own running image,
-// back when this worker also garbage-collected images itself. Angry Duck
-// no longer deletes anything — that's kubelet's job (its own
-// imageGCHighThresholdPercent/imageGCLowThresholdPercent/
-// imageMaximumGCAge config) — but this worker still needs to know what's
-// running locally, so the same correct-parsing discipline still matters.
+// back when this worker also garbage-collected images. It does again (see
+// ImageGC), and never touches an image a running container uses, so the
+// same correct-parsing discipline matters as much as ever.
 type Runtime interface {
-	PullImage(image string) error
+	// PullImage pulls image; cancelling ctx kills the pull.
+	PullImage(ctx context.Context, image string) error
 	// LocalImages returns every local image reference (in any alias form
 	// the runtime reports — a tag, a digest-pinned form, a bare digest)
 	// present on this node. Used only for what the reporter sends the
@@ -66,7 +66,7 @@ type Runtime interface {
 // for containerd (`ctr`) list container IDs and then shell out to `ctr
 // containers info <id>` once PER container — on a busy node this can mean
 // well over a hundred subprocess spawns on every call (PreheatMonitor's
-// tick, or Puller's per-pull Spegel-presence check), which is enough to
+// tick, or the image cleanup's sample), which is enough to
 // push a 200m-limit worker pod's CPU usage 2-3x over its own limit in
 // production. crictl exposes the same information via one `crictl ps -o
 // json` call for the whole node.
@@ -120,13 +120,13 @@ type containerdRuntime struct {
 	hx    *HostExec
 }
 
-func (r containerdRuntime) PullImage(image string) error {
+func (r containerdRuntime) PullImage(ctx context.Context, image string) error {
 	args := []string{"-n", "k8s.io", "images", "pull"}
 	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
 		args = append(args, "--user", userpass)
 	}
 	args = append(args, image)
-	_, err := r.hx.Run("ctr", args...)
+	_, err := r.hx.RunContext(ctx, "ctr", args...)
 	return err
 }
 
@@ -135,7 +135,7 @@ func (r containerdRuntime) PullImage(image string) error {
 // rows, so there's no separate cheaper call to prefer here) and extracts
 // just the REF column.
 func (r containerdRuntime) LocalImages() ([]string, error) {
-	out, err := r.hx.Run("ctr", "-n", "k8s.io", "images", "list")
+	out, err := r.hx.List("ctr", "-n", "k8s.io", "images", "list")
 	if err != nil {
 		return nil, err
 	}
@@ -184,14 +184,14 @@ type ctrContainerInfo struct {
 }
 
 func (r containerdRuntime) ListRunningImages() ([]string, error) {
-	out, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "list", "-q")
+	out, err := r.hx.List("ctr", "-n", "k8s.io", "containers", "list", "-q")
 	if err != nil {
 		return nil, err
 	}
 	ids := splitNonEmptyLines(out)
 	var images []string
 	for _, id := range ids {
-		info, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "info", id)
+		info, err := r.hx.List("ctr", "-n", "k8s.io", "containers", "info", id)
 		if err != nil {
 			continue
 		}
@@ -214,14 +214,14 @@ func (r containerdRuntime) ListRunningImages() ([]string, error) {
 // applies here — this exists mainly for interface symmetry with the
 // crictl backend, where it does matter.
 func (r containerdRuntime) RunningImageRepos() (map[string]int, error) {
-	out, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "list", "-q")
+	out, err := r.hx.List("ctr", "-n", "k8s.io", "containers", "list", "-q")
 	if err != nil {
 		return nil, err
 	}
 	ids := splitNonEmptyLines(out)
 	counts := make(map[string]int)
 	for _, id := range ids {
-		info, err := r.hx.Run("ctr", "-n", "k8s.io", "containers", "info", id)
+		info, err := r.hx.List("ctr", "-n", "k8s.io", "containers", "info", id)
 		if err != nil {
 			continue
 		}
@@ -259,13 +259,13 @@ func (r crictlRuntime) withEndpoint(args ...string) []string {
 	return append([]string{"-r", r.endpoint}, args...)
 }
 
-func (r crictlRuntime) PullImage(image string) error {
+func (r crictlRuntime) PullImage(ctx context.Context, image string) error {
 	args := []string{"pull"}
 	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
 		args = append(args, "--creds", userpass)
 	}
 	args = append(args, image)
-	_, err := r.hx.Run("crictl", r.withEndpoint(args...)...)
+	_, err := r.hx.RunContext(ctx, "crictl", r.withEndpoint(args...)...)
 	return err
 }
 
@@ -284,7 +284,7 @@ type crictlImagesOutput struct {
 // skips the digest forms; the rescue source lookup needs them, for pods
 // that pin an image by digest.
 func (r crictlRuntime) LocalImages() ([]string, error) {
-	out, err := r.hx.Run("crictl", r.withEndpoint("images", "-o", "json")...)
+	out, err := r.hx.List("crictl", r.withEndpoint("images", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +306,7 @@ func (r crictlRuntime) LocalImages() ([]string, error) {
 // container was created with (usually tag-form), while containers[].imageRef
 // is that image's resolved digest. ListRunningImages returns both forms
 // per container (see below) since callers only ever do a loose substring
-// check against the result (Puller.spegelPresence), not an exact-match
+// check against the result, not an exact-match
 // lookup that would care which alias form it's comparing against.
 type crictlPsOutput struct {
 	Containers []struct {
@@ -318,7 +318,7 @@ type crictlPsOutput struct {
 }
 
 func (r crictlRuntime) ListRunningImages() ([]string, error) {
-	out, err := r.hx.Run("crictl", r.withEndpoint("ps", "-o", "json")...)
+	out, err := r.hx.List("crictl", r.withEndpoint("ps", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -373,12 +373,12 @@ func countRunningReposByContainer(parsed crictlPsOutput) map[string]int {
 // ListRunningImages does, but — unlike that method — picks exactly ONE
 // alias per container before computing its repo (see
 // countRunningReposByContainer). ListRunningImages deliberately returns
-// BOTH aliases per container (Puller's Spegel-presence check only needs a
+// BOTH aliases per container (the image cleanup only needs a
 // substring match, where the duplication is harmless); counting
 // containers from that same list would double almost every count here,
 // since real containers almost always have both fields populated.
 func (r crictlRuntime) RunningImageRepos() (map[string]int, error) {
-	out, err := r.hx.Run("crictl", r.withEndpoint("ps", "-o", "json")...)
+	out, err := r.hx.List("crictl", r.withEndpoint("ps", "-o", "json")...)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +403,7 @@ type dockerRuntime struct {
 // for the lifetime of the daemon, not just this one call. The password is
 // piped via stdin rather than passed as a CLI argument, since arguments
 // are visible to anything that can list processes on the node.
-func (r dockerRuntime) PullImage(image string) error {
+func (r dockerRuntime) PullImage(ctx context.Context, image string) error {
 	if userpass, ok := r.creds.CredentialsFor(imageref.Host(image)); ok {
 		user, pass, found := strings.Cut(userpass, ":")
 		if found {
@@ -412,12 +412,12 @@ func (r dockerRuntime) PullImage(image string) error {
 			}
 		}
 	}
-	_, err := r.hx.Run("docker", "pull", image)
+	_, err := r.hx.RunContext(ctx, "docker", "pull", image)
 	return err
 }
 
 func (r dockerRuntime) ListRunningImages() ([]string, error) {
-	out, err := r.hx.Run("docker", "ps", "--format", "{{.Image}}")
+	out, err := r.hx.List("docker", "ps", "--format", "{{.Image}}")
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +429,7 @@ func (r dockerRuntime) ListRunningImages() ([]string, error) {
 // docker ps already reports exactly one line per container, so there's no
 // alias-duplication bug to work around here.
 func (r dockerRuntime) RunningImageRepos() (map[string]int, error) {
-	out, err := r.hx.Run("docker", "ps", "--format", "{{.Image}}")
+	out, err := r.hx.List("docker", "ps", "--format", "{{.Image}}")
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +445,7 @@ func (r dockerRuntime) RunningImageRepos() (map[string]int, error) {
 // LocalImages runs `docker images` asking only for the tag-form ref — the
 // reporter's repo-locality signal needs nothing else.
 func (r dockerRuntime) LocalImages() ([]string, error) {
-	out, err := r.hx.Run("docker", "images", "--format", "{{.Repository}}:{{.Tag}}")
+	out, err := r.hx.List("docker", "images", "--format", "{{.Repository}}:{{.Tag}}")
 	if err != nil {
 		return nil, err
 	}

@@ -38,6 +38,15 @@ const (
 	cgroupV1LimitPath = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 )
 
+// defaultGCPercent replaces Go's GOGC=100 unless GOGC is set. Both
+// binaries keep a small live heap that allocates in bursts (a controller
+// restart makes every worker send its full layer inventory at once; a
+// transfer plan on a worker), and at 100 the heap is allowed to grow to
+// twice the live set after each burst and stay there until the next GC,
+// which in their quiet steady state can be minutes away. 50 keeps that
+// high-water mark at 1.5x for a few extra GC cycles during bursts.
+const defaultGCPercent = 50
+
 // Apply reads this container's OWN cgroup memory limit — the one this
 // process's PID 1 actually runs in, unrelated to HOST_ROOT/the host-root
 // chroot the worker uses for crictl/ctr, which is about the host's
@@ -50,6 +59,9 @@ const (
 // and leaves Go's default GC behavior untouched rather than guessing at a
 // number. component is just for the log line ("worker" or "controller").
 func Apply(component string) {
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(defaultGCPercent)
+	}
 	limit, source, ok := readLimit()
 	if !ok {
 		logging.Infof("angryduck-%s: no cgroup memory limit found — leaving Go's default GC behavior untouched", component)

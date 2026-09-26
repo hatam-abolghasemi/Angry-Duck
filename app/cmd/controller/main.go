@@ -1,8 +1,8 @@
 // Command angryduck-controller runs the Angry Duck control plane: it
-// receives the post-`docker push` webhook, tracks worker disk-utilization
-// and image-inventory reports, and orders nodes to pre-pull the new image —
-// preferring nodes that already have some tag of the same repo locally,
-// then falling back to the least-utilized nodes.
+// receives the post-`docker push` webhook, tracks worker reports (disk,
+// images, layer inventory), picks as seeds the nodes that already hold the
+// most of the new image, spreads it from them to every node, rescues pods
+// stuck on pulls, and tells workers' mirrors which peer holds a blob.
 package main
 
 import (
@@ -19,6 +19,8 @@ import (
 	"angryduck/internal/kube"
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
+	"angryduck/internal/registryauth"
+	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
 )
 
@@ -34,7 +36,7 @@ func main() {
 	staleAfter := config.Duration("WORKER_STALE_AFTER_S", 30)
 	targetTTL := config.Duration("TARGET_TTL_S", 120)
 	rankInterval := config.Duration("RANK_INTERVAL_S", 10)
-	topN := config.Int("RANK_TOP_N", 2)
+	topN := config.Int("RANK_TOP_N", 5)
 	excludeNodeSubstrings := config.StringSlice("RANK_EXCLUDE_NODE_SUBSTRINGS", nil)
 	// Defaults to true: prefer pre-pulling onto a node that already has
 	// some tag of the target image's repo before falling back to
@@ -54,6 +56,22 @@ func main() {
 	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 	server := controller.NewServer(registry, ranker)
 
+	// Layer ranking reads each pushed image's manifest and config from its
+	// registry (a few KB), with the same pull secret the workers use.
+	platform := config.String("RANK_PLATFORM", "linux/amd64")
+	var resolver controller.LayerResolver
+	if config.Bool("RANK_BY_LAYERS", true) {
+		credsPath := config.String("REGISTRY_CREDENTIALS_PATH", "")
+		creds, err := registryauth.Load(credsPath)
+		if err != nil {
+			log.Printf("angryduck-controller: WARNING: registry credentials from %s unusable, resolving anonymously: %v", credsPath, err)
+			creds = registryauth.Empty()
+		}
+		resolver = registryclient.New(creds, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5), config.Duration("RANK_RESOLVE_CACHE_S", 600))
+		ranker.SetLayerResolver(resolver, platform, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5))
+		log.Printf("angryduck-controller: layer ranking on: platform=%s credentials for %d registr(y/ies)", platform, creds.Count())
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ranker.Run(ctx)
@@ -63,11 +81,23 @@ func main() {
 	if tokenErr != nil {
 		log.Printf("angryduck-controller: WARNING: no usable rescue token, so rescue and propagation are off: %v", tokenErr)
 	} else {
-		if rescuer := newRescuer(registry, token); rescuer != nil {
+		server.SetToken(token)
+		rescuer := newRescuer(registry, token)
+		if rescuer != nil {
+			if resolver != nil {
+				rescuer.SetLayerResolver(resolver, platform)
+			}
 			server.SetRescuer(rescuer)
 			go rescuer.Run(ctx)
 		}
-		if propagator := newPropagator(registry, token, excludeNodeSubstrings); propagator != nil {
+		if propagator := newPropagator(registry, token, excludeNodeSubstrings, platform); propagator != nil {
+			propagator.SetSeeds(ranker.Seeds)
+			if rescuer != nil {
+				propagator.SetWaiting(rescuer.Waiting)
+			}
+			if resolver != nil {
+				propagator.SetLayerResolver(resolver)
+			}
 			server.SetPropagator(propagator)
 			go propagator.Run(ctx)
 		}
@@ -122,16 +152,17 @@ func newRescuer(registry *controller.Registry, token string) *controller.Rescuer
 
 // newPropagator sets up spreading each pushed image to every eligible node
 // from peers, or returns nil when it's turned off.
-func newPropagator(registry *controller.Registry, token string, rankExclude []string) *controller.Propagator {
+func newPropagator(registry *controller.Registry, token string, rankExclude []string, platform string) *controller.Propagator {
 	if !config.Bool("PROPAGATE_ENABLED", true) {
 		log.Println("angryduck-controller: propagation disabled (PROPAGATE_ENABLED=false)")
 		return nil
 	}
 	cfg := controller.PropagatorConfig{
-		Interval:       config.Duration("PROPAGATE_INTERVAL_S", 10),
-		Window:         config.Duration("PROPAGATE_WINDOW_S", 3600),
-		MaxConcurrent:  config.Int("PROPAGATE_MAX_CONCURRENT", 4),
-		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 2),
+		Interval: config.Duration("PROPAGATE_INTERVAL_S", 10),
+		// 0: until every eligible node has it, or a newer tag replaces it.
+		Window:         config.Duration("PROPAGATE_WINDOW_S", 0),
+		MaxConcurrent:  config.Int("PROPAGATE_MAX_CONCURRENT", 8),
+		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 1),
 		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
 		// Same nodes preheat leaves alone (masters, typically), unless
 		// set separately.
@@ -139,6 +170,10 @@ func newPropagator(registry *controller.Registry, token string, rankExclude []st
 		RetryAfter:            config.Duration("RESCUE_RETRY_AFTER_S", 120),
 		BackoffMax:            config.Duration("RESCUE_BACKOFF_MAX_S", 3600),
 		Timeout:               config.Duration("RESCUE_TIMEOUT_S", 600),
+		SeedTimeoutMin:        config.Duration("PROPAGATE_SEED_TIMEOUT_MIN_S", 120),
+		SeedTimeoutMax:        config.Duration("PROPAGATE_SEED_TIMEOUT_MAX_S", 600),
+		SeedTimeoutFactor:     config.Float("PROPAGATE_SEED_TIMEOUT_FACTOR", 3),
+		Platform:              platform,
 	}
 	return controller.NewPropagator(registry, token, cfg)
 }

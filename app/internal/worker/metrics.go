@@ -2,11 +2,15 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,39 +42,91 @@ type UtilizationResult struct {
 // It does a lightweight line-based scan of the Prometheus text exposition
 // format rather than pulling in a full client_golang/prometheus parser
 // dependency, since we only need two specific metric families.
+//
+// It asks node-exporter for the filesystem collector only
+// (collect[]=filesystem), so node-exporter skips its other collectors and
+// the page is a few KB instead of hundreds. An endpoint that rejects the
+// filter is asked for the full page from then on.
 func FetchRootUtilization(metricsURL string, timeout time.Duration) (UtilizationResult, error) {
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Get(metricsURL)
+	if !collectFilterRejected.Load() {
+		res, status, err := fetchRootUtilization(withCollectFilter(metricsURL), timeout)
+		if status == http.StatusOK || status == 0 {
+			return res, err
+		}
+		collectFilterRejected.Store(true)
+	}
+	res, _, err := fetchRootUtilization(metricsURL, timeout)
+	return res, err
+}
+
+// collectFilterRejected records that the endpoint didn't accept
+// collect[]=filesystem.
+var collectFilterRejected atomic.Bool
+
+// utilizationClient is reused so the connection to node-exporter stays open.
+var utilizationClient = &http.Client{}
+
+func withCollectFilter(metricsURL string) string {
+	u, err := url.Parse(metricsURL)
 	if err != nil {
-		return UtilizationResult{}, fmt.Errorf("fetching %s: %w", metricsURL, err)
+		return metricsURL
+	}
+	q := u.Query()
+	if len(q["collect[]"]) > 0 {
+		return metricsURL // the operator chose their own filter
+	}
+	q.Set("collect[]", "filesystem")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// fetchRootUtilization returns the HTTP status (0 if the request failed
+// before one arrived) alongside the result.
+func fetchRootUtilization(metricsURL string, timeout time.Duration) (UtilizationResult, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metricsURL, nil)
+	if err != nil {
+		return UtilizationResult{}, 0, err
+	}
+	resp, err := utilizationClient.Do(req)
+	if err != nil {
+		return UtilizationResult{}, 0, fmt.Errorf("fetching %s: %w", metricsURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return UtilizationResult{}, fmt.Errorf("fetching %s: unexpected status %d", metricsURL, resp.StatusCode)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return UtilizationResult{}, resp.StatusCode, fmt.Errorf("fetching %s: unexpected status %d", metricsURL, resp.StatusCode)
 	}
-	return parseRootUtilization(resp.Body)
+	res, err := parseRootUtilization(resp.Body)
+	// Drain what's left (bounded) so the connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<20))
+	return res, resp.StatusCode, err
 }
 
 func parseRootUtilization(r io.Reader) (UtilizationResult, error) {
 	var size, free float64
 	var sawSize, sawFree bool
 
+	sizePrefix := []byte("node_filesystem_size_bytes{")
+	freePrefix := []byte("node_filesystem_free_bytes{")
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
+		// Bytes, not Text: most lines are skipped, and converting each to
+		// a string would allocate for every line of a large page.
+		b := scanner.Bytes()
 
 		var family string
 		switch {
-		case strings.HasPrefix(line, "node_filesystem_size_bytes{"):
+		case bytes.HasPrefix(b, sizePrefix):
 			family = "size"
-		case strings.HasPrefix(line, "node_filesystem_free_bytes{"):
+		case bytes.HasPrefix(b, freePrefix):
 			family = "free"
 		default:
 			continue
 		}
+		line := string(b)
 
 		labelsEnd := strings.Index(line, "}")
 		if labelsEnd < 0 {
@@ -98,6 +154,9 @@ func parseRootUtilization(r io.Reader) (UtilizationResult, error) {
 		case "free":
 			free = val
 			sawFree = true
+		}
+		if sawSize && sawFree {
+			break // both found; skip the rest of the page
 		}
 	}
 	if err := scanner.Err(); err != nil {

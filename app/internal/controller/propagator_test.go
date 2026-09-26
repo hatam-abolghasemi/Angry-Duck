@@ -16,17 +16,27 @@ import (
 // fleet is a set of fake workers that accept every order and remember
 // who was ordered, from which primary source.
 type fleet struct {
-	mu     sync.Mutex
-	orders map[string][]string // target -> primary sources it was ordered from
-	fail   map[string]bool
+	mu        sync.Mutex
+	orders    map[string][]string // target -> primary sources it was ordered from
+	fail      map[string]bool
+	cancelled map[string]bool
+	seq       []string // targets in the order they were ordered
 }
 
 func (f *fleet) worker(t *testing.T, node string) string {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pull/cancel" {
+			f.mu.Lock()
+			f.cancelled[node] = true
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(model.PullAck{Accepted: true})
+			return
+		}
 		var o model.RescueOrder
 		_ = json.NewDecoder(r.Body).Decode(&o)
 		f.mu.Lock()
 		f.orders[node] = append(f.orders[node], o.Sources[0].NodeID)
+		f.seq = append(f.seq, node)
 		fail := f.fail[node]
 		f.mu.Unlock()
 		if o.Reason != "propagate" {
@@ -43,7 +53,9 @@ func (f *fleet) worker(t *testing.T, node string) string {
 	return strings.TrimPrefix(srv.URL, "http://")
 }
 
-func newFleet() *fleet { return &fleet{orders: map[string][]string{}, fail: map[string]bool{}} }
+func newFleet() *fleet {
+	return &fleet{orders: map[string][]string{}, fail: map[string]bool{}, cancelled: map[string]bool{}}
+}
 
 func testPropagator(reg *Registry) *Propagator {
 	return NewPropagator(reg, rescueToken, PropagatorConfig{
@@ -100,10 +112,97 @@ func TestPropagator_FansOutLikeATreeWithoutDuplicates(t *testing.T) {
 	if len(st) != 1 || len(st[0].Have) != 7 || len(st[0].Missing) != 0 || len(st[0].Skipped) != 2 {
 		t.Fatalf("status = %+v", st)
 	}
-	// Round 3: everyone eligible has it; the propagation finishes.
+	// Round 3: every node with room has it, but "full" may get room back
+	// (the cleanup frees space): the job stays.
+	p.tick(context.Background())
+	if len(p.Status()) != 1 {
+		t.Fatal("propagation ended with a too-full node still missing the image")
+	}
+	report(reg, "full", reg.FreshWorkers()[len(reg.FreshWorkers())-1].Address, 0.5)
+	p.tick(context.Background())
+	p.wg.Wait()
+	if len(f.orders["full"]) != 1 {
+		t.Fatalf("node with room again not ordered: %v", f.orders)
+	}
 	p.tick(context.Background())
 	if len(p.Status()) != 0 {
 		t.Fatal("finished propagation still active")
+	}
+}
+
+func TestPropagator_OneAtATimePerSourceDoubles(t *testing.T) {
+	f := newFleet()
+	reg := NewRegistry(time.Hour, time.Minute)
+	report(reg, "seed", f.worker(t, "seed"), 0.1, img)
+	for i := 0; i < 7; i++ {
+		n := "w" + string(rune('a'+i))
+		report(reg, n, f.worker(t, n), 0.2)
+	}
+	p := NewPropagator(reg, rescueToken, PropagatorConfig{Interval: time.Hour, MaxConcurrent: 50, PerSource: 1, MaxUtilization: 0.7, RetryAfter: time.Minute, BackoffMax: time.Hour, Timeout: 5 * time.Second})
+	p.Start(img)
+	want := []int{1, 3, 7} // holders 1 -> 2 -> 4 -> 8
+	for round, w := range want {
+		p.tick(context.Background())
+		p.wg.Wait()
+		if len(f.orders) != w {
+			t.Fatalf("round %d: %d ordered, want %d", round+1, len(f.orders), w)
+		}
+	}
+}
+
+func TestPropagator_LeavesSeedsAloneThenCancelsSlowOnes(t *testing.T) {
+	f := newFleet()
+	reg := NewRegistry(time.Hour, time.Minute)
+	report(reg, "seed1", f.worker(t, "seed1"), 0.1, img) // done
+	report(reg, "seed2", f.worker(t, "seed2"), 0.1)      // still pulling
+	report(reg, "w1", f.worker(t, "w1"), 0.2)
+	p := NewPropagator(reg, rescueToken, PropagatorConfig{Interval: time.Hour, MaxConcurrent: 10, PerSource: 2, MaxUtilization: 0.7,
+		RetryAfter: time.Minute, BackoffMax: time.Hour, Timeout: 5 * time.Second,
+		SeedTimeoutMin: time.Minute, SeedTimeoutMax: 10 * time.Minute, SeedTimeoutFactor: 3})
+	orderedAt := time.Now()
+	p.SetSeeds(func(string) map[string]time.Time { return map[string]time.Time{"seed1": orderedAt, "seed2": orderedAt} })
+	p.Start(img)
+	p.tick(context.Background())
+	p.wg.Wait()
+	if _, ok := f.orders["seed2"]; ok {
+		t.Fatal("a seed still pulling must not be a propagation target")
+	}
+	if st := p.Status(); len(st[0].Seeding) != 1 {
+		t.Fatalf("status = %+v", st)
+	}
+	// seed1 finished at once, so the timeout is the 1m floor; move seed2's
+	// order back past it.
+	orderedAt = time.Now().Add(-2 * time.Minute)
+	p.mu.Lock()
+	p.jobs[img].firstSeedTook = time.Second
+	p.mu.Unlock()
+	p.SetSeeds(func(string) map[string]time.Time {
+		return map[string]time.Time{"seed1": orderedAt, "seed2": orderedAt}
+	})
+	p.tick(context.Background())
+	p.wg.Wait()
+	if !f.cancelled["seed2"] || len(f.orders["seed2"]) != 1 {
+		t.Fatalf("slow seed: cancelled=%v orders=%v", f.cancelled, f.orders)
+	}
+}
+
+func TestPropagator_WaitingPodsFirstAndSupersede(t *testing.T) {
+	f := newFleet()
+	reg := NewRegistry(time.Hour, time.Minute)
+	report(reg, "seed", f.worker(t, "seed"), 0.1, img)
+	report(reg, "idle", f.worker(t, "idle"), 0.1)
+	report(reg, "busy", f.worker(t, "busy"), 0.6)
+	p := NewPropagator(reg, rescueToken, PropagatorConfig{Interval: time.Hour, MaxConcurrent: 10, PerSource: 1, MaxUtilization: 0.7, RetryAfter: time.Minute, BackoffMax: time.Hour, Timeout: 5 * time.Second})
+	p.SetWaiting(func() map[string]map[string]bool { return map[string]map[string]bool{img: {"busy": true}} })
+	p.Start(img)
+	p.tick(context.Background())
+	p.wg.Wait()
+	if len(f.seq) != 1 || f.seq[0] != "busy" {
+		t.Fatalf("node with a waiting pod should go first, got %v", f.seq)
+	}
+	p.Start("registry.example.com/team/app:1.6.0")
+	if imgs := p.Images(); imgs[img] || len(imgs) != 1 {
+		t.Fatalf("older tag of the same repo not superseded: %v", imgs)
 	}
 }
 

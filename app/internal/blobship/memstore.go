@@ -24,6 +24,7 @@ type MemStore struct {
 	snaps      map[string]memSnap   // chainID -> snapshot
 	Imports    [][]string           // blob digests carried by each Import, in order
 	Applied    []string             // chainIDs created by ApplySnapshot, in order
+	Deleted    []string             // image names removed by DeleteImages, in order
 	Pinned     map[string]bool      // chainIDs currently pinned
 	FailApply  bool                 // make ApplySnapshot fail before committing
 	FailImport bool                 // make Import fail after reading the archive
@@ -191,6 +192,25 @@ func (m *MemStore) Delete(digest string) {
 	m.mu.Unlock()
 }
 
+// DeleteImages implements Store.
+func (m *MemStore) DeleteImages(_ context.Context, names ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, n := range names {
+		delete(m.images, n)
+		m.Deleted = append(m.Deleted, n)
+	}
+	return nil
+}
+
+// HasImage reports whether name is registered.
+func (m *MemStore) HasImage(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.images[name]
+	return ok
+}
+
 // Tag points name at digest.
 func (m *MemStore) Tag(name, mediaType, digest string) {
 	m.mu.Lock()
@@ -239,6 +259,18 @@ func (m *MemStore) StreamBlob(_ context.Context, digest string, size int64, w io
 		return fmt.Errorf("blob %s: got %d bytes, expected %d", digest, n, size)
 	}
 	return nil
+}
+
+// StreamContent writes a whole blob to w.
+func (m *MemStore) StreamContent(_ context.Context, digest string, w io.Writer) error {
+	m.mu.Lock()
+	b, ok := m.blobs[digest]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("blob %s not found", digest)
+	}
+	_, err := w.Write(b)
+	return err
 }
 
 // Digests implements Store.

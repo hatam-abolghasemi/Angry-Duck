@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // hostPath is the search order used to find node binaries inside the host
@@ -42,6 +43,47 @@ type HostExec struct {
 
 	mu    sync.Mutex
 	paths map[string]string // binary name -> path inside root
+
+	// listGate lets one listing command (an image, container, content or
+	// snapshot listing) run at a time. Each one is a separate ctr/crictl
+	// process of 20-40 MB counted against this pod, and the periodic loops
+	// (reporter, layer scan, cleanup, preheat monitor) would otherwise
+	// line up on the same ticks. Transfers don't take it.
+	listOnce sync.Once
+	listGate chan struct{}
+}
+
+// AcquireListing waits for the listing gate; call the returned func to
+// release it. It fails only when ctx ends first.
+func (h *HostExec) AcquireListing(ctx context.Context) (func(), error) {
+	h.listOnce.Do(func() { h.listGate = make(chan struct{}, 1) })
+	select {
+	case h.listGate <- struct{}{}:
+		return func() { <-h.listGate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// listingTimeout bounds a runtime listing, so a wedged containerd can't
+// hold the listing gate forever.
+const listingTimeout = 2 * time.Minute
+
+// List runs a listing command behind the gate, with listingTimeout.
+func (h *HostExec) List(name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listingTimeout)
+	defer cancel()
+	return h.RunListing(ctx, name, args...)
+}
+
+// RunListing is RunContext behind the listing gate.
+func (h *HostExec) RunListing(ctx context.Context, name string, args ...string) (string, error) {
+	release, err := h.AcquireListing(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return h.RunContext(ctx, name, args...)
 }
 
 // NewHostExec builds a HostExec for the given root. An empty root or "/"
@@ -151,7 +193,16 @@ func (h *HostExec) Run(name string, args ...string) (string, error) {
 // RunInput is Run with bytes fed to stdin (used for docker's
 // --password-stdin so credentials never appear in the process list).
 func (h *HostExec) RunInput(stdin []byte, name string, args ...string) (string, error) {
-	ctx := context.Background()
+	return h.RunInputContext(context.Background(), stdin, name, args...)
+}
+
+// RunContext is Run, killed when ctx ends.
+func (h *HostExec) RunContext(ctx context.Context, name string, args ...string) (string, error) {
+	return h.RunInputContext(ctx, nil, name, args...)
+}
+
+// RunInputContext is RunInput, killed when ctx ends.
+func (h *HostExec) RunInputContext(ctx context.Context, stdin []byte, name string, args ...string) (string, error) {
 	cmd, err := h.Command(ctx, name, args...)
 	if err != nil {
 		return "", err

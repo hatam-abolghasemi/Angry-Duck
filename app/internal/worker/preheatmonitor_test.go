@@ -19,7 +19,7 @@ func TestPreheatMonitorTickCountsOnlyPreheatedRepos(t *testing.T) {
 	rt.running["registry.example.com/pause:3.10.1"] = true
 
 	const nodeID = "test-node-preheat-monitor"
-	p := NewPuller(rt, nodeID, false, "", 0)
+	p := NewPuller(rt, nodeID, false)
 	p.mu.Lock()
 	p.preheatedAt["docker.io/library/nginx"] = time.Now()
 	p.mu.Unlock()
@@ -45,7 +45,7 @@ func TestPreheatMonitorTickResetsWhenNothingPreheated(t *testing.T) {
 	rt.running["docker.io/library/redis:7"] = true
 
 	const nodeID = "test-node-preheat-monitor-empty"
-	p := NewPuller(rt, nodeID, false, "", 0)
+	p := NewPuller(rt, nodeID, false)
 	// No preheatedAt entries at all.
 
 	m := NewPreheatMonitor(rt, p, time.Hour, time.Hour, nodeID)
@@ -65,7 +65,7 @@ func TestPreheatMonitorTickExpiresOldPreheats(t *testing.T) {
 	rt.running["docker.io/library/nginx:1.25"] = true
 
 	const nodeID = "test-node-preheat-monitor-expired"
-	p := NewPuller(rt, nodeID, false, "", 0)
+	p := NewPuller(rt, nodeID, false)
 	p.mu.Lock()
 	p.preheatedAt["docker.io/library/nginx"] = time.Now().Add(-2 * time.Hour)
 	p.mu.Unlock()

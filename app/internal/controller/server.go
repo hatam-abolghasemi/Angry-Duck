@@ -10,6 +10,7 @@ import (
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+	"angryduck/internal/sharedtoken"
 )
 
 // Server wires the registry + ranker up to HTTP handlers.
@@ -24,6 +25,25 @@ type Server struct {
 // SetPropagator makes accepted preheats also start a propagation, and adds
 // propagation state to /status.
 func (s *Server) SetPropagator(p *Propagator) { s.propagator = p }
+
+// SetToken mounts /layers/holders, which workers' mirrors call, behind
+// the shared token.
+func (s *Server) SetToken(token string) {
+	s.mux.HandleFunc("/layers/holders", sharedtoken.Require(token, s.handleHolders))
+}
+
+func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
+	digest := r.URL.Query().Get("digest")
+	if !strings.HasPrefix(digest, "sha256:") {
+		http.Error(w, "digest required", http.StatusBadRequest)
+		return
+	}
+	holders := s.registry.Holders(digest, r.URL.Query().Get("exclude"), 3)
+	if holders == nil {
+		holders = []model.Holder{}
+	}
+	writeJSON(w, http.StatusOK, holders)
+}
 
 // SetRescuer adds the rescuer's state to /status.
 func (s *Server) SetRescuer(rs *Rescuer) { s.rescuer = rs }
@@ -122,9 +142,14 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	if rep.Timestamp.IsZero() {
 		rep.Timestamp = time.Now()
 	}
-	s.registry.Update(rep)
+	ack := s.registry.Update(rep)
+	if rep.Layers != nil {
+		l := rep.Layers
+		logging.Debugf("angryduck-controller: layer sync from node=%s full=%v seq=%d base=%d blobs=+%d/-%d snaps=+%d/-%d -> held=%d resync=%v",
+			rep.NodeID, l.Full, l.Seq, l.Base, len(l.AddBlobs), len(l.DelBlobs), len(l.AddSnaps), len(l.DelSnaps), ack.LayersSeq, ack.LayersResync)
+	}
 	logging.Debugf("angryduck-controller: report from node=%s address=%s utilization=%.1f%%", rep.NodeID, rep.Address, rep.Utilization*100)
-	writeJSON(w, http.StatusOK, model.ReportAck{Accepted: true})
+	writeJSON(w, http.StatusOK, ack)
 }
 
 // handleStatus is a debug endpoint showing the full worker registry and

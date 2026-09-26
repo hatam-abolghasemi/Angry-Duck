@@ -3,8 +3,11 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,7 +27,16 @@ type Reporter struct {
 	inventory     *Inventory
 	httpClient    *http.Client
 	kick          chan struct{}
+	layers        *LayerTracker // nil: no layer inventory (no containerd, or turned off)
+
+	// ackedInv is the inventory hash the controller last confirmed it
+	// holds. While it matches, reports leave the lists out. Only the Run
+	// goroutine touches it.
+	ackedInv string
 }
+
+// SetLayerTracker makes reports carry this node's layer inventory.
+func (rp *Reporter) SetLayerTracker(t *LayerTracker) { rp.layers = t }
 
 // NewReporter builds a reporter. rt is used to list local images each
 // report tick so the controller can rank preheat targets by image
@@ -74,11 +86,24 @@ func (rp *Reporter) Run(ctx context.Context) {
 			logging.Infof("angryduck-worker[%s]: reporter stopping", rp.nodeID)
 			return
 		case <-ticker.C:
-			rp.reportOnce(rp.interval / 2)
+			rp.reportOnce(inventoryMaxAge(rp.interval))
 		case <-rp.kick:
 			rp.reportOnce(0) // a pull just landed; the listing must include it
 		}
 	}
+}
+
+// inventoryMaxAge is how old an image listing a regular report may reuse.
+// Reports go out every REPORT_INTERVAL_S for liveness and disk usage, but
+// the image set rarely changes between them, and every change this worker
+// makes (a pull, a transfer) kicks a report with a fresh listing. Pulls by
+// kubelet show up within a minute, which is well inside what ranking and
+// rescue need.
+func inventoryMaxAge(interval time.Duration) time.Duration {
+	if m := interval / 2; m > time.Minute {
+		return m
+	}
+	return time.Minute
 }
 
 // reportOnce sends one report. listMaxAge lets a tick reuse a listing
@@ -97,15 +122,29 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	logging.Debugf("angryduck-worker[%s]: computed root fs utilization: used=%.0f bytes, free=%.0f bytes, size=%.0f bytes, utilization=%.4f (%.1f%%)",
 		rp.nodeID, result.UsedBytes, result.FreeBytes, result.SizeBytes, result.Utilization, result.Utilization*100)
 
-	repos, images := rp.localInventory(listMaxAge)
+	repos, images, listed := rp.localInventory(listMaxAge)
+	var layers *model.LayerSync
+	if rp.layers != nil {
+		// A kick (listMaxAge 0) means an image just landed: rescan now.
+		layers = rp.layers.Next(context.Background(), listMaxAge == 0)
+	}
 
 	report := model.WorkerReport{
 		NodeID:      rp.nodeID,
 		Address:     rp.selfAddress,
 		Utilization: result.Utilization,
-		Repos:       repos,
-		Images:      images,
+		Layers:      layers,
 		Timestamp:   time.Now(),
+	}
+	switch invHash := inventoryHash(repos, images); {
+	case !listed:
+		// No listing this time: keep whatever the controller holds
+		// rather than telling it this node has no images.
+		report.InventoryHash, report.InventoryOmitted = rp.ackedInv, true
+	case invHash == rp.ackedInv:
+		report.InventoryHash, report.InventoryOmitted = invHash, true
+	default:
+		report.Repos, report.Images, report.InventoryHash = repos, images, invHash
 	}
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -124,6 +163,18 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		logging.Warnf("angryduck-worker[%s]: controller rejected report: status=%d", rp.nodeID, resp.StatusCode)
 		return
 	}
+	var ack model.ReportAck
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		ack = model.ReportAck{} // an old or odd controller: send everything next time
+	}
+	rp.ackedInv = ack.InventoryHash
+	if rp.layers != nil {
+		rp.layers.Ack(ack, layers)
+		if layers != nil {
+			logging.Debugf("angryduck-worker[%s]: layer sync full=%v seq=%d blobs=+%d/-%d snaps=+%d/-%d, controller holds seq=%d resync=%v",
+				rp.nodeID, layers.Full, layers.Seq, len(layers.AddBlobs), len(layers.DelBlobs), len(layers.AddSnaps), len(layers.DelSnaps), ack.LayersSeq, ack.LayersResync)
+		}
+	}
 	logging.Debugf("angryduck-worker[%s]: report accepted by controller: utilization=%.1f%%, repos=%d", rp.nodeID, result.Utilization*100, len(repos))
 }
 
@@ -136,11 +187,11 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 //
 // The listing comes from the shared Inventory — the only regular image
 // listing the worker performs.
-func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []string) {
+func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []string, ok bool) {
 	refs, err := rp.inventory.Get(listMaxAge)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: failed to list local images for report: %v", rp.nodeID, err)
-		return nil, nil
+		return nil, nil, false
 	}
 
 	seenRepo := make(map[string]struct{}, len(refs))
@@ -167,5 +218,22 @@ func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []st
 		seenRepo[repo] = struct{}{}
 		repos = append(repos, repo)
 	}
-	return repos, images
+	sort.Strings(repos) // stable order, so an unchanged inventory hashes the same
+	sort.Strings(images)
+	return repos, images, true
+}
+
+// inventoryHash identifies a sorted inventory.
+func inventoryHash(repos, images []string) string {
+	h := sha256.New()
+	for _, s := range repos {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte{1})
+	for _, s := range images {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }

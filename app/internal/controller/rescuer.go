@@ -87,7 +87,37 @@ type Rescuer struct {
 
 	mu    sync.Mutex
 	pairs map[string]*pairState
-	wg    sync.WaitGroup // in-flight sends, for tests
+	// waiting is, per image, the nodes where a Pending pod needs it, as
+	// of the last tick. The propagator serves those nodes first.
+	waiting  map[string]map[string]bool
+	resolver LayerResolver // nil: sources ordered by utilization only
+	platform string
+	wg       sync.WaitGroup // in-flight sends, for tests
+}
+
+// SetLayerResolver orders rescue sources that hold the image's blobs
+// first (a blob is digest-verified on arrival, a snapshot copy is not).
+func (rs *Rescuer) SetLayerResolver(r LayerResolver, platform string) {
+	rs.resolver, rs.platform = r, platform
+}
+
+// Waiting returns, per image, the nodes where a Pending pod needs it.
+func (rs *Rescuer) Waiting() map[string]map[string]bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.waiting
+}
+
+// StuckImages returns the images some node is stuck pulling right now;
+// the image cleanup never removes them from anywhere.
+func (rs *Rescuer) StuckImages() map[string]bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	out := make(map[string]bool, len(rs.pairs))
+	for _, st := range rs.pairs {
+		out[st.Image] = true
+	}
+	return out
 }
 
 // pairState is what the rescuer remembers about one stuck node+image.
@@ -171,8 +201,10 @@ func (rs *Rescuer) tick(ctx context.Context) {
 	}
 	stuck := findStuck(pods)
 	now := time.Now()
+	waiting := findWaiting(pods)
 
 	rs.mu.Lock()
+	rs.waiting = waiting
 	current := make(map[string]bool, len(stuck))
 	for _, s := range stuck {
 		current[s.key()] = true
@@ -239,6 +271,7 @@ func (rs *Rescuer) tick(ctx context.Context) {
 			rs.skip(st, "no_source", "no fresh worker has that image")
 			continue
 		}
+		rs.preferBlobHolders(ctx, s.Image, sources)
 
 		select {
 		case rs.sem <- struct{}{}:
@@ -377,6 +410,47 @@ func sendRescueOrder(ctx context.Context, client *http.Client, token, addr strin
 		return result, fmt.Errorf("status %d: %s", resp.StatusCode, result.Error)
 	}
 	return result, nil
+}
+
+// preferBlobHolders moves sources holding more of the image's blobs to the
+// front, keeping the utilization order among equals.
+func (rs *Rescuer) preferBlobHolders(ctx context.Context, image string, sources []model.RescueSource) {
+	if rs.resolver == nil || len(sources) < 2 {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	layers, err := rs.resolver.Layers(rctx, image, rs.platform)
+	cancel()
+	if err != nil {
+		return // the registry may be the reason we're rescuing
+	}
+	blob := make(map[string]int64, len(sources))
+	for _, src := range sources {
+		blob[src.NodeID] = rs.registry.Layers().BlobBytes(src.NodeID, layers)
+	}
+	sort.SliceStable(sources, func(i, j int) bool { return blob[sources[i].NodeID] > blob[sources[j].NodeID] })
+}
+
+// findWaiting maps each image to the nodes where a scheduled, Pending pod
+// uses it.
+func findWaiting(pods []kube.Pod) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, p := range pods {
+		node := p.Spec.NodeName
+		if node == "" {
+			continue
+		}
+		for _, cs := range [][]kube.Container{p.Spec.InitContainers, p.Spec.Containers} {
+			for _, c := range cs {
+				img := imageref.Normalize(c.Image)
+				if out[img] == nil {
+					out[img] = map[string]bool{}
+				}
+				out[img][node] = true
+			}
+		}
+	}
+	return out
 }
 
 // pullBackoffReasons are the waiting reasons kubelet sets while it can't

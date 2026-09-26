@@ -168,6 +168,9 @@ type Store interface {
 	// RemoveSnapshot deletes a snapshot by key. Used to clean up temporary
 	// snapshots a crashed worker left behind.
 	RemoveSnapshot(ctx context.Context, key string) error
+	// DeleteImages removes image names (not their content: containerd's
+	// garbage collector frees whatever no remaining image references).
+	DeleteImages(ctx context.Context, names ...string) error
 }
 
 // ParsePlatform parses "os/arch[/variant]".

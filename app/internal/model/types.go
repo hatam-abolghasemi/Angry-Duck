@@ -26,13 +26,59 @@ type WorkerReport struct {
 	// controller's rescuer uses it to find a node that holds the exact
 	// image a stuck pod needs. Omitted means "unknown", which only makes
 	// this node ineligible as a rescue source.
-	Images    []string  `json:"images,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	Images []string `json:"images,omitempty"`
+	// Layers carries this node's layer inventory (see LayerSync). Nil
+	// means "unchanged since the last acknowledged sync" — or, from a
+	// worker that predates it, "unknown".
+	Layers *LayerSync `json:"layers,omitempty"`
+	// InventoryHash identifies Repos and Images. A worker leaves both out
+	// when the controller's last ack echoed the same hash: the controller
+	// already holds them. Empty from workers that predate it.
+	InventoryHash string `json:"inventory_hash,omitempty"`
+	// InventoryOmitted is set when Repos and Images were left out because
+	// the controller already holds InventoryHash. Without it, empty lists
+	// are a real (empty) inventory.
+	InventoryOmitted bool      `json:"inventory_omitted,omitempty"`
+	Timestamp        time.Time `json:"timestamp"`
+}
+
+// LayerSync is one step of a worker's layer inventory: every blob digest
+// in its containerd content store and every committed snapshot (chainID)
+// in its snapshotter. A layer counts as present on a node if either its
+// blob or its snapshot is there, which is what makes the inventory work
+// whatever discard_unpacked_layers is set to.
+//
+// It is sent as a delta. The worker numbers each version it sends (Seq)
+// and names the version the delta applies on (Base). The controller
+// applies a delta only when it holds exactly Base under the same Epoch;
+// otherwise it asks for a full resync in its ack. A Full sync replaces
+// everything the controller holds for the node.
+type LayerSync struct {
+	Epoch    string   `json:"epoch"` // random per worker process; a restart starts a new one
+	Seq      uint64   `json:"seq"`
+	Base     uint64   `json:"base,omitempty"`
+	Full     bool     `json:"full,omitempty"`
+	AddBlobs []string `json:"add_blobs,omitempty"`
+	DelBlobs []string `json:"del_blobs,omitempty"`
+	AddSnaps []string `json:"add_snaps,omitempty"`
+	DelSnaps []string `json:"del_snaps,omitempty"`
 }
 
 // ReportAck is returned to a worker after it submits a report.
 type ReportAck struct {
 	Accepted bool `json:"accepted"`
+	// LayersSeq is the layer inventory version the controller now holds
+	// for this node (0: none).
+	LayersSeq uint64 `json:"layers_seq,omitempty"`
+	// LayersResync asks the worker to send a full layer sync next time,
+	// because the delta it sent doesn't apply to what the controller holds
+	// (a controller restart, say).
+	LayersResync bool `json:"layers_resync,omitempty"`
+	// InventoryHash is the hash of the inventory the controller holds for
+	// this worker; the worker may omit an unchanged inventory while it
+	// matches. Empty from controllers that predate it, which always need
+	// the full inventory.
+	InventoryHash string `json:"inventory_hash,omitempty"`
 }
 
 // PreheatRequest is the payload the CI/CD pipeline sends right after
@@ -73,6 +119,10 @@ type WorkerStatus struct {
 	Repos       []string  `json:"repos,omitempty"`
 	LastSeen    time.Time `json:"last_seen"`
 	Fresh       bool      `json:"fresh"`
+	// Layer inventory size, when the node has sent one.
+	LayersKnown bool `json:"layers_known"`
+	Blobs       int  `json:"blobs,omitempty"`
+	Snapshots   int  `json:"snapshots,omitempty"`
 }
 
 // ControllerStatus is the full debug snapshot served at /status.
@@ -89,10 +139,11 @@ type ControllerStatus struct {
 type PropagationStatus struct {
 	Image     string    `json:"image"`
 	StartedAt time.Time `json:"started_at"`
-	EndsAt    time.Time `json:"ends_at"`
+	EndsAt    time.Time `json:"ends_at,omitempty"` // zero: no window, runs until complete or superseded
 	Have      []string  `json:"have"`              // eligible nodes that have it
 	Missing   []string  `json:"missing"`           // eligible nodes still without it
 	InFlight  []string  `json:"in_flight"`         // nodes receiving it right now
+	Seeding   []string  `json:"seeding,omitempty"` // seeds still pulling it from the registry
 	Skipped   []string  `json:"skipped,omitempty"` // nodes left out (excluded or too full)
 	Failing   []string  `json:"failing,omitempty"` // nodes whose last attempt failed
 }
@@ -162,4 +213,10 @@ type BlobExportRequest struct {
 	Image    string   `json:"image"`
 	Platform string   `json:"platform"`
 	Digests  []string `json:"digests"`
+}
+
+// Holder is a worker that holds a blob, as /layers/holders returns it.
+type Holder struct {
+	NodeID  string `json:"node_id"`
+	Address string `json:"address"`
 }

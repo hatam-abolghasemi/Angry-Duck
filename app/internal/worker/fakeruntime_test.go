@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ type fakeRuntime struct {
 	local    map[string]bool
 	running  map[string]bool
 	pullErrs map[string]error
+	block    map[string]bool // PullImage waits for ctx to end
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -29,10 +31,18 @@ func newFakeRuntime() *fakeRuntime {
 		local:    make(map[string]bool),
 		running:  make(map[string]bool),
 		pullErrs: make(map[string]error),
+		block:    make(map[string]bool),
 	}
 }
 
-func (f *fakeRuntime) PullImage(image string) error {
+func (f *fakeRuntime) PullImage(ctx context.Context, image string) error {
+	f.mu.Lock()
+	blocked := f.block[image]
+	f.mu.Unlock()
+	if blocked {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err, ok := f.pullErrs[image]; ok {

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"angryduck/internal/imageref"
+	"angryduck/internal/layerindex"
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
@@ -22,6 +24,29 @@ import (
 //
 // registry is only populated when METRICS_LABEL_REGISTRY is enabled —
 // registry host is an unbounded-ish label (unlike node), so it's opt-in.
+// seedRankingsTotal counts how seed candidates were ranked: "layers"
+// (bytes already on each node, from the layer inventory and the image's
+// manifest), "repo" (fallback: nodes with any tag of the repo first) or
+// "utilization" (fallback when locality is off).
+var seedRankingsTotal = metrics.NewCounterVec(
+	"angryduck_controller_seed_rankings_total",
+	"Seed selections, by what ranked the candidates: layers (bytes each node already holds), repo (fallback) or utilization (fallback).",
+	"basis",
+)
+
+// seedMissingBytes is, per seed ordered for the latest image, how many
+// bytes of the image it lacked: what its registry pull downloads.
+var seedMissingBytes = metrics.NewGaugeVec(
+	"angryduck_controller_seed_missing_bytes",
+	"Bytes of the latest seeded image each seed node lacked when ordered (its registry download). Only set when layer ranking was used.",
+	"node",
+)
+
+// LayerResolver returns an image's layers from its registry.
+type LayerResolver interface {
+	Layers(ctx context.Context, image, platform string) ([]layerindex.Layer, error)
+}
+
 var pullOrdersTotal = metrics.NewCounterVec(
 	"angryduck_controller_pull_orders_total",
 	"Total pull orders sent to workers, by node and result. registry is only populated when METRICS_LABEL_REGISTRY=true.",
@@ -73,6 +98,32 @@ type Ranker struct {
 	// with the registry *Registry field above, which is the worker
 	// registry, not a container registry.
 	labelRegistryHost bool
+
+	resolver       LayerResolver // nil: no layer ranking
+	platform       string
+	resolveTimeout time.Duration
+	// seedsAt remembers when each seed was ordered, per image, so the
+	// propagator can leave seeds alone while their registry pull runs.
+	seedsAt map[string]map[string]time.Time
+}
+
+// SetLayerResolver turns on layer ranking: seeds are the nodes that
+// already hold the most bytes of the image. Resolving the image's layers
+// is bounded by timeout; past it, or on any error, ranking falls back to
+// repo locality.
+func (rk *Ranker) SetLayerResolver(r LayerResolver, platform string, timeout time.Duration) {
+	rk.resolver, rk.platform, rk.resolveTimeout = r, platform, timeout
+}
+
+// Seeds returns when each seed of image was ordered.
+func (rk *Ranker) Seeds(image string) map[string]time.Time {
+	rk.mu.Lock()
+	defer rk.mu.Unlock()
+	out := make(map[string]time.Time, len(rk.seedsAt[image]))
+	for n, t := range rk.seedsAt[image] {
+		out[n] = t
+	}
+	return out
 }
 
 // NewRanker builds a ranker bound to the given registry. excludeSubstrings
@@ -168,7 +219,7 @@ func (rk *Ranker) orderLowestN(image string) []string {
 		return nil
 	}
 
-	ranked := rk.rankByLocality(image, candidates)
+	ranked, missing := rk.rank(image, candidates)
 
 	n := remaining
 	if n > len(ranked) {
@@ -183,9 +234,30 @@ func (rk *Ranker) orderLowestN(image string) []string {
 	}
 
 	rk.mu.Lock()
+	if rk.seedsAt == nil {
+		rk.seedsAt = map[string]map[string]time.Time{}
+	}
+	for img, seeds := range rk.seedsAt {
+		stale := true
+		for _, t := range seeds {
+			if time.Since(t) < 6*time.Hour {
+				stale = false
+			}
+		}
+		if stale {
+			delete(rk.seedsAt, img)
+		}
+	}
+	if rk.seedsAt[image] == nil {
+		rk.seedsAt[image] = map[string]time.Time{}
+	}
 	ordered := make([]string, 0, len(chosen))
 	for _, w := range chosen {
 		ordered = append(ordered, w.NodeID)
+		rk.seedsAt[image][w.NodeID] = time.Now()
+		if m, ok := missing[w.NodeID]; ok {
+			seedMissingBytes.Set(float64(m), w.NodeID)
+		}
 		rk.orderedNodes[w.NodeID] = true
 		rk.slotsUsed++
 		go rk.sendPullOrder(w.NodeID, w.Address, image)
@@ -227,6 +299,54 @@ func (rk *Ranker) releaseSlot(image string) {
 	if image == rk.orderedForImage && rk.slotsUsed > 0 {
 		rk.slotsUsed--
 	}
+}
+
+// rank orders candidates for seeding. With layer ranking on and the
+// image's layers resolvable, nodes that lack the fewest bytes come first
+// (utilization breaks ties, as candidates arrive sorted by it); nodes that
+// never sent a layer inventory follow, in repo-locality order. Otherwise
+// it is repo locality alone. missing holds each scored node's missing
+// bytes.
+func (rk *Ranker) rank(image string, candidates []*workerEntry) (ranked []*workerEntry, missing map[string]int64) {
+	if rk.resolver != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), rk.resolveTimeout)
+		layers, err := rk.resolver.Layers(ctx, image, rk.platform)
+		cancel()
+		if err != nil {
+			logging.Warnf("angryduck-controller: layer ranking unavailable for image=%s, falling back to repo locality: %v", image, err)
+		} else {
+			missing = make(map[string]int64, len(candidates))
+			var known, unknown []*workerEntry
+			for _, w := range candidates {
+				m, ok := rk.registry.Layers().Missing(w.NodeID, layers)
+				if !ok {
+					unknown = append(unknown, w)
+					continue
+				}
+				missing[w.NodeID] = m
+				known = append(known, w)
+			}
+			if len(known) > 0 {
+				sort.SliceStable(known, func(i, j int) bool { return missing[known[i].NodeID] < missing[known[j].NodeID] })
+				var total int64
+				for _, l := range layers {
+					total += l.Size
+				}
+				for _, w := range known {
+					logging.Debugf("angryduck-controller: seed candidate node=%s lacks %d of %d bytes of image=%s (utilization %.1f%%)",
+						w.NodeID, missing[w.NodeID], total, image, w.Utilization*100)
+				}
+				seedRankingsTotal.Inc("layers")
+				return append(known, rk.rankByLocality(image, unknown)...), missing
+			}
+		}
+	}
+	if rk.preferImageLocality {
+		seedRankingsTotal.Inc("repo")
+	} else {
+		seedRankingsTotal.Inc("utilization")
+	}
+	return rk.rankByLocality(image, candidates), nil
 }
 
 // rankByLocality reorders candidates — already sorted ascending by
