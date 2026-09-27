@@ -212,7 +212,7 @@ func TestCountRunningReposByContainer(t *testing.T) {
 		t.Fatalf("failed to parse crictl ps output: %v", err)
 	}
 
-	counts := countRunningReposByContainer(parsed)
+	counts := countRunningReposByContainer(parsed, nil)
 
 	if got := counts["docker.io/library/nginx"]; got != 2 {
 		t.Errorf("nginx repo count = %d, want 2 (one per container, not one per alias)", got)
@@ -237,8 +237,63 @@ func TestCountRunningReposByContainerMissingImageRef(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		t.Fatalf("failed to parse crictl ps output: %v", err)
 	}
-	counts := countRunningReposByContainer(parsed)
+	counts := countRunningReposByContainer(parsed, nil)
 	if got := counts["docker.io/library/redis"]; got != 1 {
 		t.Errorf("redis repo count = %d, want 1", got)
+	}
+}
+
+// TestCountRunningReposByContainerKubeletShape covers what kubelet-created
+// containers actually look like: kubelet hands the runtime the resolved
+// image ID, so image.image and imageRef are both bare "sha256:..." IDs.
+// The repo must come from userSpecifiedImage when present, otherwise from
+// the node's image list. Without this, every container was skipped and
+// angryduck_worker_preheated_containers_running never got a series.
+func TestCountRunningReposByContainerKubeletShape(t *testing.T) {
+	const appID = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	const dbID = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	const orphanID = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+	psOutput := `{
+  "containers": [
+    {"id": "c1", "image": {"image": "` + appID + `"}, "imageRef": "` + appID + `"},
+    {"id": "c2", "image": {"image": "` + appID + `"}, "imageRef": "` + appID + `"},
+    {"id": "c3", "image": {"image": "` + dbID + `", "userSpecifiedImage": "registry.example.com/team/db:15"}, "imageRef": "` + dbID + `"},
+    {"id": "c4", "image": {"image": "` + orphanID + `"}, "imageRef": "` + orphanID + `"}
+  ]
+}`
+	imagesOutput := `{
+  "images": [
+    {"id": "` + appID + `", "repoTags": ["registry.example.com/team/app:1.2.3"], "repoDigests": ["registry.example.com/team/app@sha256:aaaa"]},
+    {"id": "` + dbID + `", "repoTags": [], "repoDigests": ["registry.example.com/team/db@sha256:bbbb"]}
+  ]
+}`
+
+	var ps crictlPsOutput
+	if err := json.Unmarshal([]byte(psOutput), &ps); err != nil {
+		t.Fatalf("parsing crictl ps output: %v", err)
+	}
+	var images crictlImagesOutput
+	if err := json.Unmarshal([]byte(imagesOutput), &images); err != nil {
+		t.Fatalf("parsing crictl images output: %v", err)
+	}
+
+	counts := countRunningReposByContainer(ps, reposByImageID(images))
+
+	if got := counts["registry.example.com/team/app"]; got != 2 {
+		t.Errorf("app repo count = %d, want 2 (resolved from the image list by ID)", got)
+	}
+	if got := counts["registry.example.com/team/db"]; got != 1 {
+		t.Errorf("db repo count = %d, want 1 (from userSpecifiedImage)", got)
+	}
+	if len(counts) != 2 {
+		t.Errorf("got %d distinct repos %v, want 2 (an image missing from the list is skipped, not counted as \"\")", len(counts), counts)
+	}
+
+	// Without an image list, ID-only containers are skipped rather than
+	// miscounted, and userSpecifiedImage still works.
+	counts = countRunningReposByContainer(ps, nil)
+	if len(counts) != 1 || counts["registry.example.com/team/db"] != 1 {
+		t.Errorf("without an image list got %v, want only the db repo", counts)
 	}
 }

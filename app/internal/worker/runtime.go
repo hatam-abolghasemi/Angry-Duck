@@ -274,6 +274,7 @@ func (r crictlRuntime) PullImage(ctx context.Context, image string) error {
 //	{"images": [{"repoTags": [...], "repoDigests": [...]}]}
 type crictlImagesOutput struct {
 	Images []struct {
+		ID          string   `json:"id"`
 		RepoTags    []string `json:"repoTags"`
 		RepoDigests []string `json:"repoDigests"`
 	} `json:"images"`
@@ -302,16 +303,20 @@ func (r crictlRuntime) LocalImages() ([]string, error) {
 }
 
 // crictlPsOutput matches the shape of `crictl ps -o json`. Per the CRI
-// ContainerStatus schema, containers[].image.image is the reference the
-// container was created with (usually tag-form), while containers[].imageRef
-// is that image's resolved digest. ListRunningImages returns both forms
-// per container (see below) since callers only ever do a loose substring
-// check against the result, not an exact-match
-// lookup that would care which alias form it's comparing against.
+// schema, containers[].image.image is the image the container was created
+// with and containers[].imageRef is its resolved form. In practice kubelet
+// creates every container from the resolved image ID, so on real nodes both
+// fields are usually a bare "sha256:..." ID; the name the pod asked for is
+// only in image.userSpecifiedImage (newer runtimes) or has to be looked up
+// in `crictl images` by ID (see imageReposByID). ListRunningImages returns
+// both forms per container (see below) since callers only ever do a loose
+// substring check against the result, not an exact-match lookup that would
+// care which alias form it's comparing against.
 type crictlPsOutput struct {
 	Containers []struct {
 		Image struct {
-			Image string `json:"image"`
+			Image              string `json:"image"`
+			UserSpecifiedImage string `json:"userSpecifiedImage"`
 		} `json:"image"`
 		ImageRef string `json:"imageRef"`
 	} `json:"containers"`
@@ -352,21 +357,63 @@ func (r crictlRuntime) ListRunningImages() ([]string, error) {
 // therefore produced an empty repo (and got silently skipped below) for
 // essentially every real container; Image.Image is the form that
 // actually carries repo identity.
-func countRunningReposByContainer(parsed crictlPsOutput) map[string]int {
+func countRunningReposByContainer(parsed crictlPsOutput, repoByID map[string]string) map[string]int {
 	counts := make(map[string]int)
 	for _, c := range parsed.Containers {
-		ref := c.Image.Image
-		if ref == "" {
-			ref = c.ImageRef
+		repo := ""
+		for _, ref := range []string{c.Image.UserSpecifiedImage, c.Image.Image, c.ImageRef} {
+			if repo = imageref.Repo(ref); repo != "" {
+				break
+			}
 		}
-		if ref == "" {
-			continue
+		// Containers created by kubelet usually carry only the image ID in
+		// both fields, which imageref.Repo rightly refuses to turn into a
+		// repo. Resolve the ID through the node's image list instead.
+		if repo == "" {
+			if repo = repoByID[c.ImageRef]; repo == "" {
+				repo = repoByID[c.Image.Image]
+			}
 		}
-		if repo := imageref.Repo(ref); repo != "" {
+		if repo != "" {
 			counts[repo]++
 		}
 	}
 	return counts
+}
+
+// imageReposByID maps every local image ID (as `crictl images -o json`
+// reports it, "sha256:...") to its repo, taken from the first tag or digest
+// reference that yields one. Best effort: on any error it returns nil and
+// callers simply skip containers they can't name.
+func (r crictlRuntime) imageReposByID() map[string]string {
+	out, err := r.hx.List("crictl", r.withEndpoint("images", "-o", "json")...)
+	if err != nil {
+		return nil
+	}
+	var parsed crictlImagesOutput
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil
+	}
+	return reposByImageID(parsed)
+}
+
+// reposByImageID is the parsing half of imageReposByID, split out so it can
+// be tested without a node.
+func reposByImageID(parsed crictlImagesOutput) map[string]string {
+	m := make(map[string]string, len(parsed.Images))
+	for _, img := range parsed.Images {
+		if img.ID == "" {
+			continue
+		}
+		refs := append(append([]string{}, img.RepoTags...), img.RepoDigests...)
+		for _, ref := range refs {
+			if repo := imageref.Repo(ref); repo != "" {
+				m[img.ID] = repo
+				break
+			}
+		}
+	}
+	return m
 }
 
 // RunningImageRepos parses the same `crictl ps -o json` output
@@ -386,7 +433,7 @@ func (r crictlRuntime) RunningImageRepos() (map[string]int, error) {
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		return nil, fmt.Errorf("parsing crictl ps output: %w", err)
 	}
-	return countRunningReposByContainer(parsed), nil
+	return countRunningReposByContainer(parsed, r.imageReposByID()), nil
 }
 
 // --- docker ---
