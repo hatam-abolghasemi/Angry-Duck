@@ -22,3 +22,8 @@
 - [API](api.md): controller and worker endpoints.
 - [Security](security.md): privileges and trust boundaries.
 - [Development](development.md): building and testing.
+
+**Background**
+
+- [Comparison](comparison.md): similar tools, and why one tool for the image lifecycle.
+- [The name](name.md): why a duck, why angry, and why the knife.

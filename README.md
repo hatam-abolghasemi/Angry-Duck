@@ -111,6 +111,7 @@ curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
 | [API](docs/api.md) | Controller and worker HTTP endpoints. |
 | [Security](docs/security.md) | Privileges, trust boundaries and hardening. |
 | [Development](docs/development.md) | Code layout, building and testing. |
+| [Comparison](docs/comparison.md) | Similar tools, feature by feature, and why one tool. |
 
 Feature guides: [Preheat](docs/preheat.md) ·
 [Propagation](docs/propagation.md) · [Rescue](docs/rescue.md) ·
