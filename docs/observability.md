@@ -6,23 +6,25 @@ ServiceMonitors for the Prometheus Operator that scrape every 15 seconds.
 ## Grafana dashboard
 
 [`deploy/grafana/angryduck-dashboard.json`](../deploy/grafana/angryduck-dashboard.json)
-covers every metric, in these sections:
+covers every metric, in these tabs:
 
-| Section | Answers |
+| Tab | Answers |
 |---|---|
-| **Overview** | Workers reporting, stuck images, active propagations, nodes cleaning, mirror hit ratio, registry bytes avoided. |
-| **Preheat** | Seed orders and pulls by result and node, pull duration, ranking basis, registry download per seed, slow seeds. |
-| **Propagation** | Nodes per state, per-image progress, transfers by result and node, finished propagations. |
-| **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, transfers received, rescues in flight. |
-| **Node-to-node transfers** | Throughput, layers by delivery method, snapshot share, top senders, pins and leftover cleanups. |
-| **Mirror** | Requests by result, hit ratio, bytes served. |
-| **Image cleanup** | Cleaning state per node, images removed by tier, candidates by tier, removals per node. |
-| **Impact and controller** | Running containers from preheated repos, layer index size. |
+| **Overview** | Workers reporting, stuck images, active propagations, mirror hit ratio, registry bytes avoided, nodes cleaning; a per-node overview table; running containers from preheated repos. |
+| **Preheat** | Seed orders and pulls by result, node and registry, pull duration, ranking basis, registry download per seed, slow seeds, layer index size. |
+| **Propagation** | Per-image progress, nodes per state, finished propagations, transfers by result and receiving node. |
+| **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, rescues in flight, peer fetches by reason and result. |
+| **Transfers** | Throughput, top senders, layers by delivery method, snapshot share, pinned snapshots and leftover cleanups. |
+| **Mirror** | Requests by result, hit ratio, bytes, misses per node. |
+| **Cleanup** | Disk-pressure cleanup per node, images removed by tier, candidates by tier, removals per node. |
 
-To import it, go to **Dashboards → New → Import**, upload the file and pick
-your Prometheus data source. It works with Grafana 10.4 and later.
+The file uses Grafana's dashboard schema v2, for the tabs and per-tab
+variables. It needs Grafana 13, or Grafana 12 with the `dashboardNewLayouts`
+(dynamic dashboards) and `kubernetesDashboards` feature toggles. To import it,
+go to **Dashboards → New → Import**, upload the file and pick your Prometheus
+data source in the **Data source** variable.
 
-The dashboard has three variables:
+Variables:
 
 - **Data source**: any Prometheus data source.
 - **Cluster**: values of the `k8s_source_cluster` label, for setups that
@@ -30,7 +32,21 @@ The dashboard has three variables:
   label, leave it on *All*. If your cluster label has another name, replace
   `k8s_source_cluster` in the JSON before importing.
 - **Node**: one or more nodes. Applies to every per-node metric, including
-  controller metrics labeled with the target node.
+  controller metrics labeled with the target node. Clicking a node name in a
+  table sets it.
+- **Registry** (Preheat tab): registries seed pulls came from. Empty unless
+  `METRICS_LABEL_REGISTRY=true`.
+- **Image** (Propagation tab): images being propagated. Clicking an image in
+  the progress table sets it.
+
+Event counts are computed scrape by scrape, so the hidden `scrape_interval`
+constant must match your scrape interval. It is `15s`, as in the included
+ServiceMonitors; change it in the JSON if you scrape at another interval.
+
+Annotations, toggled from the dashboard controls: disk cleanup started and
+rescue failures (on by default), and finished propagations (off by default).
+The **Reset filters** link clears every filter except data source, cluster,
+time range and the current tab.
 
 ## Metrics
 
