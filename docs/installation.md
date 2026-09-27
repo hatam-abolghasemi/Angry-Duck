@@ -33,10 +33,10 @@ steps below use `stg`.
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.8.4 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.8.4 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.8.4
-docker push $REGISTRY/angry-duck-worker:1.8.4
+docker build -t $REGISTRY/angry-duck-controller:1.8.5 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.8.5 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.8.5
+docker push $REGISTRY/angry-duck-worker:1.8.5
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and

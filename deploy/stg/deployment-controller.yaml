@@ -26,7 +26,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.8.4
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.5
           ports:
             - containerPort: 8080
               name: http

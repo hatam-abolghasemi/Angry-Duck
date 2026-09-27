@@ -109,7 +109,7 @@ local.
 Run this on the stuck node:
 
 ```bash
-IMG=registry.example.com/angryduck/angry-duck-worker:1.8.4
+IMG=registry.example.com/angryduck/angry-duck-worker:1.8.5
 SRC=<healthy-node-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

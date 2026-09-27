@@ -29,7 +29,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.example.com/devops/generic/angry-duck-worker:1.8.4
+          image: registry.example.com/devops/generic/angry-duck-worker:1.8.5
           env:
             - name: NODE_ID
               valueFrom:
@@ -66,10 +66,10 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 50m
+              cpu: 200m
               memory: 32Mi
             limits:
-              cpu: "1"
+              cpu: "2"
               memory: 192Mi
           securityContext:
             privileged: false

@@ -26,7 +26,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.8.4
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.5
           ports:
             - containerPort: 8080
               name: http
@@ -59,11 +59,11 @@ spec:
             # right after a restart, when every worker resends its full
             # layer inventory. Memory grows roughly linearly with nodes.
             requests:
-              cpu: 20m
+              cpu: 200m
               memory: 32Mi
             limits:
-              cpu: 150m
-              memory: 64Mi
+              cpu: "2"
+              memory: 192Mi
       volumes:
         - name: registry-creds
           secret:

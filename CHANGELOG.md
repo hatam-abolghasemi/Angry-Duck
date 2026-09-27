@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.8.5
+
+### Fixed
+
+- **`angryduck_worker_preheated_containers_running` was always empty with
+  the crictl runtime.** kubelet creates containers from the resolved image
+  ID, so `crictl ps` reports a bare `sha256:...` in both `image.image` and
+  `imageRef`, and no running container could be matched to a preheated
+  repo. The worker now takes the repo from `image.userSpecifiedImage` when
+  the runtime provides it, and otherwise resolves the image ID through
+  `crictl images`. The `ctr` backend was not affected.
+
+### Changed
+
+- **The Grafana dashboard is reorganized into tabs** (Overview, Preheat,
+  Propagation, Rescue, Transfers, Mirror, Cleanup) and now uses Grafana's
+  dashboard schema v2. It needs Grafana 13, or Grafana 12 with the dynamic
+  dashboards and `kubernetesDashboards` feature toggles; Grafana 10.4 and 11
+  can no longer import it. New: a per-node overview table, Registry and Image
+  variables, click-to-filter node and image names, annotations for cleanup
+  starts, rescue failures and finished propagations, and a Reset filters
+  link. Event counts are computed per scrape from a `scrape_interval`
+  constant (15s). See [Observability](docs/observability.md#grafana-dashboard).
+- Example manifests: mgmt controller CPU request 200m and limit 2, memory
+  limit 192Mi (were 20m, 150m and 64Mi); stg worker CPU request 200m and
+  limit 2 (were 50m and 1).
+
+### Added
+
+- Docs: [Comparison](docs/comparison.md) with similar tools, and
+  [The name](docs/name.md).
+
 ## 1.8.4
 
 Resource usage. Measured with the real binaries against a simulated
