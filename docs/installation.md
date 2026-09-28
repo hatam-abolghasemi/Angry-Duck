@@ -28,7 +28,21 @@ Recommended containerd settings:
 in labels and the ingress host. Copy one and adapt it to your cluster. The
 steps below use `stg`.
 
-### 1. Build and push the images
+### 1. Get the images
+
+Every release publishes both images to GitHub Container Registry, tagged with
+the version (`1.8.5`) and `latest`:
+
+```text
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.5
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.5
+```
+
+They are public, so kubelet needs no `imagePullSecrets` for them. If you use
+them, you can drop `gitlab-docker-registry` from the manifests and skip
+creating it below.
+
+To build and push your own instead:
 
 ```bash
 cd app

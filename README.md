@@ -1,9 +1,12 @@
 # 🦆🔪 Angry Duck
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/hatam-abolghasemi/Angry-Duck)](https://github.com/hatam-abolghasemi/Angry-Duck/releases)
+
 **Peer-to-peer image distribution, pull rescue and image cleanup for Kubernetes nodes running containerd.**
 
-Angry Duck puts a freshly pushed image on every node before your pods ask for
-it. The registry serves each image only a handful of times, and the rest of
+Angry Duck pre-pulls a freshly pushed image onto every node before your pods
+ask for it. The registry serves each image only a handful of times, and the rest of
 the fleet gets it from peers. When a node can't pull an image that another
 node already has, Angry Duck copies it over. It also keeps node disks tidy by
 removing images nothing has used.
@@ -70,7 +73,7 @@ and cleanup.
 
 | Feature | What it does | Details |
 |---|---|---|
-| **Preheat** | On push, the few nodes that already hold most of the image pull it, so the registry serves little more than the changed layers. | [Preheat](docs/preheat.md) |
+| **Preheat** | Image pre-pull on push: the few nodes that already hold most of the image pull it, so the registry serves little more than the changed layers. | [Preheat](docs/preheat.md) |
 | **Propagation** | Every other node gets the image from peers, one transfer per source at a time, doubling the holders every round. | [Propagation](docs/propagation.md) |
 | **Rescue** | A pod stuck in `ImagePullBackOff` gets its image copied from a node that has it, for any image. | [Rescue](docs/rescue.md) |
 | **Transfers** | Only missing layers move, as digest-verified blobs from any peer, with snapshots as a last resort. | [Transfers](docs/transfers.md) |
@@ -83,8 +86,13 @@ You need Kubernetes 1.30+, containerd with the overlayfs snapshotter, and
 node-exporter on every node. See [Installation](docs/installation.md) for the
 full steps.
 
+Prebuilt images for every release are on GitHub Container Registry:
+`ghcr.io/hatam-abolghasemi/angry-duck-controller` and
+`ghcr.io/hatam-abolghasemi/angry-duck-worker`. Point the `image:` fields in
+the manifests at them, or build your own.
+
 ```bash
-# Build and push the two images, then create the namespace and secrets.
+# Create the namespace and secrets.
 kubectl apply -f deploy/stg/namespace.yaml
 kubectl -n angryduck create secret generic angryduck-rescue-token --from-literal=token=$(openssl rand -hex 32)
 
@@ -120,7 +128,11 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.8.4**; see the [changelog](CHANGELOG.md). Angry
+The current version is **1.8.5**; see the [changelog](CHANGELOG.md). Angry
 Duck targets Linux nodes running containerd. Preheat pulls can also use
 `crictl` or `docker`, but propagation, rescue, the mirror and cleanup work
 through containerd directly.
+
+## License
+
+Angry Duck is licensed under the [Apache License 2.0](LICENSE).

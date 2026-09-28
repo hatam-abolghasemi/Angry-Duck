@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Apache-2.0 [license](LICENSE).
+- Release workflow for GitHub: each version tag publishes the controller and
+  worker images to `ghcr.io/hatam-abolghasemi` and creates a GitHub Release
+  from this changelog. See [Installation](docs/installation.md#1-get-the-images).
+
+### Fixed
+
+- README listed 1.8.4 as the current version.
+
 ## 1.8.5
 
 ### Fixed
