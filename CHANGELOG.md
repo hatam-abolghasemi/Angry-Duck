@@ -1,6 +1,60 @@
 # Changelog
 
-## Unreleased
+## 1.8.6
+
+### Security
+
+- The worker no longer needs host privileges. It talks to containerd's API
+  and CRI over the socket instead of chrooting into `/proc/1/root` to run the
+  node's `crictl`, `ctr` and `tar`. The DaemonSet drops `hostPID`, the
+  unconfined AppArmor profile and all ten added capabilities (`SYS_ADMIN`,
+  `SYS_PTRACE`, `SYS_CHROOT`, `DAC_*`, `CHOWN`, `FOWNER`, `FSETID`,
+  `SETFCAP`, `MKNOD`), and adds `seccompProfile: RuntimeDefault` and
+  `readOnlyRootFilesystem`. It mounts the containerd socket, its content
+  store (read-only), `config.toml` (read-only), `certs.d` and the state dir.
+- Snapshot shipping goes through containerd's diff service on both ends, and
+  transfers between 1.8.6 workers carry a SHA-256 checked before the commit.
+  Pre-1.8.6 peers keep working in both directions during a rollout. See
+  [Transfers](docs/transfers.md#snapshots) for the one difference: extended
+  attributes other than `security.capability` don't travel with a snapshot.
+- `/report` (controller) and `/pull`, `/pull/cancel` (worker) require the
+  shared token when one is configured (`AUTH_MODE`).
+- `/webhook/preheat` requires CI's own bearer token from the new
+  `angryduck-webhook-token` Secret (`WEBHOOK_TOKEN_PATH`). Without the
+  Secret it stays open, with a warning at startup.
+
+- The worker runs on the pod network: no more `hostNetwork`. The mirror
+  listens on the pod IP and answers only containerd, which sends a random
+  per-pod token from `hosts.toml`. node-exporter is read at the node IP.
+  NetworkPolicy now applies to the worker.
+- On SIGTERM the worker removes its `hosts.toml` files and releases rescue
+  pins. When its DaemonSet is deleted, it also removes temporary snapshots
+  and base images and its state files. This needs `get` on its own
+  DaemonSet, the worker's only Kubernetes API permission.
+
+### Added
+
+- `angryduck_worker_containerd_calls_total{method}`: every call the worker
+  makes to containerd.
+- `angryduck_process_memory_bytes{component, kind}` for worker and
+  controller: `rss_anon` (memory really held), `rss_file` (code pages),
+  `heap_live`, `heap_retained`, `heap_released`, `stacks`.
+- Worker and controller return freed heap to the OS once a minute when more
+  than 1 MiB is retained.
+
+### Performance
+
+Measured on a node with 304 images and 614 snapshots, next to 1.8.5: CPU at
+steady state (worker, its subprocesses and containerd) from ≈0.9% to ≈0.17%
+of a core; no more `ctr`/`crictl` processes of up to ~27 MiB each; blob
+rescue and the mirror faster; snapshot rescue slower. See
+[Sizing](docs/operations.md#sizing).
+
+### Removed
+
+- The `docker` runtime backend and the `ctr`/`crictl` CLI backends. Only
+  containerd is supported; `CONTAINER_RUNTIME=crictl` and `ctr` are still
+  accepted. `HOST_ROOT` is no longer a chroot.
 
 ### Added
 

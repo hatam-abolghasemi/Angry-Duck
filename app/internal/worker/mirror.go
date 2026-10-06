@@ -41,7 +41,7 @@ var (
 	)
 )
 
-// MirrorStore is what the mirror needs from containerd. CtrStore has it.
+// MirrorStore is what the mirror needs from containerd. ContainerdStore has it.
 type MirrorStore interface {
 	Digests(ctx context.Context) (map[string]bool, error)
 	ReadBlob(ctx context.Context, digest string, max int64) ([]byte, error)
@@ -61,6 +61,7 @@ type MirrorStore interface {
 // difference with preheat and propagation is only that nothing is spread
 // ahead of time.
 type Mirror struct {
+	clientToken   string // see RequireClientToken
 	store         MirrorStore
 	nodeID        string
 	token         string
@@ -80,6 +81,12 @@ type holderEntry struct {
 const holderTTL = 30 * time.Second
 
 // NewMirror builds a mirror.
+// RequireClientToken makes the mirror's registry API answer only requests
+// carrying token, which containerd sends from the hosts.toml header. The
+// mirror listens on the pod IP, reachable from every pod; without this
+// any of them could pull private image content through it.
+func (m *Mirror) RequireClientToken(token string) { m.clientToken = token }
+
 func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 	return &Mirror{
 		store: store, nodeID: nodeID, token: token, controllerURL: strings.TrimRight(controllerURL, "/"),
@@ -95,6 +102,10 @@ func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 // Handler serves the registry API containerd talks to.
 func (m *Mirror) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.clientToken != "" && !sharedtoken.Valid(r, m.clientToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -336,11 +347,51 @@ const hostsMarker = "# managed by angryduck"
 type HostsConfig struct {
 	HostRoot  string   // the node's filesystem as seen from the worker
 	ConfigDir string   // containerd's config_path on the node, e.g. /etc/containerd/certs.d
-	Mirror    string   // "127.0.0.1:18082"
+	Mirror    string   // the mirror's address, as containerd reaches it: "<pod IP>:18082"
+	Token     string   // sent by containerd to the mirror (hosts.toml header); "" sends none
 	Extra     []string // registries to configure even before an image of theirs is local
 	NodeID    string
 
+	mu     sync.Mutex
+	wrote  bool // Sync ran with the mirror on, so there may be files to remove
+	closed bool // set by RemoveOwn: no more writes
 	warned map[string]bool
+}
+
+// RemoveOwn removes every hosts.toml this worker wrote (marked, and
+// pointing at this worker's mirror address), and the registry directory
+// when that leaves it empty, so containerd goes straight to the registry
+// again. Files another worker pod wrote (a surge rollout) are left alone.
+// Sync writes nothing afterwards. It returns the number of files removed.
+func (h *HostsConfig) RemoveOwn() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	if h.Mirror == "" || !h.wrote {
+		return 0
+	}
+	root := filepath.Join(h.HostRoot, h.ConfigDir)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	ours := `[host."http://` + h.Mirror + `"]`
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(root, e.Name(), "hosts.toml")
+		b, err := os.ReadFile(p)
+		if err != nil || !strings.HasPrefix(string(b), hostsMarker) || !strings.Contains(string(b), ours) {
+			continue
+		}
+		if os.Remove(p) == nil {
+			n++
+			_ = os.Remove(filepath.Join(root, e.Name())) // only if now empty
+		}
+	}
+	return n
 }
 
 // Sync writes (or, with enabled=false, removes) hosts.toml for every
@@ -349,6 +400,14 @@ type HostsConfig struct {
 // restart is needed, as long as its CRI registry config_path points at
 // ConfigDir.
 func (h *HostsConfig) Sync(images []string, enabled bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	if enabled {
+		h.wrote = true
+	}
 	if h.warned == nil {
 		h.warned = map[string]bool{}
 		if cfg, err := os.ReadFile(filepath.Join(h.HostRoot, "/etc/containerd/config.toml")); err == nil && enabled && !strings.Contains(string(cfg), h.ConfigDir) {
@@ -388,7 +447,7 @@ func (h *HostsConfig) Sync(images []string, enabled bool) {
 	}
 	sort.Strings(names)
 	for _, host := range names {
-		want := hostsToml(host, h.Mirror)
+		want := hostsToml(host, h.Mirror, h.Token)
 		p := filepath.Join(root, host, "hosts.toml")
 		b, err := os.ReadFile(p)
 		switch {
@@ -405,7 +464,7 @@ func (h *HostsConfig) Sync(images []string, enabled bool) {
 			logging.Warnf("angryduck-worker[%s]: mirror: %v", h.NodeID, err)
 			continue
 		}
-		if err := os.WriteFile(p, []byte(want), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(want), 0o600); err != nil {
 			logging.Warnf("angryduck-worker[%s]: mirror: writing hosts.toml for %s: %v", h.NodeID, host, err)
 			continue
 		}
@@ -413,7 +472,7 @@ func (h *HostsConfig) Sync(images []string, enabled bool) {
 	}
 }
 
-func hostsToml(host, mirror string) string {
+func hostsToml(host, mirror, token string) string {
 	server := "https://" + host
 	if host == "docker.io" {
 		server = "https://registry-1.docker.io"
@@ -423,5 +482,13 @@ func hostsToml(host, mirror string) string {
 		"# this node or a peer when one has it, else from the registry.\n" +
 		"server = \"" + server + "\"\n\n" +
 		"[host.\"http://" + mirror + "\"]\n" +
-		"  capabilities = [\"pull\"]\n"
+		"  capabilities = [\"pull\"]\n" + tokenHeader(mirror, token)
+}
+
+func tokenHeader(mirror, token string) string {
+	if token == "" {
+		return ""
+	}
+	return "  [host.\"http://" + mirror + "\".header]\n" +
+		"    Authorization = \"Bearer " + token + "\"\n"
 }

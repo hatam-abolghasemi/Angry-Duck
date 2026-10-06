@@ -291,21 +291,6 @@ func TestExport_RefusesDigestsOfOtherImages(t *testing.T) {
 	}
 }
 
-func TestParseCtrImageRow(t *testing.T) {
-	// Real `ctr -n k8s.io images ls` output from a stg node.
-	out := `REF                                                                                                                                  TYPE                                                      DIGEST                                                                  SIZE      PLATFORMS                                                                              LABELS
-registry.example.com/devops/generic/angry-duck-worker:1.4.10                                                                        application/vnd.oci.image.index.v1+json                   sha256:528765b3403fae29b50bd0428339d79d280777decaa1f4afc8455284120532db 3.8 MiB   linux/amd64                                                                            io.cri-containerd.image=managed
-registry.example.com/devops/generic/angry-duck-worker:1.5.0                                                                         application/vnd.oci.image.index.v1+json                   sha256:4e24924f85f679ea6747cd558dda60bd66bf7acba4d2b54eb053de9cb5edd5c6 3.8 MiB   linux/amd64                                                                            io.cri-containerd.image=managed
-`
-	mt, d, ok := parseCtrImageRow(out, "registry.example.com/devops/generic/angry-duck-worker:1.5.0")
-	if !ok || mt != blobship.MediaTypeOCIIndex || d != "sha256:4e24924f85f679ea6747cd558dda60bd66bf7acba4d2b54eb053de9cb5edd5c6" {
-		t.Fatalf("got %q %q %v", mt, d, ok)
-	}
-	if _, _, ok := parseCtrImageRow(out, "registry.example.com/devops/generic/angry-duck-worker:1.5"); ok {
-		t.Fatal("prefix of a ref must not match")
-	}
-}
-
 func TestRescue_PrefersAnotherSourcesBlobOverPrimarySnapshot(t *testing.T) {
 	// The primary pulled with discard_unpacked_layers=true (snapshots
 	// only); the second source still has the blobs. No snapshot travels.

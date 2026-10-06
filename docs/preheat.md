@@ -10,6 +10,7 @@ CI calls the controller's webhook right after `docker push`:
 
 ```bash
 curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+  -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
 
@@ -52,7 +53,7 @@ standard registries without per-registry settings. Credentials come from the
 dockerconfigjson at `REGISTRY_CREDENTIALS_PATH`. List every private registry
 you push to in that file.
 
-Workers pull with the node's container runtime CLI (`CONTAINER_RUNTIME`), so
+Workers pull through containerd's CRI API directly, not through kubelet, so
 kubelet's `imagePullSecrets` don't apply. They use the same credentials file.
 
 ## Metrics

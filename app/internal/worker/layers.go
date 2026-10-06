@@ -13,7 +13,7 @@ import (
 	"angryduck/internal/model"
 )
 
-// LayerLister is what the tracker needs from containerd. CtrStore has it.
+// LayerLister is what the tracker needs from containerd. ContainerdStore has it.
 type LayerLister interface {
 	Digests(ctx context.Context) (map[string]bool, error)
 	Snapshots(ctx context.Context) (map[string]bool, error)

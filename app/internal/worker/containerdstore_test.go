@@ -34,21 +34,17 @@ func TestContainerdRoot(t *testing.T) {
 	}
 }
 
-func blobStore(t *testing.T) (*CtrStore, string, []byte) {
+func blobStore(t *testing.T) (*ContainerdStore, string, []byte) {
 	t.Helper()
 	root := t.TempDir()
-	blobDir := filepath.Join(root, "var/lib/containerd/io.containerd.content.v1.content/blobs/sha256")
+	blobDir := filepath.Join(root, "io.containerd.content.v1.content/blobs/sha256")
 	os.MkdirAll(blobDir, 0o755)
 	data := bytes.Repeat([]byte("layer"), 1000)
 	sum := sha256.Sum256(data)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 	os.WriteFile(filepath.Join(blobDir, hex.EncodeToString(sum[:])), data, 0o644)
-	hx, err := NewHostExec(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := NewCtrStore(hx, "k8s.io", "")
-	if got := s.UseBlobDir(""); got != blobDir {
+	s := NewContainerdStore(nil, "k8s.io", "")
+	if got := s.UseBlobDir(root, ""); got != blobDir {
 		t.Fatalf("UseBlobDir = %q, want %q", got, blobDir)
 	}
 	return s, digest, data
@@ -76,7 +72,7 @@ func TestDirectBlobReads(t *testing.T) {
 	if err := s.StreamContent(ctx, digest, cw); err != nil || cw.n != int64(len(data)) {
 		t.Fatalf("StreamContent: %v, %d bytes", err, cw.n)
 	}
-	// Not on disk (and no ctr here): falls back to ctr, which fails.
+	// Not on disk: would go through the content API.
 	missing := "sha256:" + hex.EncodeToString(make([]byte, 32))
 	if _, ok := func() (int64, bool) { _, n, ok := s.openBlob(missing); return n, ok }(); ok {
 		t.Fatal("openBlob found a missing blob")
@@ -168,15 +164,14 @@ func TestListingCallerCancelDoesNotFailOthers(t *testing.T) {
 	}
 }
 
-func TestHostExecListingGateSerializes(t *testing.T) {
-	hx, _ := NewHostExec("/")
+func TestListingGateSerializes(t *testing.T) {
 	var cur, peak atomic.Int32
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rel, err := hx.AcquireListing(context.Background())
+			rel, err := acquireListing(context.Background())
 			if err != nil {
 				t.Error(err)
 				return
@@ -194,9 +189,9 @@ func TestHostExecListingGateSerializes(t *testing.T) {
 		t.Fatalf("peak concurrent listings %d, want 1", peak.Load())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rel, _ := hx.AcquireListing(context.Background())
+	rel, _ := acquireListing(context.Background())
 	cancel()
-	if _, err := hx.AcquireListing(ctx); err == nil {
+	if _, err := acquireListing(ctx); err == nil {
 		t.Fatal("AcquireListing ignored a cancelled context")
 	}
 	rel()

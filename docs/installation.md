@@ -2,12 +2,11 @@
 
 ## Requirements
 
-- **Kubernetes 1.30+**. The worker uses `securityContext.appArmorProfile`.
-- **containerd** on every node with the default `overlayfs` snapshotter, and
-  `ctr` and GNU `tar` installed on the node. `crictl` is recommended for
-  preheat pulls (`CONTAINER_RUNTIME=crictl`).
-- **node-exporter** on every node with host networking, reachable at
-  `localhost:9100` by default. Workers read disk usage from it.
+- **Kubernetes 1.25+**.
+- **containerd 1.6+** on every node with the default `overlayfs` snapshotter
+  and the CRI plugin (as kubelet uses it). No node tools are needed.
+- **node-exporter** on every node with host networking, on port `9100`.
+  Workers read disk usage from it at the node's IP.
 - **Network**: workers reachable from each other and from the controller on
   port `18081` of the node network.
 - **Registry credentials**: a dockerconfigjson covering every private registry
@@ -31,11 +30,11 @@ steps below use `stg`.
 ### 1. Get the images
 
 Every release publishes both images to GitHub Container Registry, tagged with
-the version (`1.8.5`) and `latest`:
+the version (`1.8.6`) and `latest`:
 
 ```text
-ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.5
-ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.5
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.6
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.6
 ```
 
 They are public, so kubelet needs no `imagePullSecrets` for them. If you use
@@ -47,10 +46,10 @@ To build and push your own instead:
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.8.5 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.8.5 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.8.5
-docker push $REGISTRY/angry-duck-worker:1.8.5
+docker build -t $REGISTRY/angry-duck-controller:1.8.6 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.8.6 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.8.6
+docker push $REGISTRY/angry-duck-worker:1.8.6
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and
@@ -63,6 +62,7 @@ Set the `image:` fields in `deployment-controller.yaml` and
 | `gitlab-docker-registry` | both, as `imagePullSecrets` | Credentials for kubelet to pull the Angry Duck images. |
 | `gitlab-registry-pull` | both, mounted as a file | Credentials for seed pulls and manifest reads (`REGISTRY_CREDENTIALS_PATH`). |
 | `angryduck-rescue-token` | both, mounted as a file | The shared token. Without it, rescue, propagation and the mirror stay off. |
+| `angryduck-webhook-token` | controller, mounted as a file | CI's token for the webhook. Without it, the webhook is unauthenticated. |
 
 ```bash
 kubectl apply -f deploy/stg/namespace.yaml
@@ -74,6 +74,9 @@ kubectl -n angryduck create secret docker-registry gitlab-registry-pull \
   --docker-server=registry.example.com --docker-username=<user> --docker-password=<password>
 
 kubectl -n angryduck create secret generic angryduck-rescue-token \
+  --from-literal=token=$(openssl rand -hex 32)
+
+kubectl -n angryduck create secret generic angryduck-webhook-token \
   --from-literal=token=$(openssl rand -hex 32)
 ```
 
@@ -88,8 +91,8 @@ Edit `deploy/stg/configmap-env.yaml`. The values most worth checking:
 | Setting | Why |
 |---|---|
 | `RANK_EXCLUDE_NODE_SUBSTRINGS` | Keep control-plane nodes from being chosen as seeds. |
-| `CONTAINER_RUNTIME` | `crictl` unless your nodes lack it. |
-| `NODE_EXPORTER_URL` | Must reach node-exporter from the host network. |
+| `CONTAINERD_ROOT` | Only if containerd's root isn't `/var/lib/containerd`; change the DaemonSet's content-store mount to match. |
+| `NODE_EXPORTER_URL` | Set in the DaemonSet to the node IP; change the port there if yours differs. |
 | `PROPAGATE_MAX_UTILIZATION`, `GC_*` | Keep below kubelet's `imageGCHighThresholdPercent`. |
 | `MIRROR_ENABLED` | Enable once containerd's `config_path` is set. |
 
@@ -118,8 +121,10 @@ rescuer and propagator starting without warnings.
 ### 6. Expose the webhook
 
 Set the host in `ingress-controller-webhook.yaml`. The ingress exposes only
-`/angryduck/webhook/preheat`. The webhook has no authentication of its own, so
-restrict it to your CI runners; see [Security](security.md).
+`/angryduck/webhook/preheat`. Store the `angryduck-webhook-token` value as a
+masked CI variable, `ANGRYDUCK_WEBHOOK_TOKEN`, and send it as a bearer token.
+Restricting the ingress to your CI runners as well is a good idea; see
+[Security](security.md).
 
 ## Integrate with CI
 
@@ -128,6 +133,7 @@ pipeline:
 
 ```bash
 curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+  -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
 

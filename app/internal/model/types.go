@@ -198,12 +198,17 @@ type BlobPlanRequest struct {
 }
 
 // SnapshotExportRequest asks a source worker to stream one layer's
-// snapshot directory as a gzip-compressed tar (served at /snapshots/export).
+// snapshot as a gzip-compressed tar (served at /snapshots/export).
 // ChainID must be a layer of the image's plan; anything else is refused.
+//
+// Format is the tar format the receiver wants (blobship.FormatOCILayer
+// from 1.8.6 on). Receivers before 1.8.6 leave it empty and get the overlayfs
+// directory format they apply themselves.
 type SnapshotExportRequest struct {
 	Image    string `json:"image"`
 	Platform string `json:"platform"`
 	ChainID  string `json:"chain_id"`
+	Format   string `json:"format,omitempty"`
 }
 
 // BlobExportRequest asks a source worker to stream a partial OCI archive

@@ -6,8 +6,8 @@ Port `8080`.
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `POST /webhook/preheat` | none | Body `{"image": "..."}`. Returns `202` with the seed nodes, or `503` when no worker is fresh. Short names are normalized, so `nginx` becomes `docker.io/library/nginx:latest`. Starts propagation. |
-| `POST /report` | none | Worker reports. |
+| `POST /webhook/preheat` | webhook token, when configured | Body `{"image": "..."}`. Returns `202` with the seed nodes, or `503` when no worker is fresh. Short names are normalized, so `nginx` becomes `docker.io/library/nginx:latest`. Starts propagation. |
+| `POST /report` | token, when configured | Worker reports. |
 | `GET /layers/holders?digest=&exclude=` | token | Nodes holding a blob, for mirrors. |
 | `GET /status` | none | Workers, the preheat target, stuck pulls (`rescues`) and active `propagations`. |
 | `GET /metrics` | none | Prometheus metrics. |
@@ -16,7 +16,8 @@ Port `8080`.
 Example:
 
 ```bash
-curl -s -X POST localhost:8080/webhook/preheat -H 'Content-Type: application/json' \
+curl -s -X POST localhost:8080/webhook/preheat -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
+  -H 'Content-Type: application/json' \
   -d '{"image": "registry.example.com/app:1.2.3"}'
 ```
 
@@ -41,6 +42,7 @@ token as `Authorization: Bearer <token>`.
 | `GET /metrics` | none | Prometheus | Prometheus metrics. |
 | `GET /healthz` | none | kubelet | Liveness and readiness. |
 
-The mirror itself listens separately on `MIRROR_LISTEN_ADDR`
-(`127.0.0.1:18082`) and implements the read-only part of the OCI distribution
+The mirror itself listens separately on `MIRROR_LISTEN_ADDR` (`:18082`, on
+the pod IP), answers only requests carrying the per-pod token containerd
+sends from `hosts.toml`, and implements the read-only part of the OCI distribution
 API for containerd.

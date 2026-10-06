@@ -53,23 +53,36 @@ transfer fails the import instead of landing a corrupt image.
 A node can run an image without any of its layer blobs: with
 `discard_unpacked_layers = true`, containerd deletes them after unpacking, and
 it never downloads a layer whose snapshot already exists. A blob can't be
-rebuilt from a snapshot with the same digest, so the snapshot directory itself
-is shipped.
+rebuilt from a snapshot with the same digest, so the layer is rebuilt from
+the snapshot instead.
 
-- The node's own `tar` preserves ownership, overlayfs whiteouts and
-  `trusted.overlay.*` attributes. Fast gzip compresses it on the wire, and the
-  receiver commits it under the layer's chainID. The import that follows finds
-  those chainIDs and skips the layers.
+- The source asks containerd's diff service for the snapshot as an OCI layer
+  tar: what it adds or changes on top of its parent, with whiteouts for what
+  it removes. Fast gzip compresses it on the wire. The receiver stages it in
+  its content store and asks containerd to apply it onto a new snapshot of
+  the parent, committed under the layer's chainID. The import that follows
+  finds those chainIDs and skips the layers.
+- containerd's differ keeps contents, ownership, modes (setuid included),
+  symlinks, hard links and file capabilities (`security.capability`). Like
+  Docker's, it drops other extended attributes, such as `user.*`; a layer
+  whose files carry those loses them when it travels as a snapshot. Layers
+  that travel as blobs are unaffected.
 - A snapshot needs its parent unpacked first. When layers below it do have
   blobs, the receiver first imports a small temporary **base image** of
   exactly those layers, so they arrive as verified blobs and the snapshot lands
   on top. The temporary image is removed right afterwards.
+- **Mixed versions.** Workers before 1.8.6 ship the overlayfs directory itself
+  (GNU tar, whiteouts as device files). A 1.8.6 receiver converts that format;
+  a 1.8.6 source serves a pre-1.8.6 receiver in it. So rescue keeps working while
+  a rollout is in progress.
 
 ## Integrity
 
-Snapshots can't be verified against a digest, because the tar bytes never
-match the original layer. They rely on the token-authenticated peer, TCP and
-gzip's CRC-32, checked before each commit.
+Snapshots can't be verified against the layer's digest, because the tar
+bytes never match the original layer. Between 1.8.6 workers, the source sends
+the SHA-256 of the exact tar it produced as an HTTP trailer, and the receiver
+checks it, and gzip's CRC-32, before the commit. From a pre-1.8.6 source there
+is only the CRC, the token-authenticated peer and TCP.
 
 > **Recommendation:** keep `discard_unpacked_layers = false` in containerd.
 > Verified blobs, about a third of the size of snapshots, can then be used

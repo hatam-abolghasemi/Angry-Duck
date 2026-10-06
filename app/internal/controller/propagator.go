@@ -15,6 +15,7 @@ import (
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+	"angryduck/internal/sharedtoken"
 )
 
 var (
@@ -455,7 +456,7 @@ func (p *Propagator) send(ctx context.Context, job *propagation, target *workerE
 		logging.Warnf("angryduck-controller: propagator: seed node=%s still hasn't pulled image=%s after %s; cancelling its registry pull and shipping it from peers",
 			target.NodeID, job.image, p.seedTimeout(job).Round(time.Second))
 		seedTimeoutsTotal.Inc(target.NodeID)
-		cancelPull(ctx, target.Address, job.image)
+		cancelPull(ctx, target.Address, job.image, p.token)
 	}
 
 	start := time.Now()
@@ -490,7 +491,7 @@ func (p *Propagator) send(ctx context.Context, job *propagation, target *workerE
 
 // cancelPull asks a worker to stop pulling image from the registry.
 // Best-effort: a worker that already finished answers false, which is fine.
-func cancelPull(ctx context.Context, addr, image string) {
+func cancelPull(ctx context.Context, addr, image, token string) {
 	body, _ := json.Marshal(model.PullOrder{Image: image})
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -499,6 +500,7 @@ func cancelPull(ctx context.Context, addr, image string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	sharedtoken.SetIfAny(req, token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		logging.Warnf("angryduck-controller: cancelling pull of image=%s on %s: %v", image, addr, err)

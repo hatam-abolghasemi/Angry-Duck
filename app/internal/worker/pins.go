@@ -27,7 +27,7 @@ var (
 	)
 )
 
-// Temporary snapshot keys created by CtrStore; anything with these
+// Temporary snapshot keys created by ContainerdStore; anything with these
 // prefixes at startup was left by a worker that died mid-rescue.
 var tempSnapshotPrefixes = []string{"angryduck-rescue-", "angryduck-view-"}
 
@@ -94,6 +94,19 @@ func (p *Pins) Release(ctx context.Context, chainIDs []string) {
 	}
 	p.mu.Unlock()
 	p.unpin(ctx, mine, "")
+}
+
+// ReleaseAll releases every pin, for shutdown: an import a pin was
+// protecting is aborted with this worker anyway, and a snapshot left
+// unpinned is only garbage, never in use.
+func (p *Pins) ReleaseAll(ctx context.Context) {
+	p.mu.Lock()
+	all := make([]string, 0, len(p.pins))
+	for c := range p.pins {
+		all = append(all, c)
+	}
+	p.mu.Unlock()
+	p.unpin(ctx, all, "")
 }
 
 // Sweep releases pins past their TTL.

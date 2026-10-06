@@ -23,14 +23,13 @@ data:
   RANK_PREFER_IMAGE_LOCALITY: "true"
   RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
   WORKER_LISTEN_ADDR: ":18081"
-  NODE_EXPORTER_URL: "http://localhost:9100/metrics"
+  # NODE_EXPORTER_URL is set in the DaemonSet, from the node IP.
   CONTROLLER_URL: "http://angryduck-controller.angryduck.svc.cluster.local:8080"
   REPORT_INTERVAL_S: "15"
   PREHEAT_ATTRIBUTION_INTERVAL_S: "300"
   PREHEAT_ATTRIBUTION_RETENTION_S: "360"
-  CONTAINER_RUNTIME: "crictl"
+  CONTAINER_RUNTIME: "containerd"
   CONTAINER_RUNTIME_ENDPOINT: "unix:///run/containerd/containerd.sock"
-  HOST_ROOT: "/proc/1/root"
   REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"
   RESCUE_ENABLED: "true"
   RESCUE_TOKEN_PATH: "/etc/angryduck/rescue-token/token"
@@ -74,9 +73,10 @@ data:
   GC_BATCH: "5"
   GC_SETTLE_S: "10"
   GC_PROTECT_SUBSTRINGS: "pause"
-  # Pull-only P2P mirror for each node's containerd (127.0.0.1 only).
+  # Pull-only P2P mirror for each node's containerd, on the pod IP. Only
+  # containerd can use it: it sends a per-pod random token from hosts.toml.
   # Needs containerd's CRI registry config_path = MIRROR_CONTAINERD_CONFIG_DIR.
   MIRROR_ENABLED: "true"
-  MIRROR_LISTEN_ADDR: "127.0.0.1:18082"
+  MIRROR_LISTEN_ADDR: ":18082"
   MIRROR_CONTAINERD_CONFIG_DIR: "/etc/containerd/certs.d"
   MIRROR_REGISTRIES: "registry.example.com"

@@ -59,32 +59,16 @@ func (m *MemStore) Snapshots(context.Context) (map[string]bool, error) {
 	return out, nil
 }
 
-// SnapshotDirs implements Store; a "directory" is "mem:" + chainID.
-func (m *MemStore) SnapshotDirs(_ context.Context, chainID string, depth int) ([]string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var dirs []string
-	for c := chainID; c != ""; {
-		sn, ok := m.snaps[c]
-		if !ok {
-			return nil, fmt.Errorf("snapshot %s not found", c)
-		}
-		dirs = append([]string{"mem:" + c}, dirs...)
-		c = sn.parent
-	}
-	if len(dirs) != depth {
-		return nil, fmt.Errorf("snapshot %s has %d levels, expected %d", chainID, len(dirs), depth)
-	}
-	return dirs, nil
-}
-
 // ExportSnapshot implements Store.
-func (m *MemStore) ExportSnapshot(_ context.Context, dir string, w io.Writer) error {
+func (m *MemStore) ExportSnapshot(_ context.Context, chainID, parent string, w io.Writer) error {
 	m.mu.Lock()
-	sn, ok := m.snaps[strings.TrimPrefix(dir, "mem:")]
+	sn, ok := m.snaps[chainID]
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("no snapshot directory %s", dir)
+		return fmt.Errorf("snapshot %s not found", chainID)
+	}
+	if sn.parent != parent {
+		return fmt.Errorf("snapshot %s has parent %q, expected %q", chainID, sn.parent, parent)
 	}
 	_, err := w.Write(sn.data)
 	return err

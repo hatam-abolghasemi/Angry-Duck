@@ -15,6 +15,7 @@ import (
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+	"angryduck/internal/sharedtoken"
 )
 
 // pullOrdersTotal counts /pull requests the controller has sent to
@@ -83,6 +84,7 @@ type Ranker struct {
 	excludeSubstrings   []string
 	preferImageLocality bool
 	httpClient          *http.Client
+	token               string // sent on pull orders; "" sends none
 
 	mu              sync.Mutex
 	orderedForImage string
@@ -419,6 +421,9 @@ func (rk *Ranker) excludeMatching(workers []*workerEntry) []*workerEntry {
 	return kept
 }
 
+// SetToken makes pull orders carry the shared token. Call before Run.
+func (rk *Ranker) SetToken(token string) { rk.token = token }
+
 func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
 	registryLabel := imageref.RegistryLabel(image, rk.labelRegistryHost)
 	order := model.PullOrder{Image: image, OrderedAt: time.Now()}
@@ -434,6 +439,7 @@ func (rk *Ranker) sendPullOrder(nodeID, addr, image string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	sharedtoken.SetIfAny(req, rk.token)
 
 	resp, err := rk.httpClient.Do(req)
 	if err != nil {

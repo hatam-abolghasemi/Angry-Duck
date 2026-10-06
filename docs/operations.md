@@ -46,30 +46,51 @@ utilization math.
 | Webhook returns `503` | No fresh workers. Check worker logs, `SELF_ADDRESS`, `NODE_EXPORTER_URL` and that the controller can reach port `18081`. |
 | `angryduck_controller_seed_rankings_total` shows `repo` or `utilization` | The controller can't read the manifest. Add the registry to the `REGISTRY_CREDENTIALS_PATH` file. |
 | Rescue or propagation never starts | The shared token is missing or shorter than 32 characters, or the controller can't list pods. The controller logs a warning at startup. |
-| `permission denied` on `/proc/1/root` | The node enforces AppArmor and the worker isn't running unconfined. Check `appArmorProfile` in the DaemonSet. |
+| Workers report no disk usage | node-exporter isn't reachable at the node IP from pods. Check `NODE_EXPORTER_URL` in the DaemonSet. |
+| Mirror never used, containerd logs `401` | A stale `hosts.toml` from a worker that died without SIGTERM; the next worker rewrites it within seconds. |
+| Worker exits with `connecting to containerd` | The socket isn't mounted at `CONTAINER_RUNTIME_ENDPOINT`. Check the `containerd-sock` hostPath. |
 | Most transferred layers are snapshots | containerd has `discard_unpacked_layers = true`. See [Transfers](transfers.md#integrity). |
 | Mirror requests are all `miss` | containerd's `config_path` doesn't point at `MIRROR_CONTAINERD_CONFIG_DIR`, or peers have no blobs. |
 | `image cleanup: ... nothing is removable` | Every image on the node is running, protected or being pulled. The disk needs attention beyond images. |
-| Worker CPU near its limit | `CONTAINER_RUNTIME=containerd` on a busy node. Switch to `crictl`. |
 | Pod still pending after a successful rescue | kubelet waits for its backoff, up to 5 minutes. Delete the pod to retry now. |
 
 ## Sizing
 
+### Controller
+
 Measured with 1.8.4 against a simulated fleet of 150 nodes, each holding
-about 300 images and 9,000 layers:
+about 300 images and 9,000 layers: ~13m CPU, ~22Mi steady, ~26Mi right after
+a restart (manifest: 20m / 150m CPU, 32Mi / 64Mi memory). Memory grows roughly
+linearly with the number of nodes and peaks after a restart, when every worker
+resends its full layer inventory. Raise the request and limit for much larger
+fleets.
 
-| Component | CPU | Memory | Manifest request / limit |
-|---|---|---|---|
-| Controller | ~13m | ~22Mi steady, ~26Mi after a restart | 20m / 150m CPU, 32Mi / 64Mi memory |
-| Worker (process) | ~2m | ~15Mi | 50m / 1 CPU, 32Mi / 192Mi memory |
+### Worker
 
-- The controller's memory grows roughly linearly with the number of nodes.
-  It peaks just after a restart, when every worker resends its full layer
-  inventory. Raise its request and limit for much larger fleets.
-- The worker's own process is small. On top of it, one `ctr` or `crictl`
-  listing runs at a time, each a short-lived process of 20-40 MB counted in
-  the worker's pod, and transfers run `ctr images import` and `tar`. The
-  limit leaves room for those; the request covers the steady state.
+Measured with 1.8.6 against containerd 2.2 on a node holding 304 images,
+614 snapshots and 918 blobs, next to 1.8.5 on the same node:
+
+| | 1.8.5 | 1.8.6 |
+|---|---|---|
+| CPU at steady state, worker + its subprocesses + containerd | ≈0.9% of a core | ≈0.17% |
+| Calls to containerd | 5 full listings a minute, each a new `ctr`/`crictl` process (up to ~27 MiB each) | the same listings at the same intervals, as single gRPC calls |
+| Memory really held at idle (`rss_anon`) | ~3 MiB, plus the subprocesses | ~5–7 MiB, no subprocesses |
+| Peak during a 300 MB rescue | ~4 MiB + subprocesses | ~10 MiB |
+| 300 MB rescue as blobs | ~6 s | ~3–4 s |
+| 300 MB rescue as snapshots | ~8 s | ~10–14 s |
+| 400 mirror requests | ~4 s | ~2 s |
+
+- The worker's container memory (`kubectl top`) is about 15 MiB higher than
+  `rss_anon`: that is its own code, mapped from the binary, which the kernel
+  can drop and reload. Size against `angryduck_process_memory_bytes{kind="rss_anon"}`.
+- Once a minute, worker and controller hand freed heap back to the OS when
+  more than 1 MiB is retained, so after a burst memory returns to near its
+  idle level.
+- Snapshot rescue (only on nodes with `discard_unpacked_layers`) is slower
+  than in 1.8.5: containerd stages each layer once in its content store on
+  each side, the price of the worker having no capabilities.
+- Unpacking, diffs and content writes happen inside containerd and are not
+  counted in the worker's pod.
 - Both binaries default to `GOGC=50` and set `GOMEMLIMIT` to 90% of their
   memory limit. Set `GOGC` in the environment to override.
 
@@ -127,3 +148,16 @@ curl -sSf -H "Authorization: Bearer $TOKEN" \
 
 Better still, do this before rolling out a new version to a cluster with such
 a node.
+
+## Uninstalling
+
+`kubectl delete -f` on the DaemonSet (or the whole directory) is enough.
+Each worker, on SIGTERM, sees its DaemonSet gone and removes its
+`hosts.toml` files, releases rescue pins, removes temporary snapshots and
+base images, and deletes its state files. Images rescued or preheated onto
+nodes stay: kubelet uses them. The empty `/var/lib/angryduck` directory
+stays on each node.
+
+If the worker can't reach the API server on shutdown, it keeps the state
+files (a reinstall picks up from there); `hosts.toml` is removed either
+way.

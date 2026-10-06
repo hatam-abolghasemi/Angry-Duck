@@ -2,25 +2,34 @@
 
 Read this before deploying Angry Duck.
 
-## The worker is powerful on its node
+## The worker has no host privileges
 
-The worker is not `privileged: true`, but it runs with `hostPID`,
-`hostNetwork`, an unconfined AppArmor profile, and these capabilities, with
-all others dropped:
+The worker runs as root (for the root-owned containerd socket and node
+paths) with **no Linux capabilities**, no host PID namespace, the default
+seccomp and AppArmor profiles, no privilege escalation and a read-only root
+filesystem. It mounts:
 
-| Capability | Why |
-|---|---|
-| `SYS_CHROOT`, `SYS_PTRACE` | Chroot into `/proc/1/root` to run the node's own `crictl`, `ctr` and `tar`. |
-| `DAC_READ_SEARCH`, `DAC_OVERRIDE`, `CHOWN`, `FOWNER`, `FSETID`, `SETFCAP`, `MKNOD`, `SYS_ADMIN` | Read and write overlayfs snapshot directories faithfully, including ownership, device files and extended attributes. |
+| Node path | Access | Why |
+|---|---|---|
+| `/run/containerd/containerd.sock` | read-write | containerd's API and CRI: every image, layer and snapshot operation. |
+| `/var/lib/containerd/io.containerd.content.v1.content` | read-only | Serve blobs without a round trip through the API (optional). |
+| `/etc/containerd/config.toml` | read-only | Find containerd's root and check `config_path` for the mirror. |
+| `/etc/containerd/certs.d` | read-write | The mirror's `hosts.toml` files. |
+| `/var/lib/angryduck` | read-write | Rescue pins and image-usage history. |
 
-Without the unconfined AppArmor profile, reading `/proc/1/root` fails with
-`permission denied` on AppArmor-enforcing nodes such as Ubuntu.
+Work that needs privileges on the node (unpacking layers, mounting
+snapshots, writing files with their owners, modes and whiteouts) happens
+inside containerd, which already has them.
 
-The worker reads blob files from containerd's content store directly
-(read-only), and also drives containerd through its socket, which is already
-root-equivalent on the node, so the extra capabilities don't add a new level
-of trust. It is still a real blast radius: **pin the image by digest and sign
-it.**
+The containerd socket is still root-equivalent on the node: anything that
+can drive containerd can run a privileged container. That is inherent to a
+tool that manages images, and it is the trust the worker keeps. What is
+gone is the extra kernel attack surface on top of it. Control who can push
+the worker image.
+
+The worker runs on the pod network: nothing listens on node IPs, and
+NetworkPolicy applies to it. Its only Kubernetes API permission is `get` on
+its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 
 ## Trust boundaries
 
@@ -29,15 +38,24 @@ it.**
   images included, to anyone holding the shared token. Without a token,
   rescue, propagation and the mirror stay off rather than serve
   unauthenticated. Traffic is plain HTTP on the node network.
-- **The webhook, `/report`, `/pull` and `/pull/cancel` have no
-  authentication.** Restrict the webhook ingress to your CI runners, for
-  example with an IP allowlist on your ingress controller, and use a
-  NetworkPolicy so only the controller and other workers can reach port
-  `18081`.
-- **The mirror listens on `127.0.0.1` only** and has no authentication, like
-  any local registry mirror: node-local processes can read image content
-  through it. Peer fetches between mirrors go over the token-protected worker
-  port.
+- **`/report`, `/pull` and `/pull/cancel` require the shared token** when one
+  is configured (`AUTH_MODE`, see [Configuration](configuration.md)).
+  `/report` matters most: the address a worker reports is where rescue and
+  propagation send the token, so an unauthenticated report could collect it.
+  Without a token these endpoints stay open, as before, and rescue,
+  propagation and the mirror stay off.
+- **The webhook requires CI's own bearer token** (`angryduck-webhook-token`),
+  separate from the shared token so a leaked CI variable can't talk to
+  workers. Without the Secret it is unauthenticated and the controller logs a
+  warning at startup. An IP allowlist on the ingress is a good extra layer.
+- **NetworkPolicy applies to the worker.** Ports `18081` (worker API) and
+  `18082` (mirror) are on the pod IP. A policy can restrict `18081` to the
+  Angry Duck pods and your Prometheus; containerd's traffic to `18082` comes
+  from the node itself, which most CNIs (Calico included) always allow.
+- **The mirror answers only containerd.** containerd sends a random per-pod
+  token from `hosts.toml` (mode `0600`, root-only); any other pod gets `401`.
+  The shared token doesn't open it. Peer fetches between mirrors go over the
+  token-protected worker port.
 - **containerd verifies blobs**, so a peer can't substitute content for a
   digest. Snapshots can't be verified by digest; see
   [Transfers](transfers.md#integrity).

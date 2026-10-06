@@ -19,6 +19,8 @@ type Server struct {
 	ranker     *Ranker
 	rescuer    *Rescuer    // nil when rescue is off
 	propagator *Propagator // nil when propagation is off
+	auth       *sharedtoken.Auth
+	webhook    *sharedtoken.Auth // CI's token for /webhook/preheat
 	mux        *http.ServeMux
 }
 
@@ -27,10 +29,19 @@ type Server struct {
 func (s *Server) SetPropagator(p *Propagator) { s.propagator = p }
 
 // SetToken mounts /layers/holders, which workers' mirrors call, behind
-// the shared token.
+// the shared token, and makes /report require it too (subject to the
+// mode set with SetAuthMode).
 func (s *Server) SetToken(token string) {
+	s.auth.Token = token
 	s.mux.HandleFunc("/layers/holders", sharedtoken.Require(token, s.handleHolders))
 }
+
+// SetWebhookToken makes /webhook/preheat require token. It is CI's own
+// token, separate from the shared one, so CI can't talk to workers.
+func (s *Server) SetWebhookToken(token string) { s.webhook.Token = token }
+
+// SetAuthMode sets what /report does with a request without the token.
+func (s *Server) SetAuthMode(m sharedtoken.Mode) { s.auth.Mode = m }
 
 func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
 	digest := r.URL.Query().Get("digest")
@@ -50,9 +61,14 @@ func (s *Server) SetRescuer(rs *Rescuer) { s.rescuer = rs }
 
 // NewServer builds a Server with routes registered.
 func NewServer(registry *Registry, ranker *Ranker) *Server {
-	s := &Server{registry: registry, ranker: ranker, mux: http.NewServeMux()}
-	s.mux.HandleFunc("/webhook/preheat", s.handlePreheat)
-	s.mux.HandleFunc("/report", s.handleReport)
+	s := &Server{registry: registry, ranker: ranker, auth: &sharedtoken.Auth{}, webhook: &sharedtoken.Auth{}, mux: http.NewServeMux()}
+	// A preheat makes every node pull with the registry credentials, so
+	// whoever can reach the ingress could otherwise trigger it at will.
+	s.mux.HandleFunc("/webhook/preheat", s.webhook.Guard("/webhook/preheat", s.handlePreheat))
+	// /report decides which addresses rescue and propagation send the
+	// token to, so an unauthenticated report could register an attacker's
+	// address and collect it.
+	s.mux.HandleFunc("/report", s.auth.Guard("/report", s.handleReport))
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.Handle("/metrics", metrics.Handler())
 	s.mux.HandleFunc("/healthz", s.handleHealth)

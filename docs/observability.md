@@ -87,7 +87,30 @@ time range and the current tab.
 | `angryduck_worker_gc_cleaning` | gauge | `node` | 1 while the disk is above high and not yet back to low. |
 | `angryduck_worker_preheated_containers_running` | gauge | `node`, `repo` | Running containers from repos recently preheated on the node. |
 
+| `angryduck_worker_containerd_calls_total` | counter | `node`, `method` | gRPC calls to containerd, by service and method (`Content/List`, `ImageService/PullImage`, ...). The load the worker puts on containerd. |
+
 The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
+
+### Both components
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `angryduck_process_memory_bytes` | gauge | `component`, `kind` | Refreshed every 15s. `rss_anon`: memory the process really holds. `rss_file`: its own code, shared and reclaimable by the kernel. `heap_live`: what the Go heap needs right now. `heap_retained`: freed heap kept for reuse. `heap_released`: already returned to the OS. `stacks`: goroutine stacks. |
+
+`rss_anon` is the number to size against; container memory usage
+(`container_memory_working_set_bytes`) also counts `rss_file`, which the kernel
+can drop and reload at will. Once a minute, if `heap_retained` is above 1 MiB,
+the process hands it back to the OS, so after a burst `rss_anon` returns to
+near its idle level.
+
+Useful queries:
+
+```promql
+# containerd calls per minute, per worker
+sum by (node) (rate(angryduck_worker_containerd_calls_total[5m])) * 60
+# memory each worker really holds
+angryduck_process_memory_bytes{component="worker", kind="rss_anon"}
+```
 
 ## Suggested alerts
 

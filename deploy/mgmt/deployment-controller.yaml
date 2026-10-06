@@ -26,7 +26,7 @@ spec:
         - name: gitlab-docker-registry
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.8.5
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.6
           ports:
             - containerPort: 8080
               name: http
@@ -41,6 +41,9 @@ spec:
               readOnly: true
             - name: rescue-token
               mountPath: /etc/angryduck/rescue-token
+              readOnly: true
+            - name: webhook-token
+              mountPath: /etc/angryduck/webhook-token
               readOnly: true
           readinessProbe:
             httpGet:
@@ -74,4 +77,11 @@ spec:
         - name: rescue-token
           secret:
             secretName: angryduck-rescue-token
+            optional: true
+        # CI's token for /webhook/preheat, separate from the shared one so
+        # CI can't talk to workers. optional: without it the webhook is
+        # unauthenticated, and the controller logs a warning.
+        - name: webhook-token
+          secret:
+            secretName: angryduck-webhook-token
             optional: true

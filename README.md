@@ -45,9 +45,11 @@ when it has nothing to add.
   content that is addressed by digest.
 - **Verify what can be verified.** Layers travel as blobs and containerd checks
   every digest on import. Unpacked snapshots are shipped only as a last resort.
-- **Use what is already on the node.** The worker runs the node's own `crictl`,
-  `ctr` and `tar` through a chroot. Nothing is installed or replaced, and no
-  runtime binaries ship in the image.
+- **Ask containerd, don't impersonate it.** The worker talks to containerd
+  over its socket (its own API and CRI) and lets containerd do everything
+  that needs privileges on the node. The worker runs with no Linux
+  capabilities, no host PID namespace and the default seccomp and AppArmor
+  profiles.
 - **Be gentle.** Transfers are bounded per node and per cluster, retries back
   off, and cleanup works in small batches.
 - **Explain every decision.** Each decision is logged on one line, exposed in
@@ -104,6 +106,7 @@ Then call the webhook from CI after every push:
 
 ```bash
 curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+  -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
 
@@ -128,10 +131,8 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.8.5**; see the [changelog](CHANGELOG.md). Angry
-Duck targets Linux nodes running containerd. Preheat pulls can also use
-`crictl` or `docker`, but propagation, rescue, the mirror and cleanup work
-through containerd directly.
+The current version is **1.8.6**; see the [changelog](CHANGELOG.md). Angry
+Duck targets Linux nodes running containerd 1.6 or later.
 
 ## License
 

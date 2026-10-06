@@ -1,5 +1,6 @@
-// Package kube is the smallest Kubernetes API client the controller needs:
-// list pods with a field selector, from inside the cluster. It is written
+// Package kube is the smallest Kubernetes API client Angry Duck needs:
+// the controller lists pods with a field selector, and a worker checks on
+// shutdown whether its DaemonSet is being deleted. It is written
 // against net/http directly to keep Angry Duck free of client-go.
 package kube
 
@@ -8,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -145,7 +147,44 @@ func (c *Client) get(ctx context.Context, path string, into interface{}) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("GET %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(b)))
+		return &StatusError{Code: resp.StatusCode, msg: fmt.Sprintf("GET %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(b)))}
 	}
 	return json.NewDecoder(resp.Body).Decode(into)
+}
+
+// StatusError is a non-200 answer from the API server.
+type StatusError struct {
+	Code int
+	msg  string
+}
+
+func (e *StatusError) Error() string { return e.msg }
+
+// Namespace is the pod's own namespace, from the service account mount.
+func Namespace() string {
+	b, err := os.ReadFile(saDir + "/namespace")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// DaemonSetGone reports whether a DaemonSet is deleted (404) or being
+// deleted (deletionTimestamp set). Any other failure is an error: the
+// caller can't tell.
+func (c *Client) DaemonSetGone(ctx context.Context, namespace, name string) (bool, error) {
+	var ds struct {
+		Metadata struct {
+			DeletionTimestamp *string `json:"deletionTimestamp"`
+		} `json:"metadata"`
+	}
+	err := c.get(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(namespace)+"/daemonsets/"+url.PathEscape(name), &ds)
+	var se *StatusError
+	if errors.As(err, &se) && se.Code == http.StatusNotFound {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return ds.Metadata.DeletionTimestamp != nil, nil
 }

@@ -21,15 +21,18 @@ spec:
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: angryduck-worker
-      automountServiceAccountToken: false
-      hostNetwork: true
-      hostPID: true
-      dnsPolicy: ClusterFirstWithHostNet
+      # Only to ask, on shutdown, whether the DaemonSet is being deleted
+      # (and if so clean up the node); see serviceaccount-worker.yaml.
+      automountServiceAccountToken: true
+      # On the pod network: nothing listens on node IPs, and NetworkPolicy
+      # applies. Shutdown (removing hosts.toml, releasing pins, cleanup on
+      # uninstall) fits in this.
+      terminationGracePeriodSeconds: 30
       imagePullSecrets:
         - name: gitlab-docker-registry
       containers:
         - name: worker
-          image: registry.example.com/devops/generic/angry-duck-worker:1.8.5
+          image: registry.example.com/devops/generic/angry-duck-worker:1.8.6
           env:
             - name: NODE_ID
               valueFrom:
@@ -39,12 +42,31 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # The mirror's address in hosts.toml: containerd, on the host
+            # network, reaches local pods directly.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # node-exporter runs on the host network; GET only.
+            - name: NODE_EXPORTER_URL
+              value: "http://$(HOST_IP):9100/metrics"
           envFrom:
             - configMapRef:
                 name: angryduck-config
           ports:
             - containerPort: 18081
               name: http
+            - containerPort: 18082
+              name: mirror
           volumeMounts:
             - name: registry-creds
               mountPath: /etc/angryduck/registry-creds
@@ -52,6 +74,27 @@ spec:
             - name: rescue-token
               mountPath: /etc/angryduck/rescue-token
               readOnly: true
+            # Node paths, mounted at the same paths (HOST_ROOT is empty).
+            # containerd's API and CRI, the only way the worker touches
+            # images, layers and snapshots.
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            # Direct blob reads (optional; without it, blobs go through the
+            # content API). Change both paths if containerd's root isn't
+            # /var/lib/containerd.
+            - name: containerd-content
+              mountPath: /var/lib/containerd/io.containerd.content.v1.content
+              readOnly: true
+            # Read to find containerd's root and check config_path.
+            - name: containerd-config
+              mountPath: /etc/containerd/config.toml
+              readOnly: true
+            # The mirror writes hosts.toml here.
+            - name: containerd-certs
+              mountPath: /etc/containerd/certs.d
+            # Rescue pins and image-usage history, kept across restarts.
+            - name: state
+              mountPath: /var/lib/angryduck
           readinessProbe:
             httpGet:
               path: /healthz
@@ -74,21 +117,16 @@ spec:
           securityContext:
             privileged: false
             allowPrivilegeEscalation: false
-            appArmorProfile:
-              type: Unconfined
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            # Root, for the root-owned containerd socket and node paths
+            # above; no capabilities. Everything that needs privileges on
+            # the node (unpacking layers, mounting and writing snapshots)
+            # happens inside containerd.
+            runAsUser: 0
             capabilities:
               drop: ["ALL"]
-              # SYS_CHROOT, SYS_PTRACE: run the node's crictl/ctr/tar
-              # (see HOST_ROOT). The rest are for rescue's snapshot
-              # shipping, which copies overlayfs snapshot directories with
-              # the node's tar: reading any file (DAC_READ_SEARCH), writing
-              # it back with its owner, mode and file capabilities (CHOWN,
-              # DAC_OVERRIDE, FOWNER, FSETID, SETFCAP), recreating deleted-
-              # file markers (MKNOD) and trusted.overlay.* attributes
-              # (SYS_ADMIN). The worker can already drive containerd, which
-              # is root-equivalent on the node, so this adds no new level
-              # of trust.
-              add: ["SYS_CHROOT", "SYS_PTRACE", "DAC_READ_SEARCH", "DAC_OVERRIDE", "CHOWN", "FOWNER", "FSETID", "SETFCAP", "MKNOD", "SYS_ADMIN"]
       volumes:
         - name: registry-creds
           secret:
@@ -99,5 +137,25 @@ spec:
           secret:
             secretName: angryduck-rescue-token
             optional: true
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        - name: containerd-content
+          hostPath:
+            path: /var/lib/containerd/io.containerd.content.v1.content
+            type: Directory
+        - name: containerd-config
+          hostPath:
+            path: /etc/containerd/config.toml
+            type: File
+        - name: containerd-certs
+          hostPath:
+            path: /etc/containerd/certs.d
+            type: DirectoryOrCreate
+        - name: state
+          hostPath:
+            path: /var/lib/angryduck
+            type: DirectoryOrCreate
       tolerations:
         - operator: Exists

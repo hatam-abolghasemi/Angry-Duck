@@ -14,6 +14,7 @@ import (
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
 	"angryduck/internal/model"
+	"angryduck/internal/sharedtoken"
 )
 
 // Reporter periodically scrapes node-exporter and pushes disk utilization,
@@ -23,6 +24,7 @@ type Reporter struct {
 	selfAddress   string
 	metricsURL    string
 	controllerURL string
+	token         string // sent on reports; "" sends none
 	interval      time.Duration
 	inventory     *Inventory
 	httpClient    *http.Client
@@ -46,6 +48,9 @@ func (rp *Reporter) SetLayerTracker(t *LayerTracker) { rp.layers = t }
 //
 // The listing goes through the shared Inventory, so a report right after
 // a recent listing reuses it instead of running the command again.
+// SetToken makes reports carry the shared token. Call before Run.
+func (rp *Reporter) SetToken(token string) { rp.token = token }
+
 func NewReporter(nodeID, selfAddress, metricsURL, controllerURL string, interval time.Duration, inv *Inventory) *Reporter {
 	return &Reporter{
 		nodeID:        nodeID,
@@ -153,7 +158,14 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	}
 
 	url := rp.controllerURL + "/report"
-	resp, err := rp.httpClient.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		logging.Errorf("angryduck-worker[%s]: failed to build report request: %v", rp.nodeID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	sharedtoken.SetIfAny(req, rp.token)
+	resp, err := rp.httpClient.Do(req)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: failed to push report to %s: %v", rp.nodeID, url, err)
 		return

@@ -64,18 +64,19 @@ sequenceDiagram
 
 Propagation and rescue share one [transfer mechanism](transfers.md).
 
-## Running node tools
+## Talking to containerd
 
-The worker image contains only the worker binary. For every containerd
-operation it chroots into the node's root filesystem (`HOST_ROOT`,
-`/proc/1/root` by default) and runs the node's own `crictl`, `ctr` and `tar`.
-The node's installed version always runs, with its own libc and
-configuration, and upgrading the node's tools needs no Angry Duck release.
+The worker image contains only the worker binary. Everything it does with
+images goes through containerd's socket: its own gRPC API for content,
+images, snapshots, leases and diffs, and CRI for seed pulls and container
+listings, the calls `crictl` makes. A seed pull is therefore the exact pull
+kubelet would make. Work that needs privileges on the node (unpacking
+layers, mounting snapshots, writing files with their owners and whiteouts)
+happens inside containerd, so the worker has no capabilities and no host
+PID namespace; see [Security](security.md).
 Listings run one at a time, and each result is shared between callers
-for up to 15 seconds. Blob content is read directly from containerd's content store,
-so serving an image to a peer or to containerd costs no extra process.
-This requires `hostPID`, a few capabilities and an unconfined AppArmor
-profile; see [Security](security.md).
+for up to 15 seconds. Blob content is read directly from containerd's
+content store when it is mounted, and through the content API otherwise.
 
 ## Scope
 

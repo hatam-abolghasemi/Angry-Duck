@@ -15,7 +15,9 @@ Durations are integers in seconds. Utilizations are fractions between 0 and
 |---|---|---|
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `METRICS_LABEL_REGISTRY` | `false` | Add a `registry` label to pull metrics. The set of registries is unbounded, so it is off by default. |
-| `RESCUE_TOKEN_PATH` | `/etc/angryduck/rescue-token/token` | Shared bearer token file, 32+ characters. Needed by rescue, propagation and the mirror. Read once at startup. |
+| `RESCUE_TOKEN_PATH` | `/etc/angryduck/rescue-token/token` | Shared bearer token file, 32+ characters. Needed by rescue, propagation and the mirror. Read once at startup. With a token, `/report`, `/pull` and `/pull/cancel` also require it. |
+| `WEBHOOK_TOKEN_PATH` | `/etc/angryduck/webhook-token/token` | Controller only. CI's bearer token for `/webhook/preheat`, 32+ characters. If the file is missing, the webhook is unauthenticated; if it exists but is unusable, the controller exits. |
+| `AUTH_MODE` | `enforce` | `enforce` rejects control requests without the token; `warn` allows and logs them. Use `warn` only while upgrading controller and workers, then remove it. |
 | `REGISTRY_CREDENTIALS_PATH` | *(empty)* | dockerconfigjson covering every private registry, for seed pulls and manifest reads. |
 
 ## Controller
@@ -80,26 +82,26 @@ Durations are integers in seconds. Utilizations are fractions between 0 and
 | `WORKER_LISTEN_ADDR` | `:18081` | Listen address. |
 | `CONTROLLER_URL` | `http://angryduck-controller:8080` | Controller base URL. |
 | `REPORT_INTERVAL_S` | `15` | How often the worker reports. |
-| `NODE_EXPORTER_URL` | `http://localhost:9100/metrics` | Source of root filesystem utilization. |
-| `CONTAINER_RUNTIME` | `crictl` | `crictl`, `containerd` (`ctr`) or `docker`, for pulls and listing. |
-| `CONTAINER_RUNTIME_ENDPOINT` | `unix:///run/containerd/containerd.sock` | containerd socket, as a path on the node. |
-| `CONTAINERD_ROOT` | from the node's `config.toml`, else `/var/lib/containerd` | containerd's root directory on the node. Blobs are read directly from its content store; if it isn't found, they are read through `ctr`. |
-| `HOST_ROOT` | `/proc/1/root` | Where the node's root filesystem is visible. `/` for local runs. |
+| `NODE_EXPORTER_URL` | `http://localhost:9100/metrics` | Source of root filesystem utilization. The DaemonSet sets it to `http://$(HOST_IP):9100/metrics`. |
+| `POD_IP`, `POD_NAMESPACE`, `HOST_IP` | from the downward API | Set by the DaemonSet. `POD_IP` is the mirror's address in `hosts.toml`. |
+| `DAEMONSET_NAME` | `angryduck-worker` | The DaemonSet the worker checks on shutdown: gone or being deleted means an uninstall, and the worker cleans up the node. |
+| `CONTAINER_RUNTIME` | `containerd` | Only containerd is supported. The pre-1.8.6 values `crictl` and `ctr` are accepted and mean the same. |
+| `CONTAINER_RUNTIME_ENDPOINT` | `unix:///run/containerd/containerd.sock` | containerd's socket, as mounted into the worker. |
+| `CONTAINERD_SNAPSHOTTER` | `overlayfs` | The snapshotter kubelet's images are unpacked with. |
+| `CONTAINERD_ROOT` | from `/etc/containerd/config.toml`, else `/var/lib/containerd` | containerd's root directory, as mounted into the worker. Blobs are read directly from its content store when mounted, otherwise through containerd's content API. |
+| `HOST_ROOT` | *(empty)* | Prefix for the node paths the worker mounts (state dir, containerd's config and `certs.d`). The manifests mount them at the same paths. Not a chroot. |
 | `LAYER_INVENTORY_ENABLED` | `true` | Report layer blobs and snapshot chainIDs to the controller. |
 | `LAYER_SCAN_INTERVAL_S` | `60` | Minimum time between layer scans. A pull or transfer triggers one at once. |
 | `PREHEAT_ATTRIBUTION_INTERVAL_S` | `300` | How often running containers from preheated repos are sampled. `0` disables it. |
 | `PREHEAT_ATTRIBUTION_RETENTION_S` | `360` | How long after a preheat its repo still counts. |
-
-Prefer `crictl`. With `CONTAINER_RUNTIME=containerd`, listing running
-containers costs one `ctr` subprocess per container, which can push the worker
-past its CPU limit on busy nodes.
 
 ## Mirror
 
 | Variable | Default | Description |
 |---|---|---|
 | `MIRROR_ENABLED` | `false` | Run the mirror and manage containerd's `hosts.toml` files. |
-| `MIRROR_LISTEN_ADDR` | `127.0.0.1:18082` | Listen address. Keep it node-local. |
+| `MIRROR_LISTEN_ADDR` | `:18082` | Listen address, on the pod network. A loopback address (the pre-1.8.6 default) is turned into `:<port>`. |
+| `MIRROR_ADVERTISE_ADDR` | `$POD_IP:<port>` | The address written into `hosts.toml`. |
 | `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | containerd's CRI registry `config_path`. |
 | `MIRROR_REGISTRIES` | *(empty)* | Registries to mirror even before the node uses them. |
 

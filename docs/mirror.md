@@ -9,16 +9,31 @@ The mirror is off by default (`MIRROR_ENABLED=false`).
 
 ## How it works
 
-The mirror listens on `127.0.0.1:18082` and the worker writes a `hosts.toml`
-for each registry the node has images from, plus `MIRROR_REGISTRIES`:
+The mirror listens on the worker's pod IP, port `18082`, and the worker
+writes a `hosts.toml` for each registry the node has images from, plus
+`MIRROR_REGISTRIES`:
 
 ```toml
 # managed by angryduck: ...
 server = "https://registry.example.com"
 
-[host."http://127.0.0.1:18082"]
+[host."http://10.233.64.7:18082"]
   capabilities = ["pull"]
+  [host."http://10.233.64.7:18082".header]
+    Authorization = "Bearer <random per-pod token>"
 ```
+
+containerd runs on the host network, which reaches local pods directly. The
+token is generated when the worker starts and exists only in these files
+(mode `0600`), so containerd is the only client the mirror answers; any other
+pod gets `401`. A new pod writes new files with its own IP and token.
+
+On SIGTERM (a rollout, an eviction, an uninstall) the worker removes the
+files it wrote, so containerd pulls from registries directly until the next
+worker writes them again. If a worker dies without SIGTERM, the files point
+at a dead pod IP until the replacement starts; containerd then falls back to
+the registry, immediately with Calico, after its dial timeout on CNIs that
+don't reject unreachable pod IPs.
 
 For each request, the mirror:
 

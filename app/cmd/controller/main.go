@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"angryduck/internal/kube"
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
+	"angryduck/internal/metrics"
 	"angryduck/internal/registryauth"
 	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
@@ -55,6 +58,23 @@ func main() {
 	registry := controller.NewRegistry(staleAfter, targetTTL)
 	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 	server := controller.NewServer(registry, ranker)
+	authMode, err := sharedtoken.ParseMode(config.String("AUTH_MODE", ""))
+	if err != nil {
+		log.Fatalf("angryduck-controller: %v", err)
+	}
+	server.SetAuthMode(authMode)
+	webhookTokenPath := config.String("WEBHOOK_TOKEN_PATH", "/etc/angryduck/webhook-token/token")
+	switch wt, err := sharedtoken.Load(webhookTokenPath); {
+	case err == nil:
+		server.SetWebhookToken(wt)
+		log.Printf("angryduck-controller: /webhook/preheat requires the webhook token from %s", webhookTokenPath)
+	case webhookTokenPath == "" || errors.Is(err, fs.ErrNotExist):
+		log.Printf("angryduck-controller: WARNING: no webhook token at %q: /webhook/preheat is unauthenticated", webhookTokenPath)
+	default:
+		// A token that exists but is unusable is a mistake, not a choice
+		// to run open.
+		log.Fatalf("angryduck-controller: webhook token: %v", err)
+	}
 
 	// Layer ranking reads each pushed image's manifest and config from its
 	// registry (a few KB), with the same pull secret the workers use.
@@ -74,7 +94,6 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go ranker.Run(ctx)
 	// Rescue and propagation both order workers to copy images from each
 	// other, and the workers only accept that with the shared token.
 	token, tokenErr := sharedtoken.Load(config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token"))
@@ -82,6 +101,8 @@ func main() {
 		log.Printf("angryduck-controller: WARNING: no usable rescue token, so rescue and propagation are off: %v", tokenErr)
 	} else {
 		server.SetToken(token)
+		ranker.SetToken(token)
+		log.Printf("angryduck-controller: /report requires the shared token (AUTH_MODE=%s)", authMode)
 		rescuer := newRescuer(registry, token)
 		if rescuer != nil {
 			if resolver != nil {
@@ -102,6 +123,11 @@ func main() {
 			go propagator.Run(ctx)
 		}
 	}
+
+	go metrics.TrackProcessMemory(ctx, "controller")
+	go memlimit.ReleaseWhenIdle(ctx, time.Minute, 1<<20)
+	// Started after SetToken so pull orders never race the token.
+	go ranker.Run(ctx)
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,

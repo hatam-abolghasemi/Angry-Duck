@@ -5,36 +5,6 @@ import (
 	"testing"
 )
 
-// TestCtrContainerInfoParsing uses the exact output captured from a real
-// `ctr -n k8s.io containers info <id>` call against a live containerd
-// instance, confirming the pretty-printed "Image": "value" (space after the
-// colon) format parses correctly. This is the exact format that broke the
-// old substring-based extractField helper.
-func TestCtrContainerInfoParsing(t *testing.T) {
-	realOutput := `{
-    "ID": "mytestcontainer",
-    "Labels": {
-        "io.containerd.image.config.stop-signal": "SIGTERM",
-        "io.cri-containerd.image": "managed"
-    },
-    "Image": "test.local/angryduck-testimg:v1",
-    "Runtime": {
-        "Name": "io.containerd.runc.v2"
-    },
-    "SnapshotKey": "mytestcontainer",
-    "Snapshotter": "overlayfs"
-}`
-
-	var parsed ctrContainerInfo
-	if err := json.Unmarshal([]byte(realOutput), &parsed); err != nil {
-		t.Fatalf("failed to parse real ctr containers info output: %v", err)
-	}
-	want := "test.local/angryduck-testimg:v1"
-	if parsed.Image != want {
-		t.Fatalf("parsed.Image = %q, want %q", parsed.Image, want)
-	}
-}
-
 // TestCrictlImagesParsing uses the exact output captured from a real
 // `crictl images -o json` call, confirming the double-space-after-colon
 // format (`"repoTags":  [`) parses correctly. This is the exact format that
@@ -139,43 +109,6 @@ registry.example.com/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a
 sha256:87091cd49a20acee097a2c96c7ed21c56fc0349a21e674a4197f20a396ef321e                                                        application/vnd.oci.image.index.v1+json                   sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36abdcea77152208e4a79b4 14.7 MiB  linux/amd64                                                                  io.cri-containerd.image=managed                                 
 sha256:cd073f4c5f6a8e9dc6f3125ba00cf60819cae95c1ec84a1f146ee4a9cf9e803f                                                        application/vnd.docker.distribution.manifest.list.v2+json sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c 312.9 KiB linux/amd64,linux/arm/v7,linux/arm64,linux/ppc64le,linux/s390x,windows/amd64 io.cri-containerd.image=managed,io.cri-containerd.pinned=pinned 
 `
-
-func TestParseCtrImageRefs(t *testing.T) {
-	refs := parseCtrImageRefs(realCtrImagesListOutput)
-
-	want := []string{
-		"registry.example.com/devops/generic/angry-duck-worker:1.0.2",
-		"registry.example.com/devops/generic/angry-duck-worker@sha256:0ea5747ba9dd2dacae537ee2aa42f3883abb1508b36abdcea77152208e4a79b4",
-		"registry.example.com/pause:3.10.1",
-		"registry.example.com/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c",
-		"sha256:87091cd49a20acee097a2c96c7ed21c56fc0349a21e674a4197f20a396ef321e",
-		"sha256:cd073f4c5f6a8e9dc6f3125ba00cf60819cae95c1ec84a1f146ee4a9cf9e803f",
-	}
-	seen := make(map[string]bool, len(refs))
-	for _, r := range refs {
-		seen[r] = true
-	}
-	for _, w := range want {
-		if !seen[w] {
-			t.Errorf("expected ref %q in parsed output, got %v", w, refs)
-		}
-	}
-	if len(refs) != len(want) {
-		t.Errorf("got %d refs, want %d: %v", len(refs), len(want), refs)
-	}
-}
-
-func TestParseCtrImageRefsEmpty(t *testing.T) {
-	if refs := parseCtrImageRefs(""); len(refs) != 0 {
-		t.Errorf("expected no refs from empty input, got %d", len(refs))
-	}
-}
-
-func TestParseCtrImageRefsHeaderOnly(t *testing.T) {
-	if refs := parseCtrImageRefs("REF   TYPE   DIGEST   SIZE   PLATFORMS   LABELS\n"); len(refs) != 0 {
-		t.Errorf("expected no refs from header-only input, got %d", len(refs))
-	}
-}
 
 // TestCountRunningReposByContainer proves the crictl backend's
 // RunningImageRepos counts each CONTAINER once, not once per alias —

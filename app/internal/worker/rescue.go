@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -434,20 +436,28 @@ func sortedInts(m map[int][]blobship.Descriptor) []int {
 	return out
 }
 
-// receiveSnapshot fetches one layer's snapshot directory from src and
-// commits it locally under the layer's chainID. It returns the bytes read
-// off the wire.
+// Snapshot transfer headers. The digest travels as an HTTP trailer: the
+// source only knows it once the whole layer has been written.
+const (
+	snapshotFormatHeader  = "X-Angryduck-Snapshot-Format"
+	snapshotDigestTrailer = "X-Angryduck-Snapshot-Digest"
+)
+
+// receiveSnapshot fetches one layer's snapshot from src and commits it
+// locally under the layer's chainID. It returns the bytes read off the
+// wire.
 //
-// Unlike blobs, a snapshot tar can't be checked against a digest: the
+// A snapshot can't be checked against the layer's own digest: its tar
 // bytes differ from the original layer even when the files are the same.
-// Integrity rests on the authenticated peer, TCP, and gzip's CRC-32, which
-// is checked (by reading the stream to its end) before the commit.
+// A 1.8.6+ source sends the SHA-256 of the exact tar it produced, checked
+// here before the commit, on top of gzip's CRC-32. An older source sends
+// its overlayfs directory format with only the CRC; it is converted here.
 func (rs *Rescue) receiveSnapshot(ctx context.Context, plan blobship.Plan, l blobship.Layer, src model.RescueSource) (int64, error) {
 	parent := ""
 	if i := layerIndex(plan, l.ChainID); i > 0 {
 		parent = plan.Layers[i-1].ChainID
 	}
-	body, err := json.Marshal(model.SnapshotExportRequest{Image: plan.Image, Platform: rs.platform, ChainID: l.ChainID})
+	body, err := json.Marshal(model.SnapshotExportRequest{Image: plan.Image, Platform: rs.platform, ChainID: l.ChainID, Format: blobship.FormatOCILayer})
 	if err != nil {
 		return 0, err
 	}
@@ -464,15 +474,35 @@ func (rs *Rescue) receiveSnapshot(ctx context.Context, plan blobship.Plan, l blo
 	if err != nil {
 		return counted.n, fmt.Errorf("reading gzip header: %w", err)
 	}
+	hash := sha256.New()
+	stream := io.TeeReader(gz, hash)
+	format := resp.Header.Get(snapshotFormatHeader)
+	layer := io.NopCloser(stream)
+	if format != blobship.FormatOCILayer {
+		layer = blobship.OverlayDirToOCI(stream)
+	}
+	defer layer.Close()
 	verify := func() error {
-		// tar stops at its end-of-archive marker; read the rest so gzip
-		// checks its CRC and length trailer.
-		if _, err := io.Copy(io.Discard, gz); err != nil {
+		// A tar ends at its end-of-archive marker; read the rest so gzip
+		// checks its CRC and length trailer, and the body to its end so
+		// the HTTP trailer arrives.
+		if _, err := io.Copy(io.Discard, stream); err != nil {
 			return fmt.Errorf("stream check: %w", err)
+		}
+		if _, err := io.Copy(io.Discard, counted); err != nil {
+			return fmt.Errorf("stream check: %w", err)
+		}
+		if format != blobship.FormatOCILayer {
+			return nil
+		}
+		want := resp.Trailer.Get(snapshotDigestTrailer)
+		got := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+		if want != got {
+			return fmt.Errorf("snapshot digest mismatch: source sent %q, received %s", want, got)
 		}
 		return nil
 	}
-	err = rs.store.ApplySnapshot(ctx, l.ChainID, parent, gz, verify)
+	err = rs.store.ApplySnapshot(ctx, l.ChainID, parent, layer, verify)
 	return counted.n, err
 }
 
@@ -635,18 +665,41 @@ func (rs *Rescue) HandleSnapshotExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chain_id is not a layer of this image", http.StatusBadRequest)
 		return
 	}
-	dirs, err := rs.store.SnapshotDirs(r.Context(), req.ChainID, i+1)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+	parent := ""
+	if i > 0 {
+		parent = plan.Layers[i-1].ChainID
+	}
+	if snaps, err := rs.store.Snapshots(r.Context()); err != nil || !snaps[req.ChainID] {
+		http.Error(w, "snapshot "+req.ChainID+" not on this node", http.StatusConflict)
 		return
 	}
 
+	oci := req.Format == blobship.FormatOCILayer
+	if oci {
+		w.Header().Set(snapshotFormatHeader, blobship.FormatOCILayer)
+		w.Header().Set("Trailer", snapshotDigestTrailer)
+	}
 	w.Header().Set("Content-Type", "application/gzip")
 	cw := &countWriter{w: w}
 	gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
-	err = rs.store.ExportSnapshot(r.Context(), dirs[i], gz)
+	hash := sha256.New()
+	if oci {
+		err = rs.store.ExportSnapshot(r.Context(), req.ChainID, parent, io.MultiWriter(gz, hash))
+	} else {
+		// A pre-1.8.6 receiver: hand it the overlayfs directory format it
+		// applies itself.
+		pr, pw := io.Pipe()
+		go func() { pw.CloseWithError(rs.store.ExportSnapshot(r.Context(), req.ChainID, parent, pw)) }()
+		conv := blobship.OCIToOverlayDir(pr)
+		_, err = io.Copy(gz, conv)
+		conv.Close()
+		pr.CloseWithError(io.ErrClosedPipe)
+	}
 	if err == nil {
 		err = gz.Close()
+	}
+	if err == nil && oci {
+		w.Header().Set(snapshotDigestTrailer, "sha256:"+hex.EncodeToString(hash.Sum(nil)))
 	}
 	rescueBytesTotal.Add(cw.n, rs.nodeID, "served")
 	if err != nil {

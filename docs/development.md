@@ -49,14 +49,29 @@ cd app && go test -race ./...
 
 - Transfers are tested end to end over HTTP against an in-memory content store
   (`blobship.MemStore`) that mimics containerd's import and unpack behavior.
-- A few tests need root and are skipped otherwise:
-  `TestHostExec_RealChrootExecution` performs a real `chroot(2)`, and
-  `TestSnapshotRoundTrip_RealTar` checks that device files, ownership and
-  `trusted.*` attributes survive a round trip through the real `tar`.
+- Integration tests run against a real containerd (overlayfs and CRI), as
+  root, with the `integration` build tag:
+
+  ```sh
+  ANGRYDUCK_CONTAINERD=/run/containerd/containerd.sock \
+    go test -tags integration ./internal/worker/
+  ```
+
+  They cover import, blob reads, a full rescue that ships a snapshot,
+  rescue to and from a pre-1.8.6 worker (with its exact `tar` commands), and
+  CRI pulls from a test registry, and compare the resulting file trees
+  (contents, owners, modes, links, xattrs). With `ANGRYDUCK_NO_MOUNT=1` they
+  skip the tree comparison, so they can run with every capability dropped:
+
+  ```sh
+  go test -tags integration -c -o worker.test ./internal/worker/
+  ANGRYDUCK_CONTAINERD=/run/containerd/containerd.sock ANGRYDUCK_NO_MOUNT=1 \
+    setpriv --bounding-set=-all --inh-caps=-all -- ./worker.test -test.run 'StoreBasics|RescueShipsSnapshot|CRI'
+  ```
 
 ## Running locally
 
-Copy `app/.env.example` to `app/.env`, set `HOST_ROOT=/`, `SELF_ADDRESS` and
+Copy `app/.env.example` to `app/.env`, set `SELF_ADDRESS` and
 `CONTROLLER_URL`, and run the binaries directly. The worker needs a local
 containerd and node-exporter.
 

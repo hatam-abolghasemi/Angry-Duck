@@ -151,17 +151,15 @@ type Store interface {
 
 	// Snapshots lists every snapshot key.
 	Snapshots(ctx context.Context) (map[string]bool, error)
-	// SnapshotDirs returns the on-disk directories of chainID and of every
-	// snapshot below it, bottom first; depth is how many to expect.
-	SnapshotDirs(ctx context.Context, chainID string, depth int) ([]string, error)
-	// ExportSnapshot writes a tar of one snapshot directory to w,
-	// preserving ownership, device files and extended attributes.
-	ExportSnapshot(ctx context.Context, dir string, w io.Writer) error
+	// ExportSnapshot writes snapshot chainID, whose parent must be parent
+	// ("" for the bottom layer), to w as an uncompressed OCI layer tar: the
+	// files that layer adds or changes, with whiteouts for what it removes.
+	ExportSnapshot(ctx context.Context, chainID, parent string, w io.Writer) error
 	// ApplySnapshot creates snapshot chainID on top of parent ("" for the
-	// bottom layer) from a tar read from r. verify runs after the tar is
-	// unpacked and before the commit; an error from it discards the
-	// snapshot. The committed snapshot stays pinned against garbage
-	// collection until Unpin.
+	// bottom layer) from an uncompressed OCI layer tar read from r. verify
+	// runs after r is consumed and before the commit; an error from it
+	// discards the snapshot. The committed snapshot stays pinned against
+	// garbage collection until Unpin.
 	ApplySnapshot(ctx context.Context, chainID, parent string, r io.Reader, verify func() error) error
 	// Unpin removes ApplySnapshot's garbage-collection pin.
 	Unpin(ctx context.Context, chainID string) error

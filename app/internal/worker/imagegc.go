@@ -33,7 +33,7 @@ var (
 	)
 )
 
-// ImageStore is what the cleanup needs from containerd. CtrStore has it.
+// ImageStore is what the cleanup needs from containerd. ContainerdStore has it.
 type ImageStore interface {
 	ImageTargets(ctx context.Context) (map[string]string, error)
 	DeleteImages(ctx context.Context, names ...string) error
