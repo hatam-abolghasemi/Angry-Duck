@@ -1,0 +1,209 @@
+{{- $content := printf "%s/io.containerd.content.v1.content" (trimSuffix "/" .Values.worker.containerd.root) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "angryduck.workerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "angryduck.workerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: [{{ include "angryduck.workerName" . | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "angryduck.workerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "angryduck.workerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "angryduck.workerName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "angryduck.workerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  clusterIP: None
+  selector:
+    {{- include "angryduck.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+  ports:
+    - name: http
+      port: 18081
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "angryduck.workerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  selector:
+    matchLabels:
+      {{- include "angryduck.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "angryduck.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "angryduck.workerName" . }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "angryduck.image" (dict "image" .Values.worker.image "chart" .Chart) }}
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SELF_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: NODE_EXPORTER_URL
+              value: "http://$(HOST_IP):{{ .Values.worker.nodeExporterPort }}/metrics"
+          envFrom:
+            - configMapRef:
+                name: {{ include "angryduck.fullname" . }}-config
+          ports:
+            - containerPort: 18081
+              name: http
+            - containerPort: 18082
+              name: mirror
+          volumeMounts:
+            {{- if include "angryduck.hasRegistryCredentials" . }}
+            - name: registry-creds
+              mountPath: /etc/angryduck/registry-creds
+              readOnly: true
+            {{- end }}
+            - name: rescue-token
+              mountPath: /etc/angryduck/rescue-token
+              readOnly: true
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: containerd-content
+              mountPath: {{ $content }}
+              readOnly: true
+            - name: containerd-config
+              mountPath: /etc/containerd/config.toml
+              readOnly: true
+            - name: containerd-certs
+              mountPath: {{ .Values.worker.containerd.certsDir }}
+            - name: state
+              mountPath: /var/lib/angryduck
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            runAsUser: 0
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        {{- if include "angryduck.hasRegistryCredentials" . }}
+        - name: registry-creds
+          secret:
+            secretName: {{ include "angryduck.registryCredentialsSecret" . }}
+        {{- end }}
+        - name: rescue-token
+          secret:
+            secretName: {{ include "angryduck.sharedTokenSecret" . }}
+        - name: containerd-sock
+          hostPath:
+            path: {{ .Values.worker.containerd.socket }}
+            type: Socket
+        - name: containerd-content
+          hostPath:
+            path: {{ $content }}
+            type: Directory
+        - name: containerd-config
+          hostPath:
+            path: {{ .Values.worker.containerd.config }}
+            type: File
+        - name: containerd-certs
+          hostPath:
+            path: {{ .Values.worker.containerd.certsDir }}
+            type: DirectoryOrCreate
+        - name: state
+          hostPath:
+            path: {{ .Values.worker.stateDir }}
+            type: DirectoryOrCreate
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

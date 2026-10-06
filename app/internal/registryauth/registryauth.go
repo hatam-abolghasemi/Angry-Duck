@@ -2,15 +2,10 @@
 // secret (the same format `imagePullSecrets` uses) and resolves
 // credentials for a given registry host.
 //
-// It exists because Angry Duck's worker pulls images by shelling out
-// directly to `ctr images pull`, bypassing kubelet's CRI plumbing
-// entirely. kubelet reads a Pod's imagePullSecrets and forwards those
-// credentials through the CRI PullImage call on the Pod's behalf — but
-// that only happens for images kubelet itself pulls (a Pod's declared
-// containers). A worker-initiated `ctr images pull` for some other image
-// the controller ordered preheated gets none of that: it's a bare CLI
-// call with no credentials attached unless something explicitly supplies
-// them. This package is that "something."
+// It exists because kubelet only forwards a Pod's imagePullSecrets for
+// the images kubelet itself pulls. A seed pull the worker makes through
+// CRI, and the controller's manifest reads, carry no credentials unless
+// something supplies them. This package is that "something."
 package registryauth
 
 import (
@@ -36,8 +31,7 @@ type authEntry struct {
 	Password string `json:"password"`
 }
 
-// Store resolves registry host -> "username:password" credentials, ready
-// to hand straight to `ctr images pull --user`.
+// Store resolves registry host -> "username:password" credentials.
 type Store struct {
 	// creds maps registry host to "username:password" in plain form.
 	creds map[string]string

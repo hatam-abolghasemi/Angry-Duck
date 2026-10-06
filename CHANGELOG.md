@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.8.7
+
+### Performance
+
+- **Snapshot shipping is about 40% faster.** The source reads containerd's
+  finished diff straight from the content store it already mounts, instead
+  of through the content API in 32 KiB calls, and the receiver stages the
+  layer in 1 MiB writes instead of 32 KiB ones. That removes about 20,000
+  gRPC round trips per 300 MB layer, which also lowers CPU in the worker and
+  containerd. Blob reads through the content API, used when the content
+  store isn't mounted, read 1 MiB at a time too. See
+  [Sizing](docs/operations.md#sizing).
+- **Propagation starts its next round when a transfer finishes**, about a
+  second later, instead of at the next `PROPAGATE_INTERVAL_S`. Each doubling
+  round no longer costs at least 10 seconds.
+- **Rescues held back by `RESCUE_MAX_CONCURRENT` start as soon as a running
+  rescue finishes**, instead of at the next `RESCUE_INTERVAL_S`.
+
+### Added
+
+- A Helm chart in `charts/angryduck`, with generated tokens kept across
+  upgrades. See [Helm](docs/helm.md).
+- [Node settings and limits](docs/node-settings.md): the containerd and
+  kubelet settings that decide how much Angry Duck can do, and what it can't.
+
+### Security
+
+- The controller runs as a non-root user (65532) with a read-only root
+  filesystem, no capabilities and the default seccomp profile, in the chart
+  and in the example manifests.
+- [Security](docs/security.md) describes what the shared token allows with
+  snapshots, and why it should be treated as a credential for every node's
+  image store.
+
+### Fixed
+
+- Docs still described pre-1.8.6 behavior: workers on the node network,
+  `ctr` in transfers, no auth on `/pull`, no Kubernetes access for the
+  worker. The GitLab CI example didn't send the webhook token.
+- Removed unused code and comments that still referred to the `ctr` and
+  `crictl` backends.
+
 ## 1.8.6
 
 ### Security

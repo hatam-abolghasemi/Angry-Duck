@@ -27,17 +27,17 @@ curl -s -X POST localhost:8080/webhook/preheat -H "Authorization: Bearer ${ANGRY
 
 ## Worker
 
-Port `18081` on the node network. Endpoints marked *token* require the shared
-token as `Authorization: Bearer <token>`.
+Port `18081` on the worker's pod IP. Endpoints marked *token* require the
+shared token as `Authorization: Bearer <token>`.
 
 | Endpoint | Auth | Called by | Description |
 |---|---|---|---|
-| `POST /pull` | none | controller | Body `{"image", "ordered_at"}`. Returns `202` and pulls from the registry in the background. |
-| `POST /pull/cancel` | none | controller | Cancels a slow seed pull. |
+| `POST /pull` | token, when configured | controller | Body `{"image", "ordered_at"}`. Returns `202` and pulls from the registry in the background. |
+| `POST /pull/cancel` | token, when configured | controller | Cancels a slow seed pull. |
 | `POST /rescue` | token | controller | Body `{"image", "sources": [{"node_id", "address"}], "reason": "rescue" \| "propagate"}`. Fetches the image from the first source that works and returns the result. |
 | `POST /blobs/plan` | token | peer | Body `{"image", "platform"}`. Every blob and layer of the image for that platform, and which ones this node has. |
 | `POST /blobs/export` | token | peer | Body `{"image", "platform", "digests"}`. Streams a partial OCI archive with only those blobs. |
-| `POST /snapshots/export` | token | peer | Body `{"image", "platform", "chain_id"}`. Streams one layer's snapshot directory as a gzip tar. |
+| `POST /snapshots/export` | token | peer | Body `{"image", "platform", "chain_id", "format"}`. Streams one layer as a gzip-compressed tar: containerd's OCI layer diff with a SHA-256 trailer for `"format": "oci-layer"`, the overlayfs directory format for pre-1.8.6 receivers. |
 | `GET /mirror/content/<digest>` | token | peer mirror | Content for other nodes' mirrors. |
 | `GET /metrics` | none | Prometheus | Prometheus metrics. |
 | `GET /healthz` | none | kubelet | Liveness and readiness. |

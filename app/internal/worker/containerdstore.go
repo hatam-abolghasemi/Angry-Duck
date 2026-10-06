@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -161,6 +162,32 @@ func copyContext(ctx context.Context, w io.Writer, f io.Reader) (int64, error) {
 	return io.Copy(w, f)
 }
 
+// rpcChunk is the read and write size for streams through containerd's
+// content API, where every call is a gRPC round trip.
+const rpcChunk = 1 << 20
+
+// copyBlob writes a committed blob to w: straight from the content store
+// directory when it is mounted, otherwise through the content API in
+// rpcChunk reads.
+func (s *ContainerdStore) copyBlob(ctx context.Context, w io.Writer, desc ocispec.Descriptor) (int64, error) {
+	if f, _, ok := s.openBlob(desc.Digest.String()); ok {
+		defer f.Close()
+		return copyContext(ctx, w, f)
+	}
+	ra, err := s.client.ContentStore().ReaderAt(ctx, desc)
+	if err != nil {
+		return 0, err
+	}
+	defer ra.Close()
+	return copyContext(ctx, w, contentReader(ra))
+}
+
+// contentReader reads a blob through the content API in rpcChunk calls
+// instead of the 32 KiB io.Copy would ask for, each a new gRPC stream.
+func contentReader(ra content.ReaderAt) io.Reader {
+	return bufio.NewReaderSize(content.NewReader(ra), rpcChunk)
+}
+
 // openContent opens a blob through containerd's content API.
 func (s *ContainerdStore) openContent(ctx context.Context, dgst string) (content.ReaderAt, error) {
 	d, err := digest.Parse(dgst)
@@ -218,7 +245,7 @@ func (s *ContainerdStore) StreamBlob(ctx context.Context, dgst string, size int6
 			return err
 		}
 		defer ra.Close()
-		r, have = content.NewReader(ra), ra.Size()
+		r, have = contentReader(ra), ra.Size()
 	}
 	if have != size {
 		return fmt.Errorf("blob %s: have %d bytes, expected %d", dgst, have, size)
@@ -243,7 +270,7 @@ func (s *ContainerdStore) StreamContent(ctx context.Context, dgst string, w io.W
 		return err
 	}
 	defer ra.Close()
-	_, err = copyContext(ctx, w, content.NewReader(ra))
+	_, err = copyContext(ctx, w, contentReader(ra))
 	return err
 }
 
@@ -458,12 +485,7 @@ func (s *ContainerdStore) ExportSnapshot(ctx context.Context, chainID, parent st
 	if err != nil {
 		return fmt.Errorf("diff of %s: %w", chainID, err)
 	}
-	ra, err := s.client.ContentStore().ReaderAt(ctx, desc)
-	if err != nil {
-		return err
-	}
-	defer ra.Close()
-	n, err := copyContext(ctx, w, content.NewReader(ra))
+	n, err := s.copyBlob(ctx, w, desc)
 	if err == nil && n != desc.Size {
 		err = fmt.Errorf("layer of %s: wrote %d bytes, expected %d", chainID, n, desc.Size)
 	}
@@ -486,7 +508,13 @@ func (s *ContainerdStore) ApplySnapshot(ctx context.Context, chainID, parent str
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(cw, r)
+	// Every Write to a content writer is one synchronous round trip to
+	// containerd. Batch them: 1 MiB per call instead of io.Copy's 32 KiB.
+	bw := bufio.NewWriterSize(cw, rpcChunk)
+	n, err := io.Copy(bw, r)
+	if err == nil {
+		err = bw.Flush()
+	}
 	if err != nil {
 		cw.Close()
 		return fmt.Errorf("staging layer: %w", err)

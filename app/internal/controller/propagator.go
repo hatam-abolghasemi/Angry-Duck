@@ -103,6 +103,7 @@ type Propagator struct {
 	jobs      map[string]*propagation
 	perSource map[string]int // node -> transfers it is serving now
 	wg        sync.WaitGroup
+	wakeup    waker // a transfer ended: a slot and maybe a new holder are free
 }
 
 type propagation struct {
@@ -145,6 +146,7 @@ func NewPropagator(registry *Registry, token string, cfg PropagatorConfig) *Prop
 		sem:       make(chan struct{}, cfg.MaxConcurrent),
 		jobs:      make(map[string]*propagation),
 		perSource: make(map[string]int),
+		wakeup:    newWaker(),
 	}
 }
 
@@ -210,6 +212,14 @@ func (p *Propagator) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			p.tick(ctx)
+		case <-p.wakeup:
+			// A transfer ended: its source is free and its receiver is a
+			// new holder. Start the next round now instead of waiting up
+			// to PROPAGATE_INTERVAL_S for it.
+			if !p.wakeup.settle(ctx) {
+				return
+			}
 			p.tick(ctx)
 		}
 	}
@@ -450,6 +460,7 @@ func (p *Propagator) pickSourcesLocked(holders []*workerEntry, target string, la
 
 func (p *Propagator) send(ctx context.Context, job *propagation, target *workerEntry, sources []model.RescueSource, cancelSeed bool) {
 	defer p.wg.Done()
+	defer p.wakeup.wake()
 	defer func() { <-p.sem }()
 
 	if cancelSeed {

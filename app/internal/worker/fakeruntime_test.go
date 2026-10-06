@@ -74,7 +74,7 @@ func (f *fakeRuntime) ListRunningImages() ([]string, error) {
 
 // RunningImageRepos counts each entry in f.running once — tests populate
 // that set one entry per fake "container", so no alias-deduplication
-// concern applies here the way it does for the real crictl backend.
+// concern applies here the way it does for the real CRI runtime.
 func (f *fakeRuntime) RunningImageRepos() (map[string]int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

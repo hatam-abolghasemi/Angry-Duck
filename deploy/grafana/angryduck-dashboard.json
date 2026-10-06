@@ -123,7 +123,7 @@
     }
   ],
   "cursorSync": "Crosshair",
-  "description": "Preheat, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.6. Pick data source → cluster → node; click any node, image or row to focus.",
+  "description": "Preheat, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.7. Pick data source → cluster → node; click any node, image or row to focus.",
   "editable": true,
   "elements": {
     "panel-1": {

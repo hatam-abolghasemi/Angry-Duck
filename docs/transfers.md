@@ -15,12 +15,12 @@ sequenceDiagram
     T->>T: decide per layer: already here, blob, or snapshot
     opt layers no source has a blob for
         T->>S: POST /snapshots/export {image, chain_id}
-        S-->>T: gzip tar of the snapshot directory
-        T->>T: prepare, unpack, commit under the chainID
+        S-->>T: the layer as containerd's diff, gzip on the wire
+        T->>T: containerd applies it, committed under the chainID
     end
     T->>S: POST /blobs/export {image, missing digests}
     S-->>T: partial OCI archive: index.json and missing blobs only
-    T->>T: ctr images import (verifies every digest)
+    T->>T: containerd import (verifies every digest)
 ```
 
 ## Per-layer decisions
@@ -40,11 +40,10 @@ the cheapest option:
 ## Blobs
 
 Sources read committed blobs straight from containerd's content store
-(`CONTAINERD_ROOT`), where they are immutable files named by digest, rather
-than starting a `ctr` process per blob; they fall back to `ctr` when the
-store isn't found. Blobs from several sources are merged into one partial
-OCI archive and streamed straight into `ctr images import`, never buffered
-to disk.
+(`CONTAINERD_ROOT`), where they are immutable files named by digest, and
+through containerd's content API when the store isn't mounted. Blobs from
+several sources are merged into one partial OCI archive and streamed
+straight into containerd's import, never buffered to disk.
 containerd checks every blob against its digest and size, so a broken
 transfer fails the import instead of landing a corrupt image.
 
@@ -58,9 +57,11 @@ the snapshot instead.
 
 - The source asks containerd's diff service for the snapshot as an OCI layer
   tar: what it adds or changes on top of its parent, with whiteouts for what
-  it removes. Fast gzip compresses it on the wire. The receiver stages it in
-  its content store and asks containerd to apply it onto a new snapshot of
-  the parent, committed under the layer's chainID. The import that follows
+  it removes. The source reads the finished diff straight from the mounted
+  content store, and fast gzip compresses it on the wire. The receiver
+  stages it in its content store in 1 MiB writes and asks containerd to
+  apply it onto a new snapshot of the parent, committed under the layer's
+  chainID. The import that follows
   finds those chainIDs and skips the layers.
 - containerd's differ keeps contents, ownership, modes (setuid included),
   symlinks, hard links and file capabilities (`security.capability`). Like

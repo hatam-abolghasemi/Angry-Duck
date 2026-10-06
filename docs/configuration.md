@@ -46,7 +46,7 @@ Durations are integers in seconds. Utilizations are fractions between 0 and
 | Variable | Default | Description |
 |---|---|---|
 | `PROPAGATE_ENABLED` | `true` | Spread pushed images to every eligible node. |
-| `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. |
+| `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. A finished transfer also advances them, after about a second. |
 | `PROPAGATE_WINDOW_S` | `0` | How long to keep spreading a push. `0` means until done or superseded. |
 | `PROPAGATE_MAX_CONCURRENT` | `8` | Transfers in flight cluster-wide. |
 | `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node. |

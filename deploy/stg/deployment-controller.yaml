@@ -24,9 +24,15 @@ spec:
       serviceAccountName: angryduck-controller
       imagePullSecrets:
         - name: gitlab-docker-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.8.6
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.7
           ports:
             - containerPort: 8080
               name: http
@@ -67,6 +73,11 @@ spec:
             limits:
               cpu: 150m
               memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: registry-creds
           secret:

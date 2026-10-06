@@ -80,15 +80,27 @@ Measured with 1.8.6 against containerd 2.2 on a node holding 304 images,
 | 300 MB rescue as snapshots | ~8 s | ~10–14 s |
 | 400 mirror requests | ~4 s | ~2 s |
 
+1.8.7 speeds up snapshot shipping. Measured on one CPU against containerd
+2.2.1, with a 150 MiB layer that only exists as a snapshot, the same harness
+and machine for both (see [Development](development.md#test)):
+
+| | 1.8.6 | 1.8.7 |
+|---|---|---|
+| Source export, 5 MiB of layers below | ~3.1 s | ~1.1 s |
+| Source export, 300 MiB of layers below | ~5.7 s | ~2.8 s |
+| Whole rescue | ~17 s | ~10.5 s |
+
 - The worker's container memory (`kubectl top`) is about 15 MiB higher than
   `rss_anon`: that is its own code, mapped from the binary, which the kernel
   can drop and reload. Size against `angryduck_process_memory_bytes{kind="rss_anon"}`.
 - Once a minute, worker and controller hand freed heap back to the OS when
   more than 1 MiB is retained, so after a burst memory returns to near its
   idle level.
-- Snapshot rescue (only on nodes with `discard_unpacked_layers`) is slower
-  than in 1.8.5: containerd stages each layer once in its content store on
-  each side, the price of the worker having no capabilities.
+- Snapshot shipping (only when no node has a layer's blob, as with
+  `discard_unpacked_layers`) has containerd stage each layer once in its
+  content store on each side, the price of the worker having no
+  capabilities. The source's diff also compares the layer against everything
+  below it, so it takes longer the bigger the image underneath.
 - Unpacking, diffs and content writes happen inside containerd and are not
   counted in the worker's pod.
 - Both binaries default to `GOGC=50` and set `GOMEMLIMIT` to 90% of their
@@ -125,13 +137,14 @@ A worker can't receive its own image. If a node can't reach the registry, a
 new Angry Duck version gets stuck there and the DaemonSet rollout stops at
 that node. Copy the worker image from a healthy worker that holds its blobs,
 then delete the stuck pod so the DaemonSet recreates it with the image already
-local.
+local. Workers listen on their pod IPs; find a healthy one with
+`kubectl -n angryduck get pods -o wide`.
 
 Run this on the stuck node:
 
 ```bash
-IMG=registry.example.com/angryduck/angry-duck-worker:1.8.5
-SRC=<healthy-node-ip>:18081
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.7
+SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 
 # What the image consists of, and what this node already has
@@ -151,7 +164,8 @@ a node.
 
 ## Uninstalling
 
-`kubectl delete -f` on the DaemonSet (or the whole directory) is enough.
+`helm uninstall`, or `kubectl delete -f` on the DaemonSet (or the whole
+directory), is enough.
 Each worker, on SIGTERM, sees its DaemonSet gone and removes its
 `hosts.toml` files, releases rescue pins, removes temporary snapshots and
 base images, and deletes its state files. Images rescued or preheated onto

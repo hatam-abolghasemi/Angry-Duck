@@ -1,0 +1,31 @@
+{{- $cfg := deepCopy .Values.config -}}
+{{- if not (hasKey $cfg "CONTROLLER_URL") -}}
+{{- $_ := set $cfg "CONTROLLER_URL" (printf "http://%s.%s.svc:8080" (include "angryduck.controllerName" .) .Release.Namespace) -}}
+{{- end -}}
+{{- $_ := set $cfg "CONTROLLER_LISTEN_ADDR" ":8080" -}}
+{{- $_ := set $cfg "WORKER_LISTEN_ADDR" ":18081" -}}
+{{- $_ := set $cfg "MIRROR_LISTEN_ADDR" ":18082" -}}
+{{- $_ := set $cfg "CONTAINER_RUNTIME" "containerd" -}}
+{{- $_ := set $cfg "CONTAINER_RUNTIME_ENDPOINT" "unix:///run/containerd/containerd.sock" -}}
+{{- $_ := set $cfg "CONTAINERD_ROOT" .Values.worker.containerd.root -}}
+{{- $_ := set $cfg "MIRROR_CONTAINERD_CONFIG_DIR" .Values.worker.containerd.certsDir -}}
+{{- $_ := set $cfg "RESCUE_STATE_DIR" "/var/lib/angryduck" -}}
+{{- $_ := set $cfg "RESCUE_TOKEN_PATH" "/etc/angryduck/rescue-token/token" -}}
+{{- $_ := set $cfg "WEBHOOK_TOKEN_PATH" "/etc/angryduck/webhook-token/token" -}}
+{{- $_ := set $cfg "DAEMONSET_NAME" (include "angryduck.workerName" .) -}}
+{{- if include "angryduck.hasRegistryCredentials" . -}}
+{{- $_ := set $cfg "REGISTRY_CREDENTIALS_PATH" "/etc/angryduck/registry-creds/.dockerconfigjson" -}}
+{{- else -}}
+{{- $_ := set $cfg "REGISTRY_CREDENTIALS_PATH" "" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "angryduck.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := $cfg }}
+  {{ $k }}: {{ $v | toString | quote }}
+  {{- end }}

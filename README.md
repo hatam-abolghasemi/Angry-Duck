@@ -85,27 +85,27 @@ and cleanup.
 ## Quick start
 
 You need Kubernetes 1.30+, containerd with the overlayfs snapshotter, and
-node-exporter on every node. See [Installation](docs/installation.md) for the
-full steps.
+node-exporter on every node. Check the
+[node settings](docs/node-settings.md) that decide how much Angry Duck can do,
+then install.
 
 Prebuilt images for every release are on GitHub Container Registry:
 `ghcr.io/hatam-abolghasemi/angry-duck-controller` and
-`ghcr.io/hatam-abolghasemi/angry-duck-worker`. Point the `image:` fields in
-the manifests at them, or build your own.
+`ghcr.io/hatam-abolghasemi/angry-duck-worker`. The Helm chart uses them by
+default:
 
 ```bash
-# Create the namespace and secrets.
-kubectl apply -f deploy/stg/namespace.yaml
-kubectl -n angryduck create secret generic angryduck-rescue-token --from-literal=token=$(openssl rand -hex 32)
-
-# Review deploy/stg/configmap-env.yaml, then:
-kubectl apply -f deploy/stg/
+helm upgrade --install angryduck ./charts/angryduck \
+  --namespace angryduck --create-namespace \
+  --set registryCredentials.existingSecret=registry-pull \
+  --set ingress.enabled=true --set ingress.host=angryduck.example.com
 ```
 
-Then call the webhook from CI after every push:
+See [Helm](docs/helm.md) for the values, or [Installation](docs/installation.md)
+for plain manifests. Then call the webhook from CI after every push:
 
 ```bash
-curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+curl -fsS -m 10 -X POST https://angryduck.example.com/webhook/preheat \
   -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
@@ -116,6 +116,8 @@ curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
 |---|---|
 | [Architecture](docs/architecture.md) | Components, reporting, state, and an image's life from push to cleanup. |
 | [Installation](docs/installation.md) | Requirements, deployment, CI integration and verification. |
+| [Helm](docs/helm.md) | Installing with the chart, its values, tokens and the webhook ingress. |
+| [Node settings and limits](docs/node-settings.md) | containerd and kubelet settings that help, CI and workload usage, and what Angry Duck can't do. |
 | [Configuration](docs/configuration.md) | Every setting, with defaults. |
 | [Operations](docs/operations.md) | Status, logs, troubleshooting, upgrades and bootstrapping a node. |
 | [Observability](docs/observability.md) | Metrics, the Grafana dashboard and suggested alerts. |
@@ -131,7 +133,7 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.8.6**; see the [changelog](CHANGELOG.md). Angry
+The current version is **1.8.7**; see the [changelog](CHANGELOG.md). Angry
 Duck targets Linux nodes running containerd 1.6 or later.
 
 ## License

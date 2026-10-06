@@ -4,6 +4,8 @@
 
 - [Architecture](architecture.md): components, reporting, state, and an image's life.
 - [Installation](installation.md): requirements, deployment and CI integration.
+- [Helm](helm.md): installing with the chart, its values and tokens.
+- [Node settings and limits](node-settings.md): containerd and kubelet settings, usage, and what Angry Duck can't do.
 - [Configuration](configuration.md): every setting with its default.
 
 **Features**

@@ -10,14 +10,12 @@
 //  2. Export: the receiver drops the digests it already has and asks the
 //     source for the rest. The source streams them back as a partial OCI
 //     image layout tar (oci-layout + index.json + only those blobs), which
-//     the receiver pipes straight into `ctr images import`.
+//     the receiver streams straight into containerd's image import.
 //
-// A partial archive is enough because `ctr images import --platform X`
-// only walks the children it needs for X and takes any blob the local
-// content store already has from there. That was checked by hand on a
-// real node before this was written: an archive missing three layers the
-// receiver already had, and the buildx attestation manifest nobody had,
-// imported and unpacked fine.
+// A partial archive is enough because an import for platform X only walks
+// the children it needs for X and takes any blob the local content store
+// already has from there: an archive missing layers the receiver already
+// has, and the attestation manifests nobody has, imports and unpacks.
 //
 // containerd does all the verifying: every blob is committed under its
 // expected digest and size, so a corrupted or truncated transfer fails
@@ -134,7 +132,7 @@ func (p Plan) Missing(have map[string]bool) []Descriptor {
 }
 
 // Store is the node's containerd content store, as far as shipping needs
-// it. The worker implements it with the node's own `ctr`.
+// it. The worker implements it over containerd's API (ContainerdStore).
 type Store interface {
 	// Resolve returns the media type and digest the image name points at.
 	Resolve(ctx context.Context, image string) (mediaType, digest string, err error)
@@ -481,8 +479,9 @@ func WriteArchive(ctx context.Context, w io.Writer, store Store, plan Plan, blob
 	}
 	top := plan.Top
 	top.Annotations = map[string]string{
-		// ctr import names the image from this annotation. Without it the
-		// blobs would land but kubelet would still not find the image.
+		// containerd's import names the image from this annotation.
+		// Without it the blobs would land but kubelet would still not find
+		// the image.
 		"io.containerd.image.name": plan.Image,
 	}
 	index, err := json.Marshal(struct {

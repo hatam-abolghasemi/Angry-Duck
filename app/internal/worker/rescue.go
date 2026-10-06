@@ -197,8 +197,8 @@ func (rs *Rescue) receive(ctx context.Context, order model.RescueOrder) model.Re
 	}
 
 	// Plans are fetched lazily: the first source alone usually covers
-	// everything with blobs, and each plan costs the source a few ctr
-	// calls.
+	// everything with blobs, and each plan costs the source a few
+	// containerd calls.
 	plans := make([]blobship.Plan, len(order.Sources))
 	planErr := make([]error, len(order.Sources))
 	fetched := make([]bool, len(order.Sources))
@@ -351,7 +351,7 @@ func (rs *Rescue) receiveFrom(ctx context.Context, order model.RescueOrder, prim
 // are removed right after the rescue, and at startup if a crash left any.
 const baseImagePrefix = "angryduck.local/rescue-base/"
 
-// importMerged pipes one archive into `ctr images import`: top named as
+// importMerged pipes one archive into containerd's import: top named as
 // name, the inline blobs, then the blobs each source exports (streamed
 // straight through, never buffered). image is the real image the sources
 // export from; their export refuses digests outside its plan. It returns
@@ -707,14 +707,6 @@ func (rs *Rescue) HandleSnapshotExport(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler) // truncate: the receiver's gzip check then fails
 	}
 	logging.Infof("angryduck-worker[%s]: exported snapshot %s (layer %d) of image=%s to %s (%d bytes compressed)", rs.nodeID, req.ChainID, i, plan.Image, r.RemoteAddr, cw.n)
-}
-
-func sizeOf(ds []blobship.Descriptor) int64 {
-	var n int64
-	for _, d := range ds {
-		n += d.Size
-	}
-	return n
 }
 
 func readError(resp *http.Response) string {

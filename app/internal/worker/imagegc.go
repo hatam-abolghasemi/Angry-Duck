@@ -223,18 +223,17 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	gcCandidates.Set(float64(len(rollback)), g.nodeID, "rollback")
 
 	var removed int
-	ok := true
 	if !cleaning {
 		// Age rule only: everything unused for UnusedFor goes.
 		if len(old) > 0 {
 			logging.Infof("angryduck-worker[%s]: image cleanup: removing %d image(s) unused for %s", g.nodeID, len(old), g.cfg.UnusedFor)
 		}
-		removed, ok = g.remove(ctx, old, nil, nil)
+		removed, _ = g.remove(ctx, old, nil, nil)
 	} else {
 		// Disk pressure: unused images oldest first (the age-rule ones are
 		// the oldest, so they go first), down to Low; then rollback images,
 		// only while still above High.
-		removed, ok = g.remove(ctx, unused, &u, func(u float64) bool { return u <= g.cfg.Low })
+		removed, ok := g.remove(ctx, unused, &u, func(u float64) bool { return u <= g.cfg.Low })
 		if ok {
 			var n int
 			n, ok = g.remove(ctx, rollback, &u, func(u float64) bool { return u < g.cfg.High })

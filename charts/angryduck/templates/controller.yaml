@@ -1,0 +1,161 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "angryduck.controllerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "angryduck.controllerName" . }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "angryduck.controllerName" . }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "angryduck.controllerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "angryduck.controllerName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "angryduck.controllerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  selector:
+    {{- include "angryduck.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "angryduck.controllerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "angryduck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "angryduck.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "angryduck.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "angryduck.controllerName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "angryduck.image" (dict "image" .Values.controller.image "chart" .Chart) }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "angryduck.fullname" . }}-config
+          volumeMounts:
+            {{- if include "angryduck.hasRegistryCredentials" . }}
+            - name: registry-creds
+              mountPath: /etc/angryduck/registry-creds
+              readOnly: true
+            {{- end }}
+            - name: rescue-token
+              mountPath: /etc/angryduck/rescue-token
+              readOnly: true
+            {{- if .Values.webhookToken.enabled }}
+            - name: webhook-token
+              mountPath: /etc/angryduck/webhook-token
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        {{- if include "angryduck.hasRegistryCredentials" . }}
+        - name: registry-creds
+          secret:
+            secretName: {{ include "angryduck.registryCredentialsSecret" . }}
+        {{- end }}
+        - name: rescue-token
+          secret:
+            secretName: {{ include "angryduck.sharedTokenSecret" . }}
+        {{- if .Values.webhookToken.enabled }}
+        - name: webhook-token
+          secret:
+            secretName: {{ include "angryduck.webhookTokenSecret" . }}
+        {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

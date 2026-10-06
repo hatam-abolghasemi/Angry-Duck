@@ -7,9 +7,12 @@ registry.
 
 ## How it spreads
 
-Every `PROPAGATE_INTERVAL_S`, the controller pairs nodes that lack the image
-with nodes that have it, and orders each receiver to fetch it from its peers
-using the [transfer mechanism](transfers.md).
+Every `PROPAGATE_INTERVAL_S`, and about a second after any transfer finishes,
+the controller pairs nodes that lack the image with nodes that have it, and
+orders each receiver to fetch it from its peers using the
+[transfer mechanism](transfers.md). A finished transfer frees its source and
+adds a holder, so the next round starts right away instead of waiting for
+the interval.
 
 - **One node at a time per source.** With `PROPAGATE_PER_SOURCE=1`, each
   holder finishes one receiver before starting the next. The first nodes are

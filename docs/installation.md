@@ -2,26 +2,31 @@
 
 ## Requirements
 
-- **Kubernetes 1.25+**.
+- **Kubernetes 1.30+**.
 - **containerd 1.6+** on every node with the default `overlayfs` snapshotter
   and the CRI plugin (as kubelet uses it). No node tools are needed.
 - **node-exporter** on every node with host networking, on port `9100`.
   Workers read disk usage from it at the node's IP.
 - **Network**: workers reachable from each other and from the controller on
-  port `18081` of the node network.
+  port `18081` of their pod IPs, and node-exporter reachable from pods at
+  the node IP.
 - **Registry credentials**: a dockerconfigjson covering every private registry
   you push to.
 - Optional: the **Prometheus Operator**, for the included ServiceMonitors, and
   **Grafana**, for the [dashboard](observability.md#grafana-dashboard).
 
-Recommended containerd settings:
+Check the containerd and kubelet settings in
+[Node settings and limits](node-settings.md) first: `discard_unpacked_layers`
+and `serializeImagePulls` in particular decide how much Angry Duck can do.
 
-- `discard_unpacked_layers = false`, so peers can share verified blobs; see
-  [Transfers](transfers.md#integrity).
-- CRI registry `config_path = "/etc/containerd/certs.d"` if you enable the
-  [mirror](mirror.md#requirements).
+## Deploy with Helm
 
-## Deploy
+The chart in `charts/angryduck` is the simplest way to install. It generates
+the tokens, wires every path and name together, and leaves you the
+environment-specific parts: registry credentials, the webhook's ingress host,
+and monitoring. See [Helm](helm.md).
+
+## Deploy with plain manifests
 
 `deploy/stg` and `deploy/mgmt` are two example environments that differ only
 in labels and the ingress host. Copy one and adapt it to your cluster. The
@@ -30,11 +35,11 @@ steps below use `stg`.
 ### 1. Get the images
 
 Every release publishes both images to GitHub Container Registry, tagged with
-the version (`1.8.6`) and `latest`:
+the version (`1.8.7`) and `latest`:
 
 ```text
-ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.6
-ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.6
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.7
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.7
 ```
 
 They are public, so kubelet needs no `imagePullSecrets` for them. If you use
@@ -46,10 +51,10 @@ To build and push your own instead:
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.8.6 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.8.6 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.8.6
-docker push $REGISTRY/angry-duck-worker:1.8.6
+docker build -t $REGISTRY/angry-duck-controller:1.8.7 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.8.7 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.8.7
+docker push $REGISTRY/angry-duck-worker:1.8.7
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and
@@ -128,11 +133,13 @@ Restricting the ingress to your CI runners as well is a good idea; see
 
 ## Integrate with CI
 
-Call the webhook right after `docker push`, and never let it fail the
-pipeline:
+Call the webhook right after `docker push`, before the deploy job updates
+the manifests, and never let it fail the pipeline. The path is the one your
+ingress exposes: `/angryduck/webhook/preheat` with the example manifests,
+`/webhook/preheat` with the Helm chart's default.
 
 ```bash
-curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+curl -fsS -m 10 -X POST https://angryduck.example.com/angryduck/webhook/preheat \
   -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
@@ -146,6 +153,7 @@ build:
     - docker push "$IMAGE"
     - >
       curl -fsS -m 10 -X POST "$ANGRYDUCK_WEBHOOK"
+      -H "Authorization: Bearer $ANGRYDUCK_WEBHOOK_TOKEN"
       -H 'Content-Type: application/json' -d "{\"image\":\"$IMAGE\"}" || true
 ```
 

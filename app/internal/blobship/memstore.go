@@ -13,7 +13,7 @@ import (
 )
 
 // MemStore is an in-memory Store for tests. Its Import behaves like
-// `ctr images import --platform`: it verifies every blob against its
+// containerd's import for one platform: it verifies every blob against its
 // digest, keeps blobs it already had, registers the name from index.json,
 // then unpacks: a layer whose chainID snapshot exists is skipped, any
 // other layer needs its blob, and a missing one fails the import.

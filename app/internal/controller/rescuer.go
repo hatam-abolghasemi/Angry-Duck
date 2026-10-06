@@ -93,6 +93,12 @@ type Rescuer struct {
 	resolver LayerResolver // nil: sources ordered by utilization only
 	platform string
 	wg       sync.WaitGroup // in-flight sends, for tests
+
+	// backlog: the last tick stopped at the cluster-wide limit with
+	// rescues still due. The next rescue to finish wakes the loop so they
+	// don't wait for the next RESCUE_INTERVAL_S.
+	backlog bool
+	wakeup  waker
 }
 
 // SetLayerResolver orders rescue sources that hold the image's blobs
@@ -150,6 +156,7 @@ func NewRescuer(registry *Registry, pods PodLister, token string, cfg RescuerCon
 		client:   &http.Client{Timeout: cfg.Timeout},
 		sem:      make(chan struct{}, cfg.MaxConcurrent),
 		pairs:    make(map[string]*pairState),
+		wakeup:   newWaker(),
 	}
 }
 
@@ -164,6 +171,11 @@ func (rs *Rescuer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			rs.tick(ctx)
+		case <-rs.wakeup:
+			if !rs.wakeup.settle(ctx) {
+				return
+			}
 			rs.tick(ctx)
 		}
 	}
@@ -192,6 +204,9 @@ func (rs *Rescuer) backoff(failures int) time.Duration {
 }
 
 func (rs *Rescuer) tick(ctx context.Context) {
+	rs.mu.Lock()
+	rs.backlog = false
+	rs.mu.Unlock()
 	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	pods, err := rs.pods.ListPods(listCtx, "status.phase=Pending")
 	cancel()
@@ -276,7 +291,12 @@ func (rs *Rescuer) tick(ctx context.Context) {
 		select {
 		case rs.sem <- struct{}{}:
 		default:
-			return // cluster-wide limit reached; the rest wait for a later tick
+			// Cluster-wide limit reached: the rest start as soon as a
+			// running rescue finishes.
+			rs.mu.Lock()
+			rs.backlog = true
+			rs.mu.Unlock()
+			return
 		}
 		rs.mu.Lock()
 		st.inFlight = true
@@ -305,7 +325,15 @@ func (rs *Rescuer) skip(st *pairState, result, why string) {
 
 func (rs *Rescuer) send(ctx context.Context, st *pairState, s stuckImage, target *workerEntry, sources []model.RescueSource) {
 	defer rs.wg.Done()
-	defer func() { <-rs.sem }()
+	defer func() {
+		<-rs.sem
+		rs.mu.Lock()
+		backlog := rs.backlog
+		rs.mu.Unlock()
+		if backlog {
+			rs.wakeup.wake()
+		}
+	}()
 
 	names := make([]string, len(sources))
 	for i, src := range sources {

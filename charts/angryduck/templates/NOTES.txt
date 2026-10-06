@@ -1,0 +1,33 @@
+Angry Duck {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+Check that every node has a fresh worker:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "angryduck.controllerName" . }} 8080:8080 &
+  curl -s localhost:8080/status | jq '{fresh_count, workers: [.workers[] | {node_id, fresh}]}'
+{{- if .Values.webhookToken.enabled }}
+
+CI's webhook token, for a masked CI variable such as ANGRYDUCK_WEBHOOK_TOKEN:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "angryduck.webhookTokenSecret" . }} -o jsonpath='{.data.token}' | base64 -d
+{{- else }}
+
+WARNING: webhookToken.enabled is false, so the webhook accepts any caller.
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+Call it from CI right after every push:
+
+  curl -fsS -m 10 -X POST https://{{ .Values.ingress.host }}{{ .Values.ingress.path }} \
+    -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
+    -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
+{{- else }}
+
+The webhook isn't exposed outside the cluster. Set ingress.enabled and
+ingress.host, or call http://{{ include "angryduck.controllerName" . }}.{{ .Release.Namespace }}.svc:8080/webhook/preheat
+from in-cluster CI runners.
+{{- end }}
+{{- if not (include "angryduck.hasRegistryCredentials" .) }}
+
+No registry credentials are configured: seed pulls and manifest reads of
+private images will fail. Set registryCredentials.existingSecret.
+{{- end }}

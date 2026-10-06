@@ -31,7 +31,9 @@ sequenceDiagram
 - **Transfer.** Only the layers the node lacks are fetched; see
   [Transfers](transfers.md).
 - **Concurrency.** `RESCUE_MAX_CONCURRENT` rescues cluster-wide and
-  `RESCUE_NODE_MAX_CONCURRENT` per receiving node.
+  `RESCUE_NODE_MAX_CONCURRENT` per receiving node. When the cluster-wide
+  limit holds rescues back, the next one starts as soon as a running rescue
+  finishes, not at the next `RESCUE_INTERVAL_S`.
 - **Backoff.** Each failure in a row for the same node and image doubles the
   wait, from `RESCUE_RETRY_AFTER_S` up to `RESCUE_BACKOFF_MAX_S`, and resets
   once the pod is no longer stuck. A retry skips anything that already

@@ -37,7 +37,8 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
   and `/mirror/content/*` hand out layers of any image on the node, private
   images included, to anyone holding the shared token. Without a token,
   rescue, propagation and the mirror stay off rather than serve
-  unauthenticated. Traffic is plain HTTP on the node network.
+  unauthenticated. Traffic is plain HTTP between pod IPs; use a CNI with
+  encryption between nodes if the network itself isn't trusted.
 - **`/report`, `/pull` and `/pull/cancel` require the shared token** when one
   is configured (`AUTH_MODE`, see [Configuration](configuration.md)).
   `/report` matters most: the address a worker reports is where rescue and
@@ -59,14 +60,22 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 - **containerd verifies blobs**, so a peer can't substitute content for a
   digest. Snapshots can't be verified by digest; see
   [Transfers](transfers.md#integrity).
+- **The shared token can plant snapshots.** Whoever holds it can serve a
+  receiver a snapshot with any content under a real layer's chainID.
+  containerd then treats that layer as present and reuses it for every later
+  pull of an image with that layer on that node, until the snapshot is
+  removed. Treat the token like a credential for every node's image store:
+  keep it in the Secret only, rotate it if it may have leaked (see
+  [Operations](operations.md#rotating-the-token)), and keep
+  `discard_unpacked_layers = false` so snapshots are rarely needed at all.
 
 ## Kubernetes permissions
 
 - **Controller**: can list pods cluster-wide, to find stuck pulls, and nothing
   else. It mounts the registry pull secret to read manifests.
-- **Worker**: no Kubernetes API access (`automountServiceAccountToken:
-  false`). It writes `hosts.toml` files under containerd's config directory
-  and deletes images on its node.
+- **Worker**: `get` on its own DaemonSet and nothing else, used on shutdown
+  to tell an uninstall from a rollout. It writes `hosts.toml` files under
+  containerd's config directory and deletes images on its node.
 
 ## Credentials
 

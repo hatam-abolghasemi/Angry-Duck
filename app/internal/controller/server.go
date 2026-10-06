@@ -104,13 +104,9 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Normalize short Docker-style references ("nginx", "nginx:latest")
 	// into fully-qualified ones ("docker.io/library/nginx:latest") here,
-	// once, at the entry point. `ctr` (one of the worker's runtime
-	// backends) does not do this expansion itself and fails with a confusing
-	// "invalid port after host" error on short references — normalizing
-	// centrally means every downstream consumer (ranking, the pull order
-	// sent to workers) sees the same canonical reference throughout,
-	// rather than each having to repeat this logic or risk seeing
-	// inconsistent forms of the same image.
+	// once, at the entry point, so every downstream consumer (ranking,
+	// the pull order sent to workers) sees the same canonical reference
+	// rather than inconsistent forms of the same image.
 	normalized := imageref.Normalize(req.Image)
 	if normalized != req.Image {
 		logging.Infof("angryduck-controller: normalized image reference %q to %q", req.Image, normalized)

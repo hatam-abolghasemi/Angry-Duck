@@ -1,0 +1,119 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+controller:
+  image:
+    repository: ghcr.io/hatam-abolghasemi/angry-duck-controller
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 150m
+      memory: 64Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+worker:
+  image:
+    repository: ghcr.io/hatam-abolghasemi/angry-duck-worker
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 200m
+      memory: 32Mi
+    limits:
+      cpu: "2"
+      memory: 192Mi
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  affinity: {}
+  priorityClassName: ""
+  nodeExporterPort: 9100
+  containerd:
+    socket: /run/containerd/containerd.sock
+    root: /var/lib/containerd
+    config: /etc/containerd/config.toml
+    certsDir: /etc/containerd/certs.d
+  stateDir: /var/lib/angryduck
+
+sharedToken:
+  existingSecret: ""
+
+webhookToken:
+  enabled: true
+  existingSecret: ""
+
+registryCredentials:
+  existingSecret: ""
+  dockerconfigjson: ""
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  path: /webhook/preheat
+  annotations: {}
+  tls: []
+
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 15s
+
+config:
+  LOG_LEVEL: "info"
+  METRICS_LABEL_REGISTRY: "true"
+  WORKER_STALE_AFTER_S: "30"
+  TARGET_TTL_S: "120"
+  RANK_INTERVAL_S: "10"
+  RANK_TOP_N: "5"
+  RANK_BY_LAYERS: "true"
+  RANK_PLATFORM: "linux/amd64"
+  RANK_RESOLVE_TIMEOUT_S: "5"
+  RANK_RESOLVE_CACHE_S: "600"
+  RANK_PREFER_IMAGE_LOCALITY: "true"
+  RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
+  REPORT_INTERVAL_S: "15"
+  PREHEAT_ATTRIBUTION_INTERVAL_S: "300"
+  PREHEAT_ATTRIBUTION_RETENTION_S: "360"
+  RESCUE_ENABLED: "true"
+  RESCUE_INTERVAL_S: "15"
+  RESCUE_RETRY_AFTER_S: "120"
+  RESCUE_BACKOFF_MAX_S: "3600"
+  RESCUE_PIN_TTL_S: "3600"
+  RESCUE_TIMEOUT_S: "600"
+  RESCUE_MAX_CONCURRENT: "2"
+  RESCUE_MAX_SOURCES: "3"
+  RESCUE_NODE_MAX_CONCURRENT: "2"
+  RESCUE_CONTAINERD_NAMESPACE: "k8s.io"
+  LAYER_INVENTORY_ENABLED: "true"
+  LAYER_SCAN_INTERVAL_S: "60"
+  PROPAGATE_ENABLED: "true"
+  PROPAGATE_INTERVAL_S: "10"
+  PROPAGATE_WINDOW_S: "0"
+  PROPAGATE_MAX_CONCURRENT: "8"
+  PROPAGATE_PER_SOURCE: "1"
+  PROPAGATE_MAX_UTILIZATION: "0.70"
+  PROPAGATE_SEED_TIMEOUT_MIN_S: "120"
+  PROPAGATE_SEED_TIMEOUT_MAX_S: "600"
+  PROPAGATE_SEED_TIMEOUT_FACTOR: "3"
+  GC_ENABLED: "true"
+  GC_INTERVAL_S: "60"
+  GC_HIGH_UTILIZATION: "0.70"
+  GC_LOW_UTILIZATION: "0.60"
+  GC_UNUSED_FOR_S: "21600"
+  GC_ROLLBACK_KEEP: "3"
+  GC_BATCH: "5"
+  GC_SETTLE_S: "10"
+  GC_PROTECT_SUBSTRINGS: "pause"
+  MIRROR_ENABLED: "false"
+  MIRROR_REGISTRIES: ""

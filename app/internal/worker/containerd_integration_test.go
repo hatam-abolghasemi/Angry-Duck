@@ -449,6 +449,25 @@ func TestContainerd_RescueShipsSnapshot(t *testing.T) {
 	}
 }
 
+// The same rescue with the content store mounted, as in the DaemonSet: the
+// source reads containerd's diff straight from the blob directory instead
+// of through the content API.
+func TestContainerd_RescueShipsSnapshotFromBlobDir(t *testing.T) {
+	_, src, dst, app := setup(t)
+	for _, s := range []*ContainerdStore{src, dst} {
+		if s.UseBlobDir(os.Getenv("ANGRYDUCK_CONTAINERD_ROOT"), "/etc/containerd/config.toml") == "" {
+			t.Skip("containerd's content store isn't readable here")
+		}
+	}
+	_, srcSrv := realPeer(t, "worker14", src, nil)
+	_, dstSrv := realPeer(t, "master1", dst, nil)
+	code, res := order(t, dstSrv, model.RescueOrder{Image: testImage, Sources: []model.RescueSource{{NodeID: "worker14", Address: addr(srcSrv)}}}, testToken)
+	if code != http.StatusOK || !res.OK || res.Snapshots != 1 {
+		t.Fatalf("rescue: %d %+v", code, res)
+	}
+	sameTree(t, withoutUserXattrs(tree(t, src, app.chains[1])), withoutUserXattrs(tree(t, dst, app.chains[1])))
+}
+
 // A pre-1.8.6 source sends GNU tar of the overlay directory. This is that
 // exact command, run against the source's real snapshot directory.
 func TestContainerd_ReceivesFromLegacySource(t *testing.T) {

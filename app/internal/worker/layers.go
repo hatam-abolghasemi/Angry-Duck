@@ -30,8 +30,8 @@ const fullRetry = 10 * time.Minute
 // acknowledged.
 //
 // Scans run at most every interval, plus right after a pull or rescue
-// lands (force). Two `ctr` listings per scan; nothing is sent when nothing
-// changed.
+// lands (force). Two containerd listings per scan; nothing is sent when
+// nothing changed.
 type LayerTracker struct {
 	lister   LayerLister
 	nodeID   string

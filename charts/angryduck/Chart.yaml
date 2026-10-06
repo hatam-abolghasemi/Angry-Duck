@@ -1,0 +1,16 @@
+apiVersion: v2
+name: angryduck
+description: Peer-to-peer image distribution, pull rescue and image cleanup for Kubernetes nodes running containerd.
+type: application
+version: 1.8.7
+appVersion: "1.8.7"
+kubeVersion: ">=1.30.0-0"
+home: https://github.com/hatam-abolghasemi/Angry-Duck
+sources:
+  - https://github.com/hatam-abolghasemi/Angry-Duck
+keywords:
+  - containerd
+  - image
+  - preheat
+  - p2p
+  - registry
