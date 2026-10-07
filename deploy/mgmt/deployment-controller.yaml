@@ -32,7 +32,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: controller
-          image: registry.example.com/devops/generic/angry-duck-controller:1.8.8
+          image: registry.example.com/devops/generic/angry-duck-controller:1.8.9
           ports:
             - containerPort: 8080
               name: http

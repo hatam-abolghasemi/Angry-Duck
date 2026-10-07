@@ -336,20 +336,39 @@ func TestSpreader_SupersedeDropsTheOldJobOnNodesThatGotOrders(t *testing.T) {
 
 func TestSpreader_BusyWorkerFreesTheSlotAndALostReportExpires(t *testing.T) {
 	s, f, _ := spreadSetup(t, 1)
-	f.busy["w1"] = true
+	for _, n := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
+		f.busy[n] = true // every order answered 409
+	}
 	if _, err := s.Start(context.Background(), img); err != nil {
 		t.Fatal(err)
 	}
 	s.wg.Wait()
 	job := s.jobFor(img)
 	s.mu.Lock()
-	w1 := job.nodes["w1"]
-	freed := w1.reg == nil && !w1.next.IsZero()
-	s.mu.Unlock()
-	if !freed {
-		t.Fatal("a 409 must free the slot and hold the node back briefly")
+	held := 0
+	for _, n := range job.nodes {
+		if n.reg != nil || n.peer != nil {
+			t.Fatal("a 409 must free the slot")
+		}
+		if !n.next.IsZero() {
+			held++
+		}
 	}
-	// A transfer nobody reports on is freed after the transfer timeout.
+	s.mu.Unlock()
+	if held == 0 {
+		t.Fatal("a 409 must hold the node back briefly")
+	}
+	// Workers free again: orders go out; one report gets lost.
+	f.mu.Lock()
+	f.busy = map[string]bool{}
+	f.mu.Unlock()
+	s.mu.Lock()
+	for _, n := range job.nodes {
+		n.next = time.Time{}
+	}
+	s.mu.Unlock()
+	s.tick(context.Background())
+	s.wg.Wait()
 	s.mu.Lock()
 	var stuck *snode
 	for _, n := range job.nodes {
@@ -360,6 +379,9 @@ func TestSpreader_BusyWorkerFreesTheSlotAndALostReportExpires(t *testing.T) {
 		}
 	}
 	s.mu.Unlock()
+	if stuck == nil {
+		t.Fatal("no registry pull ordered once workers were free")
+	}
 	s.tick(context.Background())
 	s.wg.Wait()
 	s.mu.Lock()

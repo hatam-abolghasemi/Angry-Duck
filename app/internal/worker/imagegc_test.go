@@ -134,9 +134,12 @@ func TestGCUsesRollbackOnlyAboveHighAndPersists(t *testing.T) {
 	addImage(g, f, "r.io/app:1", "sha256:a1", 10*time.Hour)
 	addImage(g, f, "r.io/app:2", "sha256:a2", 8*time.Hour)
 	g.cfg.Settle = 0
-	g.Tick(context.Background()) // disk never goes down: both rollback images go
+	g.Tick(context.Background()) // one batch holds both rollback images
 	if len(f.deleted) != 4 {
 		t.Fatalf("deleted %v", f.deleted)
+	}
+	if g.stallUntil.IsZero() {
+		t.Fatal("the disk didn't move after that batch: cleanup should stall")
 	}
 	// Usage times survive a restart.
 	g.save(true)
@@ -206,5 +209,52 @@ func TestDisplayName(t *testing.T) {
 		if got := displayName(tc.names); got != tc.want {
 			t.Errorf("displayName(%v) = %q, want %q", tc.names, got, tc.want)
 		}
+	}
+}
+
+func TestGCStopsWhenRemovingFreesNothingAndResumesWhenTheDiskGrows(t *testing.T) {
+	// worker1's case: 73%, filled by running images, volumes and logs.
+	// Removing rollback images frees nothing measurable.
+	u := 0.73
+	g, f := gcFixture(t, &u, nil)
+	g.cfg.Settle, g.cfg.Batch = 0, 2
+	for i := 1; i <= 8; i++ {
+		addImage(g, f, "r.io/app"+string(rune('0'+i))+":1", "sha256:r"+string(rune('0'+i)), time.Hour) // one per repo: all rollback
+	}
+	addImage(g, f, "r.io/old:1", "sha256:old", 30*time.Hour)
+	kicked := 0
+	g.OnDone(func() { kicked++ })
+
+	g.Tick(context.Background())
+	first := len(f.deleted)
+	// The old image and one more go in the first batch; then it stops.
+	if first != 4 {
+		t.Fatalf("deleted %v: want one batch of 2, then a stop", f.deleted)
+	}
+	if kicked != 1 {
+		t.Fatal("pressure removals must kick the reporter")
+	}
+	if !strings.Contains(scrapeMetrics(t), `angryduck_worker_gc_stalled{node="n1"} 1`) {
+		t.Fatal("stall not published")
+	}
+	g.Tick(context.Background())
+	if len(f.deleted) != first {
+		t.Fatalf("removed more while stalled: %v", f.deleted[first:])
+	}
+	// The 6h rule still applies while stalled.
+	// (A repo's newest 3 are rollback images; its 4th, unused 30h, is old.)
+	addImage(g, f, "r.io/older:1", "sha256:o1", 30*time.Hour)
+	for i := 2; i <= 4; i++ {
+		addImage(g, f, "r.io/older:"+string(rune('0'+i)), "sha256:o"+string(rune('0'+i)), time.Hour)
+	}
+	g.Tick(context.Background())
+	if len(f.deleted) != first+2 || f.deleted[first] != "r.io/older:1" && f.deleted[first+1] != "r.io/older:1" {
+		t.Fatalf("age rule skipped while stalled: %v", f.deleted[first:])
+	}
+	// The disk grows by 1%: removals are worth another try.
+	u = 0.74
+	g.Tick(context.Background())
+	if len(f.deleted) <= first+2 {
+		t.Fatal("cleanup didn't resume after the disk grew")
 	}
 }

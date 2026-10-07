@@ -30,6 +30,23 @@ flowchart TD
     G -- no --> F
 ```
 
+## When removing doesn't help
+
+Images often aren't what fills a disk: running pods' images and writable
+layers, emptyDir volumes and logs share it. Removing unused images then
+frees almost nothing, and the cleanup would go on to delete rollback images
+for no gain. So after each batch it measures the disk again: if the batch
+freed less than 0.2% of it, the cleanup stops removing for disk pressure,
+rollback images included, and logs what it saw. It tries again after an
+hour, or as soon as the disk grows by 1% (new images arrived, maybe
+removable ones). The 6-hour rule keeps running meanwhile.
+`angryduck_worker_gc_stalled` is 1 while it waits, and the Cleanup tab shows
+the node as *stalled*.
+
+If a node stays stalled, the disk itself is too small for the thresholds:
+find what fills it, or raise `GC_HIGH_UTILIZATION` and `GC_LOW_UTILIZATION`
+(and `PROPAGATE_MAX_UTILIZATION`, which keeps spreads off nodes above it).
+
 ## Rollback images
 
 Per repo, the newest `GC_ROLLBACK_KEEP` (3) unused images are kept so a
@@ -80,6 +97,7 @@ defense.
 | `angryduck_worker_gc_image_returns{image}` | Images that came back within an hour of being removed, and how often: something still uses them. Only the last hour is kept. |
 | `angryduck_worker_gc_candidates{tier}` | Images that could be removed right now, per tier. |
 | `angryduck_worker_gc_cleaning` | 1 while the disk is above high and not yet back to low. |
+| `angryduck_worker_gc_stalled` | 1 while disk-pressure removals are paused because they freed nothing. |
 
 A node with `gc_cleaning == 1` and no candidates in any tier is full of
 running or protected images; cleanup can't help it.

@@ -31,6 +31,11 @@ var (
 		"1 while this node's disk-pressure cleanup is active: disk went above GC_HIGH and hasn't come down to GC_LOW yet.",
 		"node",
 	)
+	gcStalled = metrics.NewGaugeVec(
+		"angryduck_worker_gc_stalled",
+		"1 while this node's disk-pressure cleanup has stopped because removing images didn't free space (the disk is filled by something else: running images, volumes, logs). The 6h rule still runs; pressure and rollback removals resume after an hour, or once the disk grows by 1%.",
+		"node",
+	)
 	gcCandidates = metrics.NewGaugeVec(
 		"angryduck_worker_gc_candidates",
 		"Images the cleanup could remove, by tier (old, pressure, rollback). old goes on its own; pressure and rollback only while cleaning.",
@@ -97,6 +102,11 @@ type ImageGC struct {
 	dirty     bool
 	savedAt   time.Time
 
+	// Disk-pressure cleanup gives up while removing images frees nothing:
+	// until stallUntil, unless the disk grows past stallAt+gcStallRegrow.
+	stallUntil time.Time
+	stallAt    float64
+
 	// Re-pull loop detection, bounded by what was removed in the last
 	// returnWindow: removed holds images this cleanup removed recently,
 	// returned those that came back.
@@ -104,6 +114,15 @@ type ImageGC struct {
 	returned map[string]*churn  // target digest -> how often it came back
 	churnPub bool               // returned changed since last published
 }
+
+// A batch that frees less than gcMinFree of the disk means the disk isn't
+// full of removable images: cleanup stops for gcStallFor, or until the
+// disk grows by gcStallRegrow (new images arrived, maybe removable ones).
+const (
+	gcMinFree     = 0.002
+	gcStallFor    = time.Hour
+	gcStallRegrow = 0.01
+)
 
 // returnWindow is how long a removed image is watched for coming back,
 // and how long one that came back stays in gcImageReturns.
@@ -235,10 +254,21 @@ func (g *ImageGC) Tick(ctx context.Context) {
 			g.nodeID, u*100, g.cfg.High*100, g.cfg.Low*100)
 	case u <= g.cfg.Low && g.cleaning:
 		g.cleaning = false
+		g.stallUntil = time.Time{}
 		logging.Infof("angryduck-worker[%s]: image cleanup: disk at %.1f%%, done", g.nodeID, u*100)
 	}
 	cleaning := g.cleaning && uerr == nil
+	stalled := cleaning && now.Before(g.stallUntil) && u < g.stallAt+gcStallRegrow
+	if cleaning && !stalled && !g.stallUntil.IsZero() {
+		logging.Infof("angryduck-worker[%s]: image cleanup: disk at %.1f%%, trying removals again", g.nodeID, u*100)
+		g.stallUntil = time.Time{}
+	}
 	g.mu.Unlock()
+	if stalled {
+		gcStalled.Set(1, g.nodeID)
+	} else {
+		gcStalled.Set(0, g.nodeID)
+	}
 	if cleaning {
 		gcCleaning.Set(1, g.nodeID)
 	} else {
@@ -257,24 +287,33 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	gcCandidates.Set(float64(len(rollback)), g.nodeID, "rollback")
 
 	var removed int
-	if !cleaning {
+	if !cleaning || stalled {
 		// Age rule only: everything unused for UnusedFor goes.
 		if len(old) > 0 {
 			logging.Infof("angryduck-worker[%s]: image cleanup: removing %d image(s) unused for %s", g.nodeID, len(old), g.cfg.UnusedFor)
 		}
-		removed, _ = g.remove(ctx, old, nil, nil)
+		removed, _, _ = g.remove(ctx, old, nil, nil)
 	} else {
 		// Disk pressure: unused images oldest first (the age-rule ones are
 		// the oldest, so they go first), down to Low; then rollback images,
-		// only while still above High.
-		removed, ok := g.remove(ctx, unused, &u, func(u float64) bool { return u <= g.cfg.Low })
-		if ok {
-			var n int
-			n, ok = g.remove(ctx, rollback, &u, func(u float64) bool { return u < g.cfg.High })
+		// only while still above High. Either stops as soon as a batch
+		// frees (almost) nothing.
+		start := u
+		n, ok, futile := g.remove(ctx, unused, &u, func(u float64) bool { return u <= g.cfg.Low })
+		removed = n
+		if ok && !futile {
+			n, ok, futile = g.remove(ctx, rollback, &u, func(u float64) bool { return u < g.cfg.High })
 			removed += n
 		}
-		if ok && removed == 0 && u >= g.cfg.High {
-			logging.Warnf("angryduck-worker[%s]: image cleanup: disk at %.1f%% but nothing is removable (every image is in use, protected or being pulled)", g.nodeID, u*100)
+		switch {
+		case futile:
+			g.stall(now, u)
+			logging.Warnf("angryduck-worker[%s]: image cleanup: removed %d image(s) but the disk only went from %.1f%% to %.1f%%: it's filled by something else (running images, volumes, logs). Leaving the rest, rollback images included; trying again in %s or once the disk grows by %.0f%%",
+				g.nodeID, removed, start*100, u*100, gcStallFor, gcStallRegrow*100)
+		case ok && removed == 0 && u >= g.cfg.High:
+			g.stall(now, u)
+			logging.Warnf("angryduck-worker[%s]: image cleanup: disk at %.1f%% but nothing is removable (every image is in use, protected or being pulled); looking again in %s or once the disk grows by %.0f%%",
+				g.nodeID, u*100, gcStallFor, gcStallRegrow*100)
 		}
 	}
 	if removed > 0 && g.onDone != nil {
@@ -282,12 +321,20 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	}
 }
 
+// stall stops disk-pressure removals (see gcStallFor).
+func (g *ImageGC) stall(now time.Time, u float64) {
+	g.mu.Lock()
+	g.stallUntil, g.stallAt = now.Add(gcStallFor), u
+	g.mu.Unlock()
+	gcStalled.Set(1, g.nodeID)
+}
+
 // remove deletes list in batches, oldest first. With u set, it stops once
-// stop(*u) holds, re-measuring the disk into *u after each batch. It
+// stop(*u) holds, re-measuring the disk into *u after each batch, and
+// stops with futile=true when a batch freed less than gcMinFree. It
 // returns how many images went and false if it had to give up (a failed
 // delete or disk reading, or ctx done).
-func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop func(float64) bool) (int, bool) {
-	removed := 0
+func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop func(float64) bool) (removed int, ok, futile bool) {
 	for len(list) > 0 {
 		if u != nil && stop(*u) {
 			break
@@ -305,7 +352,7 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 		if err := g.store.DeleteImages(ctx, names...); err != nil {
 			logging.Warnf("angryduck-worker[%s]: image cleanup: removing %v: %v", g.nodeID, names, err)
 			imagesDeletedTotal.Add(int64(len(batch)), g.nodeID, "error")
-			return removed, false
+			return removed, false, false
 		}
 		removed += len(batch)
 		now := time.Now()
@@ -323,18 +370,22 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 		}
 		select { // let containerd's GC free the space before measuring
 		case <-ctx.Done():
-			return removed, false
+			return removed, false, false
 		case <-time.After(g.cfg.Settle):
 		}
 		if u != nil {
 			v, err := g.util()
 			if err != nil {
-				return removed, false
+				return removed, false, false
 			}
+			before := *u
 			*u = v
+			if before-v < gcMinFree && !stop(v) {
+				return removed, true, true
+			}
 		}
 	}
-	return removed, true
+	return removed, true, false
 }
 
 // plan returns every image that isn't in use, protected or busy, oldest

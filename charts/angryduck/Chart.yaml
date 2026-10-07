@@ -2,8 +2,8 @@ apiVersion: v2
 name: angryduck
 description: Peer-to-peer image distribution, pull rescue and image cleanup for Kubernetes nodes running containerd.
 type: application
-version: 1.8.8
-appVersion: "1.8.8"
+version: 1.8.9
+appVersion: "1.8.9"
 kubeVersion: ">=1.30.0-0"
 home: https://github.com/hatam-abolghasemi/Angry-Duck
 sources:

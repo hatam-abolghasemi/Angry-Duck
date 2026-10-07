@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.8.9
+
+### Fixed
+
+- **Image cleanup stops when removing images frees nothing.** On nodes whose
+  disk is filled by running images, volumes and logs, it kept deleting
+  rollback images every minute without the disk moving. Now a batch that
+  frees less than 0.2% of the disk pauses disk-pressure removals for an
+  hour, or until the disk grows by 1%; the 6-hour rule keeps running. The
+  "nothing is removable" warning no longer repeats every minute.
+- Removals under disk pressure kick the reporter again, so the controller
+  sees the freed space right away. A shadowed variable had stopped it.
+- `angryduck_worker_gc_stalled{node}`, and *stalled* in the dashboard's
+  per-node cleanup timeline.
+
+### Changed
+
+- Dashboard: registry bytes avoided, the node overview, the Transfers and
+  Preheat tabs count spread traffic; the Propagation tab is now **Whole-Image
+  Fallback**; spread rate legends show mean and max; spread nodes by state
+  show the peak per interval.
+
 ## 1.8.8
 
 ### Changed

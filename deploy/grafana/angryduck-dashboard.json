@@ -123,7 +123,7 @@
     }
   ],
   "cursorSync": "Crosshair",
-  "description": "Preheat, spread, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.8. Pick data source → cluster → node; click any node, image or row to focus.",
+  "description": "Preheat, spread, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.9. Pick data source → cluster → node; click any node, image or row to focus.",
   "editable": true,
   "elements": {
     "panel-1": {
@@ -306,7 +306,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (increase({__name__=~\"angryduck_worker_mirror_peer_served_bytes_total|angryduck_worker_rescue_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\"}[$__range]))",
+                      "expr": "sum by (node) (increase({__name__=~\"angryduck_worker_mirror_peer_served_bytes_total|angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\", path=~\"|served\"}[$__range]))",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -330,7 +330,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (increase(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"}[$__range]))",
+                      "expr": "sum by (node) (increase({__name__=~\"angryduck_worker_pulls_total|angryduck_worker_spread_transfers_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"success|ok\", path=~\"|registry\"}[$__range]))",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -483,7 +483,7 @@
             ]
           }
         },
-        "description": "One row per node over the selected time range: cleanup state, mirror hit ratio, bytes the mirror delivered, bytes served to other nodes, registry pulls, stuck images, cleanup candidates and images removed. Click a node to focus on it.",
+        "description": "One row per node over the selected time range: cleanup state, mirror hit ratio, bytes the mirror delivered, bytes served to other nodes, registry pulls, stuck images, cleanup candidates and images removed. Click a node to focus on it. registry pulls counts whole-image seed pulls and single spread blobs pulled from the registry.",
         "id": 11,
         "links": [],
         "title": "Node Overview",
@@ -999,12 +999,35 @@
                       "exemplar": false,
                       "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} - angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
                       "instant": false,
-                      "legendFormat": "{{result}}",
+                      "legendFormat": "image {{result}}",
                       "range": true
                     },
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_controller_spread_transfers_total{k8s_source_cluster=~\"$cluster\", path=\"registry\"} - angryduck_controller_spread_transfers_total{k8s_source_cluster=~\"$cluster\", path=\"registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "instant": false,
+                      "legendFormat": "blob {{result}}",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -1017,7 +1040,7 @@
         "description": "Pull orders the controller sent to seed workers, per interval.",
         "id": 13,
         "links": [],
-        "title": "Seed Pull Orders by Result",
+        "title": "Registry Pull Orders by Result",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -1160,12 +1183,35 @@
                       "exemplar": false,
                       "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} - angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
                       "instant": false,
-                      "legendFormat": "{{node}}",
+                      "legendFormat": "{{node}} (images)",
                       "range": true
                     },
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} - angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "instant": false,
+                      "legendFormat": "{{node}} (blobs)",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -1178,7 +1224,7 @@
         "description": "Which nodes are being chosen as seeds, per interval.",
         "id": 14,
         "links": [],
-        "title": "Seed Pull Orders by Node",
+        "title": "Registry Pulls by Node",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -1297,12 +1343,35 @@
                       "exemplar": false,
                       "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} - angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
                       "instant": false,
-                      "legendFormat": "{{result}}",
+                      "legendFormat": "image {{result}}",
                       "range": true
                     },
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} - angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "instant": false,
+                      "legendFormat": "blob {{result}}",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -1315,7 +1384,7 @@
         "description": "Registry pulls executed by seed workers, per interval. cancelled = a slow seed was stopped and the node got the image from a peer.",
         "id": 15,
         "links": [],
-        "title": "Seed Pulls by Result",
+        "title": "Registry Pulls by Result",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -1473,12 +1542,35 @@
                       "exemplar": false,
                       "expr": "sum by (node) (increase(angryduck_worker_pull_seconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\", registry=~\"$registry\"}[30m]))\n/ sum by (node) (increase(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\", registry=~\"$registry\"}[30m]))",
                       "instant": false,
-                      "legendFormat": "{{node}}",
+                      "legendFormat": "{{node}} (image)",
                       "range": true
                     },
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (node) (increase(angryduck_worker_spread_transfer_milliseconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m])) / 1000\n/ sum by (node) (increase(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m]))",
+                      "instant": false,
+                      "legendFormat": "{{node}} (blob)",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -1489,7 +1581,7 @@
         "description": "Seconds per successful registry pull over the preceding 30 minutes, per node. Pulls only happen when an image is pushed, so a short window left isolated fragments; a gap now means no pull for 30 minutes.",
         "id": 16,
         "links": [],
-        "title": "Average Seed Pull Duration (30m rolling)",
+        "title": "Average Registry Pull Duration (30m rolling)",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -1627,7 +1719,7 @@
         "description": "Successful registry pulls per registry, per interval. Empty unless METRICS_LABEL_REGISTRY=true.",
         "id": 17,
         "links": [],
-        "title": "Seed Pulls by Registry",
+        "title": "Whole-Image Seed Pulls by Registry",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -1758,7 +1850,7 @@
         "description": "How seeds were ranked: layers (bytes already held) or a fallback (repo, utilization). Fallbacks usually mean a manifest couldn't be read.",
         "id": 18,
         "links": [],
-        "title": "Seed Ranking Basis",
+        "title": "Whole-Image Seed Ranking Basis",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -1914,7 +2006,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "angryduck_controller_seed_missing_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}",
+                      "expr": "sum by (node) (increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range])) > 0",
                       "instant": true,
                       "legendFormat": "{{node}}",
                       "range": false
@@ -1929,10 +2021,10 @@
             "transformations": []
           }
         },
-        "description": "Bytes of the latest seeded image each seed lacked when ordered, i.e. what it had to fetch from the registry. Only set when layer ranking was used.",
+        "description": "Bytes each node pulled from the registry for spreads over the time range. Whole-image seed pulls (the fallback) are in Registry Pulls by Node.",
         "id": 19,
         "links": [],
-        "title": "Registry Download per Seed",
+        "title": "Registry Download per Node",
         "transparent": true,
         "vizConfig": {
           "group": "bargauge",
@@ -2106,7 +2198,7 @@
                       "exemplar": false,
                       "expr": "sum(angryduck_worker_pulls_in_flight{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
                       "instant": false,
-                      "legendFormat": "in flight",
+                      "legendFormat": "image pulls in flight",
                       "range": true
                     },
                     "version": "v0"
@@ -2136,6 +2228,29 @@
                   },
                   "refId": "B"
                 }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_worker_spread_active{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"})",
+                      "instant": false,
+                      "legendFormat": "blob pulls in flight",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "C"
+                }
               }
             ],
             "queryOptions": {
@@ -2147,7 +2262,7 @@
         "description": "Registry pulls running now (line) and slow seeds cancelled in favour of a peer per interval (red).",
         "id": 20,
         "links": [],
-        "title": "Seed Pulls in Flight & Timeouts",
+        "title": "Registry Pulls in Flight & Timeouts",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -4450,7 +4565,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval]))",
+                      "expr": "sum(rate({__name__=~\"angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|received\", path=~\"|peer\"}[$__rate_interval]))",
                       "instant": false,
                       "legendFormat": "received",
                       "range": true
@@ -4473,7 +4588,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"served\"}[$__rate_interval]))",
+                      "expr": "sum(rate({__name__=~\"angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\", path=~\"|served\"}[$__rate_interval]))",
                       "instant": false,
                       "legendFormat": "served",
                       "range": true
@@ -4643,7 +4758,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "topk(10, sum by (node) (rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"served\"}[$__rate_interval])))",
+                      "expr": "topk(10, sum by (node) (rate({__name__=~\"angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\", path=~\"|served\"}[$__rate_interval])))",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -4787,6 +4902,29 @@
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum (sum_over_time((clamp_min(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\", result=\"ok\"} - angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\", result=\"ok\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "instant": false,
+                      "legendFormat": "blob (spread)",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -6202,7 +6340,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "max by (node) (angryduck_worker_gc_cleaning{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "expr": "max by (node) (angryduck_worker_gc_cleaning{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})\n+ (max by (node) (angryduck_worker_gc_stalled{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or max by (node) (angryduck_worker_gc_cleaning{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) * 0)",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -6219,7 +6357,7 @@
             "transformations": []
           }
         },
-        "description": "Orange while a node is above GC_HIGH and not yet back to GC_LOW. Click a row to focus on that node.",
+        "description": "Per node: idle, cleaning (disk above GC_HIGH_UTILIZATION, removing unused images until GC_LOW_UTILIZATION), or stalled (removing images stopped freeing space: the disk is full of something else; only the 6h rule runs).",
         "id": 41,
         "links": [],
         "title": "Disk-Pressure Cleanup per Node",
@@ -6261,6 +6399,10 @@
                       "1": {
                         "color": "orange",
                         "text": "cleaning"
+                      },
+                      "2": {
+                        "color": "red",
+                        "text": "stalled"
                       }
                     },
                     "type": "value"
@@ -6276,6 +6418,10 @@
                     {
                       "color": "orange",
                       "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
                     }
                   ]
                 }
@@ -6833,9 +6979,9 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"have\"}) or vector(0)",
+                      "expr": "sum by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval]))",
                       "instant": false,
-                      "legendFormat": "have",
+                      "legendFormat": "{{state}}",
                       "range": true
                     },
                     "version": "v0"
@@ -6856,83 +7002,14 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"missing\"}) or vector(0)",
+                      "expr": "sum by (state) (max_over_time(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval])) > 0",
                       "instant": false,
-                      "legendFormat": "missing",
+                      "legendFormat": "whole-image {{state}}",
                       "range": true
                     },
                     "version": "v0"
                   },
                   "refId": "B"
-                }
-              },
-              {
-                "kind": "PanelQuery",
-                "spec": {
-                  "hidden": false,
-                  "query": {
-                    "datasource": {
-                      "name": "${datasource}"
-                    },
-                    "group": "prometheus",
-                    "kind": "DataQuery",
-                    "spec": {
-                      "editorMode": "code",
-                      "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"in_flight\"}) or vector(0)",
-                      "instant": false,
-                      "legendFormat": "in_flight",
-                      "range": true
-                    },
-                    "version": "v0"
-                  },
-                  "refId": "C"
-                }
-              },
-              {
-                "kind": "PanelQuery",
-                "spec": {
-                  "hidden": false,
-                  "query": {
-                    "datasource": {
-                      "name": "${datasource}"
-                    },
-                    "group": "prometheus",
-                    "kind": "DataQuery",
-                    "spec": {
-                      "editorMode": "code",
-                      "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"seeding\"}) or vector(0)",
-                      "instant": false,
-                      "legendFormat": "seeding",
-                      "range": true
-                    },
-                    "version": "v0"
-                  },
-                  "refId": "D"
-                }
-              },
-              {
-                "kind": "PanelQuery",
-                "spec": {
-                  "hidden": false,
-                  "query": {
-                    "datasource": {
-                      "name": "${datasource}"
-                    },
-                    "group": "prometheus",
-                    "kind": "DataQuery",
-                    "spec": {
-                      "editorMode": "code",
-                      "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"skipped\"}) or vector(0)",
-                      "instant": false,
-                      "legendFormat": "skipped",
-                      "range": true
-                    },
-                    "version": "v0"
-                  },
-                  "refId": "E"
                 }
               }
             ],
@@ -6940,10 +7017,10 @@
             "transformations": []
           }
         },
-        "description": "Across all images being spread: nodes that have it, are missing it, are receiving it, are still seeding, or were skipped. Zero while nothing is being propagated.",
+        "description": "Nodes per state across images being spread, blob by blob; \"whole-image\" series are the fallback propagation.",
         "id": 45,
         "links": [],
-        "title": "Propagation Nodes by State",
+        "title": "Nodes by State (spreads)",
         "transparent": true,
         "vizConfig": {
           "group": "timeseries",
@@ -7001,83 +7078,7 @@
                 },
                 "unit": "short"
               },
-              "overrides": [
-                {
-                  "matcher": {
-                    "id": "byName",
-                    "options": "have"
-                  },
-                  "properties": [
-                    {
-                      "id": "color",
-                      "value": {
-                        "fixedColor": "green",
-                        "mode": "fixed"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "matcher": {
-                    "id": "byName",
-                    "options": "missing"
-                  },
-                  "properties": [
-                    {
-                      "id": "color",
-                      "value": {
-                        "fixedColor": "orange",
-                        "mode": "fixed"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "matcher": {
-                    "id": "byName",
-                    "options": "in_flight"
-                  },
-                  "properties": [
-                    {
-                      "id": "color",
-                      "value": {
-                        "fixedColor": "#4e93c1",
-                        "mode": "fixed"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "matcher": {
-                    "id": "byName",
-                    "options": "seeding"
-                  },
-                  "properties": [
-                    {
-                      "id": "color",
-                      "value": {
-                        "fixedColor": "#EAB839",
-                        "mode": "fixed"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "matcher": {
-                    "id": "byName",
-                    "options": "skipped"
-                  },
-                  "properties": [
-                    {
-                      "id": "color",
-                      "value": {
-                        "fixedColor": "#898989",
-                        "mode": "fixed"
-                      }
-                    }
-                  ]
-                }
-              ]
+              "overrides": []
             },
             "options": {
               "annotations": {
@@ -7266,7 +7267,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "(sum(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) or vector(0))\n+ (sum(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range])) or vector(0))",
+                      "expr": "(sum(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) or vector(0))\n+ (sum(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range])) or vector(0))\n+ (sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])) or vector(0))",
                       "instant": true,
                       "legendFormat": "__auto",
                       "range": false
@@ -7283,7 +7284,7 @@
             "transformations": []
           }
         },
-        "description": "Bytes delivered from inside the cluster instead of the registry over the selected time range: mirror hits plus peer transfers received.",
+        "description": "Bytes nodes got from inside the cluster instead of the registry over the time range: mirror hits, spread blobs from peers, and whole-image peer transfers.",
         "id": 5,
         "links": [],
         "title": "Registry Bytes Avoided",
@@ -7476,6 +7477,29 @@
                     "version": "v0"
                   },
                   "refId": "B"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval]))",
+                      "instant": false,
+                      "legendFormat": "spread from peers",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "C"
                 }
               }
             ],
@@ -7999,9 +8023,9 @@
             "queryOptions": {},
             "transformations": [
               {
-                "kind": "organize",
+                "group": "organize",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "organize",
                   "options": {
                     "excludeByName": {
                       "Time": true
@@ -8164,16 +8188,16 @@
             "queryOptions": {},
             "transformations": [
               {
-                "kind": "merge",
+                "group": "merge",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "merge",
                   "options": {}
                 }
               },
               {
-                "kind": "groupingToMatrix",
+                "group": "groupingToMatrix",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "groupingToMatrix",
                   "options": {
                     "columnField": "state",
                     "rowField": "image",
@@ -8183,9 +8207,9 @@
                 }
               },
               {
-                "kind": "organize",
+                "group": "organize",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "organize",
                   "options": {
                     "renameByName": {
                       "image\\state": "image"
@@ -8200,6 +8224,11 @@
                       "layers held": 6,
                       "layers pulling": 7,
                       "layers missing": 8
+                    },
+                    "excludeByName": {
+                      "Time": true,
+                      "Value #nodes": true,
+                      "Value #layers": true
                     }
                   }
                 }
@@ -8352,16 +8381,16 @@
             "queryOptions": {},
             "transformations": [
               {
-                "kind": "merge",
+                "group": "merge",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "merge",
                   "options": {}
                 }
               },
               {
-                "kind": "organize",
+                "group": "organize",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "organize",
                   "options": {
                     "excludeByName": {
                       "Time": true
@@ -8475,9 +8504,9 @@
             "queryOptions": {},
             "transformations": [
               {
-                "kind": "organize",
+                "group": "organize",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "organize",
                   "options": {
                     "excludeByName": {
                       "Time": true
@@ -8589,7 +8618,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (state) (angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"})",
+                      "expr": "sum by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval]))",
                       "legendFormat": "{{state}}",
                       "instant": false,
                       "range": true
@@ -8606,7 +8635,7 @@
             "transformations": []
           }
         },
-        "description": "Nodes per state across the images being spread.",
+        "description": "The most nodes in each state during each interval. Spreads often last under a minute, so this shows the peak per interval rather than single samples.",
         "id": 51,
         "links": [],
         "title": "Nodes by State",
@@ -8628,8 +8657,8 @@
                   "axisPlacement": "auto",
                   "barAlignment": 0,
                   "barWidthFactor": 0.6,
-                  "drawStyle": "line",
-                  "fillOpacity": 10,
+                  "drawStyle": "bars",
+                  "fillOpacity": 60,
                   "gradientMode": "opacity",
                   "hideFrom": {
                     "legend": false,
@@ -8722,7 +8751,6 @@
               },
               "legend": {
                 "calcs": [
-                  "sum",
                   "max"
                 ],
                 "displayMode": "table",
@@ -8730,7 +8758,7 @@
                 "overflow": "ellipsis",
                 "placement": "bottom",
                 "showLegend": true,
-                "sortBy": "Total",
+                "sortBy": "Max",
                 "sortDesc": true
               },
               "tooltip": {
@@ -9044,7 +9072,7 @@
               },
               "legend": {
                 "calcs": [
-                  "sum",
+                  "mean",
                   "max"
                 ],
                 "displayMode": "table",
@@ -9052,7 +9080,7 @@
                 "overflow": "ellipsis",
                 "placement": "bottom",
                 "showLegend": true,
-                "sortBy": "Total",
+                "sortBy": "Max",
                 "sortDesc": true
               },
               "tooltip": {
@@ -9174,7 +9202,7 @@
               },
               "legend": {
                 "calcs": [
-                  "sum",
+                  "mean",
                   "max"
                 ],
                 "displayMode": "table",
@@ -9182,7 +9210,7 @@
                 "overflow": "ellipsis",
                 "placement": "bottom",
                 "showLegend": true,
-                "sortBy": "Total",
+                "sortBy": "Max",
                 "sortDesc": true
               },
               "tooltip": {
@@ -9473,9 +9501,9 @@
             "queryOptions": {},
             "transformations": [
               {
-                "kind": "organize",
+                "group": "organize",
+                "kind": "Transformation",
                 "spec": {
-                  "id": "organize",
                   "options": {
                     "excludeByName": {
                       "Time": true
@@ -10250,7 +10278,7 @@
                 ]
               }
             },
-            "title": "Propagation",
+            "title": "Whole-Image Fallback",
             "variables": [
               {
                 "kind": "QueryVariable",

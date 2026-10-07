@@ -11,13 +11,13 @@ covers every metric, in these tabs:
 | Tab | Answers |
 |---|---|
 | **Overview** | Workers reporting, stuck images, images spreading, mirror hit ratio, registry bytes avoided, nodes cleaning; a per-node overview table; running containers from preheated repos. |
-| **Preheat** | Seed orders and pulls by result, node and registry, pull duration, ranking basis, registry download per seed, slow seeds, layer index size. |
+| **Preheat** | Registry pulls by result and node, blobs (spread) and whole images (fallback) side by side, their average duration, pulls in flight, registry download per node, whole-image seed ranking and registries, layer index size. |
 | **Spread** | Every image being spread now (nodes per state, layers held versus still only coming from the registry), what each node still lacks in layers and bytes, every blob moving right now (receiver, path, source, size), transfers by path and result, bytes and throughput per path, finished spreads, how long the last one took. |
-| **Propagation** | Per-image progress, nodes per state, finished propagations, transfers by result and receiving node. |
+| **Whole-Image Fallback** | Propagation of images that can't be spread blob by blob: per-image progress, nodes per state, finished propagations, transfers by result and receiving node. Empty while every push spreads. |
 | **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, rescues in flight, peer fetches by reason and result, stuck pods per node and image with whether a rescue is running. |
-| **Transfers** | Throughput, top senders, layers by delivery method, snapshot share, pinned snapshots and leftover cleanups. |
+| **Transfers** | Node-to-node throughput and top senders (spread blobs and whole-image transfers), layers by delivery method, snapshot share, pinned snapshots and leftover cleanups. |
 | **Mirror** | Requests by result, hit ratio, bytes, misses per node. |
-| **Cleanup** | Disk-pressure cleanup per node, images removed by tier, candidates by tier, removals per node, images coming back after cleanup. |
+| **Cleanup** | Disk-pressure cleanup per node (idle, cleaning or stalled), images removed by tier, candidates by tier, removals per node, images coming back after cleanup. |
 
 The file uses Grafana's dashboard schema v2, for the tabs and per-tab
 variables. It needs Grafana 13, or Grafana 12 with the `dashboardNewLayouts`
@@ -98,6 +98,7 @@ what is moving, not history:
 | `angryduck_worker_rescue_layers_total` | counter | `node`, `method` | Layers by delivery: `present`, `blob`, `snapshot`. |
 | `angryduck_worker_rescue_pinned_snapshots` | gauge | `node` | Snapshots pinned for a retry. |
 | `angryduck_worker_rescue_cleanups_total` | counter | `node`, `kind` | Leftovers removed: `temp_snapshot`, `temp_image`, `expired_pin`. |
+| `angryduck_worker_gc_stalled` | gauge | `node` | 1 while disk-pressure removals are paused because they freed nothing. |
 | `angryduck_worker_spread_transfers_total` | counter | `node`, `path`, `result` | Spread blobs fetched, by `path` (`registry`, `peer`) and `result` (`ok`, `failed`, `cancelled`). |
 | `angryduck_worker_spread_bytes_total` | counter | `node`, `path` | Spread bytes received (`registry`, `peer`) or `served` to peers. |
 | `angryduck_worker_spread_transfer_milliseconds_total` | counter | `node`, `path` | Time spent transferring. Bytes divided by it is the throughput per path. |
@@ -156,13 +157,11 @@ groups:
         annotations:
           summary: "{{ $labels.node }} can't pull an image and no node has it"
 
-      - alert: AngryDuckDiskFullNothingRemovable
-        expr: |
-          angryduck_worker_gc_cleaning == 1
-            and on (node) sum by (node) (angryduck_worker_gc_candidates) == 0
-        for: 30m
+      - alert: AngryDuckDiskFullNotFromImages
+        expr: angryduck_worker_gc_stalled == 1
+        for: 2h
         annotations:
-          summary: "{{ $labels.node }} is above the cleanup threshold with nothing removable"
+          summary: "{{ $labels.node }} is above the cleanup threshold, and removing images doesn't free space"
 
       - alert: AngryDuckSpreadStalled
         expr: |

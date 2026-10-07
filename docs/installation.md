@@ -35,11 +35,11 @@ steps below use `stg`.
 ### 1. Get the images
 
 Every release publishes both images to GitHub Container Registry, tagged with
-the version (`1.8.8`) and `latest`:
+the version (`1.8.9`) and `latest`:
 
 ```text
-ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.8
-ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.8
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.9
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.9
 ```
 
 They are public, so kubelet needs no `imagePullSecrets` for them. If you use
@@ -51,10 +51,10 @@ To build and push your own instead:
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.8.8 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.8.8 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.8.8
-docker push $REGISTRY/angry-duck-worker:1.8.8
+docker build -t $REGISTRY/angry-duck-controller:1.8.9 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.8.9 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.8.9
+docker push $REGISTRY/angry-duck-worker:1.8.9
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and
