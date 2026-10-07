@@ -10,13 +10,14 @@ covers every metric, in these tabs:
 
 | Tab | Answers |
 |---|---|
-| **Overview** | Workers reporting, stuck images, active propagations, mirror hit ratio, registry bytes avoided, nodes cleaning; a per-node overview table; running containers from preheated repos. |
+| **Overview** | Workers reporting, stuck images, images spreading, mirror hit ratio, registry bytes avoided, nodes cleaning; a per-node overview table; running containers from preheated repos. |
 | **Preheat** | Seed orders and pulls by result, node and registry, pull duration, ranking basis, registry download per seed, slow seeds, layer index size. |
+| **Spread** | Every image being spread now (nodes per state, layers held versus still only coming from the registry), what each node still lacks in layers and bytes, every blob moving right now (receiver, path, source, size), transfers by path and result, bytes and throughput per path, finished spreads, how long the last one took. |
 | **Propagation** | Per-image progress, nodes per state, finished propagations, transfers by result and receiving node. |
-| **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, rescues in flight, peer fetches by reason and result. |
+| **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, rescues in flight, peer fetches by reason and result, stuck pods per node and image with whether a rescue is running. |
 | **Transfers** | Throughput, top senders, layers by delivery method, snapshot share, pinned snapshots and leftover cleanups. |
 | **Mirror** | Requests by result, hit ratio, bytes, misses per node. |
-| **Cleanup** | Disk-pressure cleanup per node, images removed by tier, candidates by tier, removals per node. |
+| **Cleanup** | Disk-pressure cleanup per node, images removed by tier, candidates by tier, removals per node, images coming back after cleanup. |
 
 The file uses Grafana's dashboard schema v2, for the tabs and per-tab
 variables. It needs Grafana 13, or Grafana 12 with the `dashboardNewLayouts`
@@ -66,6 +67,24 @@ time range and the current tab.
 | `angryduck_controller_rescue_stuck_images` | gauge | `node` | Images each node can't pull right now. |
 | `angryduck_controller_rescue_consecutive_failures` | gauge | `node`, `image` | Failed attempts in a row, for pairs with at least one failure. |
 | `angryduck_controller_rescues_in_flight` | gauge | | Rescues running now. |
+| `angryduck_controller_rescue_stuck_pods` | gauge | `node`, `image`, `in_flight` | Pods stuck per node and image; `in_flight` 1 while a rescue runs for it. Only pairs stuck now. |
+
+<a id="spread"></a>Spread. Series labeled `image` or `node` exist only while
+that image is being spread and drop when it ends, so their number follows
+what is moving, not history:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `angryduck_controller_spread_nodes` | gauge | `image`, `state` | Nodes per image: `done`, `finalizing`, `transferring`, `waiting`, `skipped`. |
+| `angryduck_controller_spread_layers` | gauge | `image`, `state` | Layers per image: `held` (peers can fetch it), `pulling` (only coming from the registry now), `missing`. |
+| `angryduck_controller_spread_node_missing_layers` | gauge | `image`, `node` | Layers each node still lacks. Nodes not done only. |
+| `angryduck_controller_spread_node_missing_bytes` | gauge | `image`, `node` | Bytes each node still lacks. Nodes not done only. |
+| `angryduck_controller_spread_transfer_bytes` | gauge | `image`, `node`, `path`, `source`, `blob` | One series per transfer running now, its blob's size. At most two per node. |
+| `angryduck_controller_spread_transfers_total` | counter | `path`, `result` | Transfers ended: `ok`, `failed`, `cancelled` (lost a race), `present`, `rejected`. |
+| `angryduck_controller_spread_bytes_total` | counter | `path` | Bytes received for spreads. `path="registry"` is everything the registry served for them. |
+| `angryduck_controller_spread_finalizes_total` | counter | `result` | Nodes registering a spread image. |
+| `angryduck_controller_spreads_total` | counter | `result` | Spreads ended: `complete`, `superseded`, `expired`. |
+| `angryduck_controller_spread_last_duration_seconds` | gauge | | Preheat to last node registered, for the last complete spread. |
 
 ### Worker
 
@@ -79,10 +98,16 @@ time range and the current tab.
 | `angryduck_worker_rescue_layers_total` | counter | `node`, `method` | Layers by delivery: `present`, `blob`, `snapshot`. |
 | `angryduck_worker_rescue_pinned_snapshots` | gauge | `node` | Snapshots pinned for a retry. |
 | `angryduck_worker_rescue_cleanups_total` | counter | `node`, `kind` | Leftovers removed: `temp_snapshot`, `temp_image`, `expired_pin`. |
+| `angryduck_worker_spread_transfers_total` | counter | `node`, `path`, `result` | Spread blobs fetched, by `path` (`registry`, `peer`) and `result` (`ok`, `failed`, `cancelled`). |
+| `angryduck_worker_spread_bytes_total` | counter | `node`, `path` | Spread bytes received (`registry`, `peer`) or `served` to peers. |
+| `angryduck_worker_spread_transfer_milliseconds_total` | counter | `node`, `path` | Time spent transferring. Bytes divided by it is the throughput per path. |
+| `angryduck_worker_spread_active` | gauge | `node`, `path` | 1 while a blob is coming in on that path. |
+| `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
 | `angryduck_worker_mirror_requests_total` | counter | `node`, `kind`, `result` | Mirror requests (`blob`, `manifest`): `local`, `peer`, `miss`, `error`. |
 | `angryduck_worker_mirror_bytes_total` | counter | `node`, `source` | Bytes the mirror served, `local` or `peer`. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | counter | `node` | Bytes served to other nodes' mirrors. |
 | `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `rollback`, or `error`. |
+| `angryduck_worker_gc_image_returns` | gauge | `node`, `image` | Images that came back within an hour of cleanup removing them, and how many times. Only images that came back in the last hour, so the series count stays small. |
 | `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`, `rollback`. |
 | `angryduck_worker_gc_cleaning` | gauge | `node` | 1 while the disk is above high and not yet back to low. |
 | `angryduck_worker_preheated_containers_running` | gauge | `node`, `repo` | Running containers from repos recently preheated on the node. |
@@ -138,6 +163,14 @@ groups:
         for: 30m
         annotations:
           summary: "{{ $labels.node }} is above the cleanup threshold with nothing removable"
+
+      - alert: AngryDuckSpreadStalled
+        expr: |
+          max by (image) (angryduck_controller_spread_nodes{state="waiting"}) > 0
+            and max by (image) (angryduck_controller_spread_layers{state="missing"}) > 0
+        for: 15m
+        annotations:
+          summary: "Spread of {{ $labels.image }} has layers nobody holds or pulls"
 
       - alert: AngryDuckSnapshotHeavy
         expr: |

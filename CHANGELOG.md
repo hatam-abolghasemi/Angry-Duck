@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.8.8
+
+### Changed
+
+- **Pushed images spread blob by blob.** Before, a few seeds pulled the
+  whole image from the registry, each of them, and nodes copied it from each
+  other only once a seed had all of it. Now:
+  - every node fetches one blob from the registry and one from a peer at a
+    time;
+  - a blob spreads between nodes the moment any node has it, rarest first;
+  - the registry is asked only for blobs no node has, by at most
+    `SPREAD_MAX_REGISTRY_PULLS` nodes at once, so it serves each blob about
+    once instead of once per seed;
+  - nobody waits on another node's pull: an idle node may race a slow
+    registry pull (`SPREAD_RACE_PER_BLOB`), and a node pulling a blob still
+    gets it pushed from a peer as soon as one has it. Whichever copy lands
+    first wins; the node cancels the other itself, on the spot;
+  - once a node holds every layer, the controller sends it the image's
+    metadata, checked against its digests, and the node registers it.
+
+  Blobs waiting for their image are held by a containerd lease that expires
+  after an hour, so a crash or an abandoned job leaves nothing behind. Images
+  whose manifest can't be read, or `SPREAD_ENABLED=false`, are seeded and
+  propagated whole, as in 1.8.7. See [Propagation](docs/propagation.md).
+
+### Added
+
+- Worker endpoints `/spread/fetch`, `/spread/finalize`, `/spread/drop` and
+  `/spread/content/<digest>`, controller endpoint `/spread/done`, all behind
+  the shared token. See [API](docs/api.md).
+- Spread metrics, labeled by image, node and blob only while that image is
+  spreading. See [Observability](docs/observability.md#spread).
+- `angryduck_controller_rescue_stuck_pods{node,image,in_flight}`: stuck pods
+  per node and image.
+- Dashboard: a **Spread** tab (spreads running, what each node still lacks,
+  every blob moving now with its path, source and size, throughput per
+  path), stuck pods per node and image on the Rescue tab.
+
+### Fixed
+
+- **Image cleanup no longer removes the image of a crashlooping pod.** It
+  kept only images with a running container, and a crashlooping container is
+  exited most of the time. Under disk pressure its image was removed between
+  restarts, and kubelet pulled it from the registry again on every restart,
+  about every 7 minutes. An image now stays while any container of a pod that
+  is still up uses it, running or not. A completed Job's image is still
+  removable. See [Image cleanup](docs/image-cleanup.md#never-removed).
+
+### Added
+
+- `angryduck_worker_gc_image_returns{node,image}`: images that came back to a
+  node within an hour of cleanup removing them, and how many times, with a
+  warning in the worker's log. Only the last hour is kept, so neither memory
+  nor series count grows with uptime. The dashboard's Cleanup tab shows it as
+  "Images Coming Back After Cleanup".
+
 ## 1.8.7
 
 ### Performance

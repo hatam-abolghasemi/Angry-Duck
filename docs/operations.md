@@ -143,7 +143,7 @@ local. Workers listen on their pod IPs; find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.7
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.8
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

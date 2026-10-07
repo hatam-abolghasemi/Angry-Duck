@@ -38,6 +38,7 @@ import (
 	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 	"angryduck/internal/registryauth"
+	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
 	"angryduck/internal/worker"
 )
@@ -159,10 +160,21 @@ func main() {
 		rescue.OnSuccess(reporter.Kick)
 	}
 	var extra []func(*http.ServeMux)
+	if store != nil && tokenErr == nil && config.Bool("SPREAD_ENABLED", true) {
+		// Blob-by-blob spreading. Registry pulls by digest use the same
+		// pull secret as CRI pulls; the stream itself has no whole-request
+		// timeout, SPREAD_TRANSFER_TIMEOUT_S bounds each transfer.
+		platform := config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH)
+		timeout := config.Duration("SPREAD_TRANSFER_TIMEOUT_S", 1800)
+		sp := worker.NewSpread(store, registryclient.New(creds, 30*time.Second, 0), token, nodeID, platform, controllerURL, timeout)
+		sp.OnFinalize(reporter.Kick)
+		extra = append(extra, sp.Register)
+		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s", nodeID, platform, timeout)
+	}
 
 	if store != nil && config.Bool("GC_ENABLED", true) {
 		gc := worker.NewImageGC(store,
-			rt.ListRunningImages,
+			rt.ListInUseImages,
 			func() (float64, error) {
 				r, err := worker.FetchRootUtilization(metricsURL, 5*time.Second)
 				return r.Utilization, err

@@ -178,3 +178,56 @@ func TestParseRef(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+func TestResolveKeepsVerifiedMetadataForRegistering(t *testing.T) {
+	f := newFake(t, "bearer")
+	c, image := client(t, f)
+	res, err := c.Resolve(context.Background(), image, "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Top.Digest != f.tags["v1"] || res.Top.MediaType != blobship.MediaTypeOCIIndex || res.Top.Size != int64(len(f.blobs[f.tags["v1"]])) {
+		t.Fatalf("top = %+v", res.Top)
+	}
+	// Index, platform manifest, config: all a node needs besides layers.
+	if len(res.Metadata) != 3 {
+		t.Fatalf("%d metadata blobs, want 3", len(res.Metadata))
+	}
+	for d, b := range res.Metadata {
+		if dig(b) != d {
+			t.Fatalf("metadata %s doesn't match its digest", d)
+		}
+	}
+}
+
+func TestResolveRejectsContentThatDoesntMatchItsDigest(t *testing.T) {
+	f := newFake(t, "bearer")
+	c, image := client(t, f)
+	// Corrupt the config the manifest points at.
+	for d, b := range f.blobs {
+		if strings.Contains(string(b), "diff_ids") {
+			f.blobs[d] = []byte(strings.Replace(string(b), "amd64", "arm64", 1))
+		}
+	}
+	if _, err := c.Resolve(context.Background(), image, "linux/amd64"); err == nil || !strings.Contains(err.Error(), "config has digest") {
+		t.Fatalf("err = %v, want a config digest mismatch", err)
+	}
+}
+
+func TestOpenBlobStreamsOneLayerWithAuth(t *testing.T) {
+	f := newFake(t, "bearer")
+	c, image := client(t, f)
+	body, size, err := c.OpenBlob(context.Background(), image, f.layers[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	b := make([]byte, 64)
+	n, _ := body.Read(b)
+	if string(b[:n]) != "app-gz" || (size != -1 && size != 6) {
+		t.Fatalf("got %q size %d", b[:n], size)
+	}
+	if _, _, err := c.OpenBlob(context.Background(), image, dig([]byte("absent"))); err == nil {
+		t.Fatal("expected an error for a missing blob")
+	}
+}

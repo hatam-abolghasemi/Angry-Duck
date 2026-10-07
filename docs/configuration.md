@@ -41,7 +41,29 @@ Durations are integers in seconds. Utilizations are fractions between 0 and
 | `RANK_PREFER_IMAGE_LOCALITY` | `true` | In the fallback ranking, prefer nodes holding any tag of the same repo. |
 | `RANK_EXCLUDE_NODE_SUBSTRINGS` | *(empty)* | Comma-separated node name substrings never chosen as seeds. |
 
+## Spread
+
+How pushed images reach every node blob by blob. See
+[Propagation](propagation.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `SPREAD_ENABLED` | `true` | Spread blob by blob. Needs `RANK_BY_LAYERS=true` and the shared token; otherwise, and for images whose manifest can't be read, pushes are seeded and propagated whole. Read by the controller and the worker. |
+| `SPREAD_MAX_REGISTRY_PULLS` | `RANK_TOP_N` | Blob pulls from the registry in flight cluster-wide. |
+| `SPREAD_RACE_PER_BLOB` | `2` | Registry pulls of one blob at once: an idle node may race a slow one. |
+| `SPREAD_RETRY_AFTER_S` | `15` | Backoff after a node fails a transfer; doubles per failure. |
+| `SPREAD_BACKOFF_MAX_S` | `600` | Cap for that doubling. |
+| `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller frees a slot nobody reported on a minute after. |
+
+Spread also uses `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
+`PROPAGATE_MAX_CONCURRENT` (peer transfers cluster-wide),
+`PROPAGATE_PER_SOURCE`, `PROPAGATE_MAX_UTILIZATION` and
+`PROPAGATE_EXCLUDE_NODE_SUBSTRINGS` below.
+
 ## Propagation
+
+The whole-image fallback, and the limits spread shares.
+
 
 | Variable | Default | Description |
 |---|---|---|

@@ -2,7 +2,9 @@
 // registry: manifest (through an index when the image is multi-platform)
 // and config, which gives every layer's digest, size and chainID. That is
 // all the controller needs to score how much of a new image each node
-// already holds. Layer blobs themselves are never downloaded here.
+// already holds, and, with those few KB kept, all a node needs besides
+// the layer blobs to register the image. Workers use OpenBlob to stream a
+// single layer blob, by digest, when the controller assigns them one.
 //
 // It speaks the OCI Distribution API every registry serves (GitLab, Nexus,
 // Harbor, Docker Hub, ...) and needs no per-vendor code: it follows the
@@ -15,6 +17,8 @@ package registryclient
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,7 +43,8 @@ const maxMetadata = 4 << 20
 // Client resolves images to layer lists, caching results for a while.
 type Client struct {
 	creds    *registryauth.Store
-	http     *http.Client
+	http     *http.Client // metadata and tokens: whole-request timeout
+	blob     *http.Client // blob streams: no whole-request timeout, the caller's ctx bounds them
 	cacheTTL time.Duration
 
 	mu     sync.Mutex
@@ -53,24 +58,44 @@ type token struct {
 }
 
 type cached struct {
-	layers []layerindex.Layer
-	err    error
-	at     time.Time
+	res Resolved
+	err error
+	at  time.Time
+}
+
+// Resolved is an image as one platform sees it: what its reference points
+// at, the small metadata blobs a node needs to register it, and its layers.
+type Resolved struct {
+	// Top is what the reference resolves to at the registry: an index for
+	// a multi-platform image, else the manifest.
+	Top blobship.Descriptor
+	// Metadata holds Top, the platform's manifest when Top is an index,
+	// and the config, by digest. Every entry was checked against its
+	// digest when read. A few KB in total.
+	Metadata map[string][]byte
+	// Layers is bottom first.
+	Layers []layerindex.Layer
 }
 
 // New builds a Client. creds may be nil (anonymous only).
 func New(creds *registryauth.Store, timeout, cacheTTL time.Duration) *Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 30 * time.Second
 	return &Client{
 		creds:    creds,
 		http:     &http.Client{Timeout: timeout},
+		blob:     &http.Client{Transport: t},
 		cacheTTL: cacheTTL,
 		tokens:   map[string]token{},
 		cache:    map[string]cached{},
 	}
 }
 
-// WithHTTPClient replaces the HTTP client (tests).
-func (c *Client) WithHTTPClient(hc *http.Client) *Client { c.http = hc; return c }
+// WithHTTPClient replaces the HTTP clients (tests).
+func (c *Client) WithHTTPClient(hc *http.Client) *Client {
+	c.http, c.blob = hc, &http.Client{Transport: hc.Transport}
+	return c
+}
 
 // Ref is an image reference split for the distribution API.
 type Ref struct {
@@ -108,15 +133,23 @@ func ParseRef(image string) (Ref, error) {
 
 // Layers returns image's layers for platform, bottom first.
 func (c *Client) Layers(ctx context.Context, image, platform string) ([]layerindex.Layer, error) {
+	res, err := c.Resolve(ctx, image, platform)
+	return res.Layers, err
+}
+
+// Resolve returns image as platform sees it (see Resolved). Results, and
+// failures, are cached for the client's cache TTL; the returned value is
+// shared and must not be modified.
+func (c *Client) Resolve(ctx context.Context, image, platform string) (Resolved, error) {
 	key := image + "|" + platform
 	c.mu.Lock()
 	if e, ok := c.cache[key]; ok && time.Since(e.at) < c.cacheTTL {
 		c.mu.Unlock()
-		return e.layers, e.err
+		return e.res, e.err
 	}
 	c.mu.Unlock()
 
-	layers, err := c.resolve(ctx, image, platform)
+	res, err := c.resolve(ctx, image, platform)
 	c.mu.Lock()
 	// Keep the cache small: drop what expired before adding.
 	for k, e := range c.cache {
@@ -124,24 +157,36 @@ func (c *Client) Layers(ctx context.Context, image, platform string) ([]layerind
 			delete(c.cache, k)
 		}
 	}
-	c.cache[key] = cached{layers: layers, err: err, at: time.Now()}
+	c.cache[key] = cached{res: res, err: err, at: time.Now()}
 	c.mu.Unlock()
-	return layers, err
+	return res, err
 }
 
-func (c *Client) resolve(ctx context.Context, image, platform string) ([]layerindex.Layer, error) {
+// sha256Digest is the OCI digest of b.
+func sha256Digest(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func (c *Client) resolve(ctx context.Context, image, platform string) (Resolved, error) {
 	ref, err := ParseRef(image)
 	if err != nil {
-		return nil, err
+		return Resolved{}, err
 	}
 	want, err := blobship.ParsePlatform(platform)
 	if err != nil {
-		return nil, err
+		return Resolved{}, err
 	}
 	body, mediaType, err := c.get(ctx, ref, "manifests/"+ref.Reference, acceptManifests)
 	if err != nil {
-		return nil, err
+		return Resolved{}, err
 	}
+	res := Resolved{Metadata: make(map[string][]byte, 3)}
+	topDigest := sha256Digest(body)
+	if strings.HasPrefix(ref.Reference, "sha256:") && ref.Reference != topDigest {
+		return Resolved{}, fmt.Errorf("image %s: registry returned content with digest %s", image, topDigest)
+	}
+	res.Metadata[topDigest] = body
 	var doc struct {
 		MediaType string                `json:"mediaType"`
 		Manifests []blobship.Descriptor `json:"manifests"`
@@ -149,49 +194,68 @@ func (c *Client) resolve(ctx context.Context, image, platform string) ([]layerin
 		Layers    []blobship.Descriptor `json:"layers"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("parsing manifest: %w", err)
+		return Resolved{}, fmt.Errorf("parsing manifest: %w", err)
 	}
 	if mediaType == "" || strings.HasPrefix(mediaType, "text/") || mediaType == "application/json" {
 		mediaType = doc.MediaType
 	}
+	if mediaType == "" {
+		if len(doc.Manifests) > 0 {
+			mediaType = blobship.MediaTypeOCIIndex
+		} else {
+			mediaType = blobship.MediaTypeOCIManifest
+		}
+	}
+	res.Top = blobship.Descriptor{MediaType: mediaType, Digest: topDigest, Size: int64(len(body))}
 	if len(doc.Manifests) > 0 || mediaType == blobship.MediaTypeOCIIndex || mediaType == blobship.MediaTypeDockerList {
 		chosen, err := pick(doc.Manifests, want)
 		if err != nil {
-			return nil, fmt.Errorf("image %s: %w", image, err)
+			return Resolved{}, fmt.Errorf("image %s: %w", image, err)
 		}
 		body, _, err = c.get(ctx, ref, "manifests/"+chosen, acceptManifests)
 		if err != nil {
-			return nil, err
+			return Resolved{}, err
 		}
+		if d := sha256Digest(body); d != chosen {
+			return Resolved{}, fmt.Errorf("image %s: platform manifest has digest %s, index says %s", image, d, chosen)
+		}
+		res.Metadata[chosen] = body
 		doc.Config, doc.Layers = blobship.Descriptor{}, nil
 		if err := json.Unmarshal(body, &doc); err != nil {
-			return nil, fmt.Errorf("parsing platform manifest: %w", err)
+			return Resolved{}, fmt.Errorf("parsing platform manifest: %w", err)
 		}
 	}
 	if doc.Config.Digest == "" || len(doc.Layers) == 0 {
-		return nil, fmt.Errorf("image %s: manifest has no config or no layers", image)
+		return Resolved{}, fmt.Errorf("image %s: manifest has no config or no layers", image)
 	}
 	cfgBytes, _, err := c.get(ctx, ref, "blobs/"+doc.Config.Digest, "*/*")
 	if err != nil {
-		return nil, fmt.Errorf("config: %w", err)
+		return Resolved{}, fmt.Errorf("config: %w", err)
 	}
+	if d := sha256Digest(cfgBytes); d != doc.Config.Digest {
+		return Resolved{}, fmt.Errorf("image %s: config has digest %s, manifest says %s", image, d, doc.Config.Digest)
+	}
+	res.Metadata[doc.Config.Digest] = cfgBytes
 	var cfg struct {
 		RootFS struct {
 			DiffIDs []string `json:"diff_ids"`
 		} `json:"rootfs"`
 	}
 	if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+		return Resolved{}, fmt.Errorf("parsing config: %w", err)
 	}
 	if len(cfg.RootFS.DiffIDs) != len(doc.Layers) {
-		return nil, fmt.Errorf("image %s: %d layers but %d diff_ids", image, len(doc.Layers), len(cfg.RootFS.DiffIDs))
+		return Resolved{}, fmt.Errorf("image %s: %d layers but %d diff_ids", image, len(doc.Layers), len(cfg.RootFS.DiffIDs))
 	}
 	chains := blobship.ChainIDs(cfg.RootFS.DiffIDs)
-	out := make([]layerindex.Layer, len(doc.Layers))
+	res.Layers = make([]layerindex.Layer, len(doc.Layers))
 	for i, l := range doc.Layers {
-		out[i] = layerindex.Layer{Digest: l.Digest, ChainID: chains[i], Size: l.Size}
+		if !strings.HasPrefix(l.Digest, "sha256:") || l.Size <= 0 {
+			return Resolved{}, fmt.Errorf("image %s: layer %d has an unusable descriptor", image, i)
+		}
+		res.Layers[i] = layerindex.Layer{Digest: l.Digest, ChainID: chains[i], Size: l.Size}
 	}
-	return out, nil
+	return res, nil
 }
 
 func pick(entries []blobship.Descriptor, want blobship.Platform) (string, error) {
@@ -207,49 +271,78 @@ func pick(entries []blobship.Descriptor, want blobship.Platform) (string, error)
 	return "", fmt.Errorf("no manifest for %s/%s", want.OS, want.Architecture)
 }
 
-// get fetches /v2/<repo>/<path>, answering an auth challenge once.
+// get fetches /v2/<repo>/<path> whole (metadata only, capped at
+// maxMetadata).
 func (c *Client) get(ctx context.Context, ref Ref, path, accept string) ([]byte, string, error) {
+	resp, err := c.do(ctx, c.http, ref, path, accept)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadata+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(b) > maxMetadata {
+		return nil, "", fmt.Errorf("GET %s: larger than %d bytes", path, maxMetadata)
+	}
+	mt, _, _ := strings.Cut(resp.Header.Get("Content-Type"), ";")
+	return b, strings.TrimSpace(mt), nil
+}
+
+// OpenBlob starts streaming one blob of image's repository by digest. The
+// caller reads at most the size it expects and closes the body; ctx bounds
+// the whole stream. Redirects (to object storage, typically) are followed;
+// Go's client drops the Authorization header when one leaves the registry
+// host. size is the Content-Length, or -1 if the registry sent none.
+func (c *Client) OpenBlob(ctx context.Context, image, digest string) (body io.ReadCloser, size int64, err error) {
+	ref, err := ParseRef(image)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.do(ctx, c.blob, ref, "blobs/"+digest, "*/*")
+	if err != nil {
+		return nil, 0, err
+	}
+	return resp.Body, resp.ContentLength, nil
+}
+
+// do sends GET /v2/<repo>/<path> with hc, answering an auth challenge
+// once, and returns a 200 response for the caller to read and close.
+func (c *Client) do(ctx context.Context, hc *http.Client, ref Ref, path, accept string) (*http.Response, error) {
 	u := "https://" + ref.APIHost + "/v2/" + ref.Repo + "/" + path
 	scope := "repository:" + ref.Repo + ":pull"
 	auth := c.cachedToken(ref.APIHost, scope)
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		req.Header.Set("Accept", accept)
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
-		resp, err := c.http.Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
 			challenge := resp.Header.Get("WWW-Authenticate")
 			resp.Body.Close()
 			auth, err = c.answer(ctx, ref, challenge, scope)
 			if err != nil {
-				return nil, "", fmt.Errorf("GET %s: auth: %w", u, err)
+				return nil, fmt.Errorf("GET %s: auth: %w", u, err)
 			}
 			continue
 		}
-		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-			return nil, "", fmt.Errorf("GET %s: status %d: %s", u, resp.StatusCode, strings.TrimSpace(string(b)))
+			resp.Body.Close()
+			return nil, fmt.Errorf("GET %s: status %d: %s", u, resp.StatusCode, strings.TrimSpace(string(b)))
 		}
-		b, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadata+1))
-		if err != nil {
-			return nil, "", err
-		}
-		if len(b) > maxMetadata {
-			return nil, "", fmt.Errorf("GET %s: larger than %d bytes", u, maxMetadata)
-		}
-		mt, _, _ := strings.Cut(resp.Header.Get("Content-Type"), ";")
-		return b, strings.TrimSpace(mt), nil
+		return resp, nil
 	}
-	return nil, "", fmt.Errorf("GET %s: still unauthorized after answering the challenge", u)
+	return nil, fmt.Errorf("GET %s: still unauthorized after answering the challenge", u)
 }
 
 func (c *Client) cachedToken(host, scope string) string {

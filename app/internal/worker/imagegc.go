@@ -21,6 +21,11 @@ var (
 		"Images this node's cleanup removed, by tier: old (unused for GC_UNUSED_FOR_S, removed whatever the disk), pressure (unused for less, removed only because the disk went above GC_HIGH), rollback (one of the newest GC_ROLLBACK_KEEP of its repo, removed only while the disk stays above GC_HIGH), or error.",
 		"node", "tier",
 	)
+	gcImageReturns = metrics.NewGaugeVec(
+		"angryduck_worker_gc_image_returns",
+		"Images that came back to this node within an hour of this cleanup removing them, and how many times: something on the node still uses them, so each removal costs a re-pull. Only images that came back in the last hour are listed. image is the tag, else repo@digest, else the image ID.",
+		"node", "image",
+	)
 	gcCleaning = metrics.NewGaugeVec(
 		"angryduck_worker_gc_cleaning",
 		"1 while this node's disk-pressure cleanup is active: disk went above GC_HIGH and hasn't come down to GC_LOW yet.",
@@ -43,7 +48,7 @@ type ImageStore interface {
 type GCConfig struct {
 	Interval          time.Duration // how often usage is sampled and the disk checked
 	High, Low         float64       // start above High, stop at Low (0-1)
-	UnusedFor         time.Duration // an image is removable once no running container used it for this long
+	UnusedFor         time.Duration // an image is removable once no container used it for this long
 	RollbackKeep      int           // newest removable images per repo kept until nothing else is left
 	Batch             int           // images removed before re-measuring the disk
 	Settle            time.Duration // wait after a batch for containerd to free the space
@@ -52,13 +57,15 @@ type GCConfig struct {
 }
 
 // ImageGC is this node's image cleanup. It replaces kubelet's
-// disk-pressure GC with a gentler one that knows more. An image with a
-// running container on this node is never touched; neither is a protected
+// disk-pressure GC with a gentler one that knows more. An image in use on
+// this node is never touched: one with a running container, or with a
+// container of a pod that is still up (a crashlooping container is exited
+// most of the time, yet kubelet restarts it from that image); neither is a protected
 // image or one being pulled or received. Any other image is removed when
 // EITHER of these holds:
 //
-//   - it has been unused for UnusedFor (6h by default): no running
-//     container on this node used it for that long, counting from when
+//   - it has been unused for UnusedFor (6h by default): no container
+//     on this node used it for that long, counting from when
 //     this node got it if it never ran here. This happens whatever the
 //     disk usage;
 //   - the disk is above High (70%): unused images go oldest first, however
@@ -75,29 +82,52 @@ type GCConfig struct {
 // shared with images that stay are kept. Usage times persist in
 // StatePath, so a worker restart doesn't make old images look new.
 type ImageGC struct {
-	store   ImageStore
-	running func() ([]string, error)  // images of running containers (any alias form)
-	util    func() (float64, error)   // root filesystem utilization, 0-1
-	busy    func(names []string) bool // an image being pulled or received right now
-	nodeID  string
-	cfg     GCConfig
-	onDone  func()
+	store  ImageStore
+	inUse  func() ([]string, error)  // images in use on this node (any alias form)
+	util   func() (float64, error)   // root filesystem utilization, 0-1
+	busy   func(names []string) bool // an image being pulled or received right now
+	nodeID string
+	cfg    GCConfig
+	onDone func()
 
 	mu        sync.Mutex
 	firstSeen map[string]time.Time // target digest -> first seen here
-	lastUsed  map[string]time.Time // target digest -> last seen running here
+	lastUsed  map[string]time.Time // target digest -> last seen in use here
 	cleaning  bool
 	dirty     bool
 	savedAt   time.Time
+
+	// Re-pull loop detection, bounded by what was removed in the last
+	// returnWindow: removed holds images this cleanup removed recently,
+	// returned those that came back.
+	removed  map[string]removal // target digest -> when, under which name
+	returned map[string]*churn  // target digest -> how often it came back
+	churnPub bool               // returned changed since last published
+}
+
+// returnWindow is how long a removed image is watched for coming back,
+// and how long one that came back stays in gcImageReturns.
+const returnWindow = time.Hour
+
+type removal struct {
+	name string
+	at   time.Time
+}
+
+type churn struct {
+	name  string
+	count int
+	last  time.Time
 }
 
 // NewImageGC builds the cleanup and loads saved usage times.
-func NewImageGC(store ImageStore, running func() ([]string, error), util func() (float64, error), busy func([]string) bool, nodeID string, cfg GCConfig) *ImageGC {
+func NewImageGC(store ImageStore, inUse func() ([]string, error), util func() (float64, error), busy func([]string) bool, nodeID string, cfg GCConfig) *ImageGC {
 	if cfg.Batch < 1 {
 		cfg.Batch = 5
 	}
-	g := &ImageGC{store: store, running: running, util: util, busy: busy, nodeID: nodeID, cfg: cfg,
-		firstSeen: map[string]time.Time{}, lastUsed: map[string]time.Time{}}
+	g := &ImageGC{store: store, inUse: inUse, util: util, busy: busy, nodeID: nodeID, cfg: cfg,
+		firstSeen: map[string]time.Time{}, lastUsed: map[string]time.Time{},
+		removed: map[string]removal{}, returned: map[string]*churn{}}
 	g.load()
 	return g
 }
@@ -133,13 +163,13 @@ type candidate struct {
 }
 
 // sample updates usage times and returns the names per digest, and which
-// digests have a running container.
+// digests are in use.
 func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string][]string, inUse map[string]bool, err error) {
 	targets, err := g.store.ImageTargets(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	running, err := g.running()
+	used, err := g.inUse()
 	if err != nil {
 		return nil, nil, err // without it nothing is safe to judge
 	}
@@ -148,7 +178,7 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 		groups[d] = append(groups[d], name)
 	}
 	inUse = map[string]bool{}
-	for _, r := range running {
+	for _, r := range used {
 		if d, ok := targets[r]; ok {
 			inUse[d] = true
 		} else if d, ok := targets[imageref.Normalize(r)]; ok {
@@ -160,6 +190,9 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 	for d := range groups {
 		if _, ok := g.firstSeen[d]; !ok {
 			g.firstSeen[d], g.dirty = now, true
+			if r, ok := g.removed[d]; ok {
+				g.cameBackLocked(d, r, now)
+			}
 		}
 		if inUse[d] {
 			g.lastUsed[d] = now
@@ -185,6 +218,7 @@ func (g *ImageGC) Tick(ctx context.Context) {
 		return
 	}
 	defer g.save(false)
+	defer g.publishChurn(now)
 
 	// Disk pressure is judged only with a fresh reading; the age rule
 	// doesn't need one.
@@ -240,7 +274,7 @@ func (g *ImageGC) Tick(ctx context.Context) {
 			removed += n
 		}
 		if ok && removed == 0 && u >= g.cfg.High {
-			logging.Warnf("angryduck-worker[%s]: image cleanup: disk at %.1f%% but nothing is removable (every image is running, protected or being pulled)", g.nodeID, u*100)
+			logging.Warnf("angryduck-worker[%s]: image cleanup: disk at %.1f%% but nothing is removable (every image is in use, protected or being pulled)", g.nodeID, u*100)
 		}
 	}
 	if removed > 0 && g.onDone != nil {
@@ -274,6 +308,12 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 			return removed, false
 		}
 		removed += len(batch)
+		now := time.Now()
+		g.mu.Lock()
+		for _, c := range batch {
+			g.removed[c.digest] = removal{name: displayName(c.names), at: now}
+		}
+		g.mu.Unlock()
 		for _, c := range batch {
 			imagesDeletedTotal.Add(1, g.nodeID, c.tier)
 			logging.Infof("angryduck-worker[%s]: image cleanup: removed %s (%s tier, unused for %s)", g.nodeID, strings.Join(c.names, " "), c.tier, c.age.Round(time.Minute))
@@ -297,7 +337,7 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 	return removed, true
 }
 
-// plan returns every image that isn't running, protected or busy, oldest
+// plan returns every image that isn't in use, protected or busy, oldest
 // first, split in two: the newest RollbackKeep per repo (rollback tier)
 // and the rest (old tier if unused for UnusedFor, else pressure tier).
 func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now time.Time) (unused, rollback []candidate) {
@@ -364,6 +404,72 @@ func (g *ImageGC) protected(names []string) bool {
 		}
 	}
 	return false
+}
+
+// cameBackLocked records that an image this cleanup removed is back on
+// the node. Holds g.mu.
+func (g *ImageGC) cameBackLocked(d string, r removal, now time.Time) {
+	delete(g.removed, d)
+	c := g.returned[d]
+	if c == nil {
+		c = &churn{}
+		g.returned[d] = c
+	}
+	c.name, c.last, g.churnPub = r.name, now, true
+	c.count++
+	logging.Warnf("angryduck-worker[%s]: image cleanup: %s came back %s after being removed (%d time(s) within %s): something on this node still uses it",
+		g.nodeID, r.name, now.Sub(r.at).Round(time.Second), c.count, returnWindow)
+}
+
+// publishChurn drops removals and returns older than returnWindow and,
+// only when the set changed, rewrites gcImageReturns. Both maps hold just
+// the last hour, so neither grows with the worker's uptime.
+func (g *ImageGC) publishChurn(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for d, r := range g.removed {
+		if now.Sub(r.at) > returnWindow {
+			delete(g.removed, d)
+		}
+	}
+	for d, c := range g.returned {
+		if now.Sub(c.last) > returnWindow {
+			delete(g.returned, d)
+			g.churnPub = true
+		}
+	}
+	if !g.churnPub {
+		return
+	}
+	g.churnPub = false
+	gcImageReturns.Reset()
+	for _, c := range g.returned {
+		gcImageReturns.Set(float64(c.count), g.nodeID, c.name)
+	}
+}
+
+// displayName picks the name a person knows an image by, for the image
+// label: a tag, else repo@digest, else the ID. names is sorted.
+func displayName(names []string) string {
+	var digestRef string
+	for _, n := range names {
+		switch {
+		case strings.HasPrefix(n, "sha256:"):
+		case strings.Contains(n, "@"):
+			if digestRef == "" {
+				digestRef = n
+			}
+		default:
+			return n
+		}
+	}
+	if digestRef != "" {
+		return digestRef
+	}
+	if len(names) > 0 {
+		return names[0]
+	}
+	return ""
 }
 
 // repoOf names the repo an image belongs to, for the rollback tier.

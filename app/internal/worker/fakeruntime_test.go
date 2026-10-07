@@ -22,6 +22,7 @@ type fakeRuntime struct {
 	mu       sync.Mutex
 	local    map[string]bool
 	running  map[string]bool
+	held     map[string]bool // exited, but its pod is still up (crashloop)
 	pullErrs map[string]error
 	block    map[string]bool // PullImage waits for ctx to end
 }
@@ -30,6 +31,7 @@ func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{
 		local:    make(map[string]bool),
 		running:  make(map[string]bool),
+		held:     make(map[string]bool),
 		pullErrs: make(map[string]error),
 		block:    make(map[string]bool),
 	}
@@ -67,6 +69,19 @@ func (f *fakeRuntime) ListRunningImages() ([]string, error) {
 	defer f.mu.Unlock()
 	var out []string
 	for img := range f.running {
+		out = append(out, img)
+	}
+	return out, nil
+}
+
+func (f *fakeRuntime) ListInUseImages() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for img := range f.running {
+		out = append(out, img)
+	}
+	for img := range f.held {
 		out = append(out, img)
 	}
 	return out, nil

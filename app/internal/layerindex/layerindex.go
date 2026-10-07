@@ -318,3 +318,35 @@ func (x *Index) Holders(digest string, candidates []string) []string {
 	}
 	return out
 }
+
+// Present reports, for each of layers, whether node holds it (its blob or
+// its snapshot) and, separately, whether it holds the blob, which is what
+// another node can fetch from it. One lock, one pass; out slices are
+// reused when big enough. known is false when the node never sent an
+// inventory.
+func (x *Index) Present(node string, layers []Layer, present, blob []bool) (presentOut, blobOut []bool, known bool) {
+	if cap(present) < len(layers) {
+		present = make([]bool, len(layers))
+	}
+	if cap(blob) < len(layers) {
+		blob = make([]bool, len(layers))
+	}
+	present, blob = present[:len(layers)], blob[:len(layers)]
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	n, ok := x.nodes[node]
+	for i, l := range layers {
+		present[i], blob[i] = false, false
+		if !ok {
+			continue
+		}
+		if id, found := x.lookup(l.Digest); found && n.blobs.has(id) {
+			present[i], blob[i] = true, true
+			continue
+		}
+		if id, found := x.lookup(l.ChainID); found && n.snaps.has(id) {
+			present[i] = true
+		}
+	}
+	return present, blob, ok
+}

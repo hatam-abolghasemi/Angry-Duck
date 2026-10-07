@@ -2,7 +2,10 @@ package worker
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 // TestCrictlImagesParsing uses the exact output captured from a real
@@ -213,5 +216,24 @@ func TestCountRunningReposByContainerKubeletShape(t *testing.T) {
 	counts = countRunningReposByContainer(ps, nil)
 	if len(counts) != 1 || counts["registry.example.com/team/db"] != 1 {
 		t.Errorf("without an image list got %v, want only the db repo", counts)
+	}
+}
+
+func TestInUseImagesKeepsExitedContainersOfReadyPods(t *testing.T) {
+	c := func(id, sandbox, image string, st runtimeapi.ContainerState) *runtimeapi.Container {
+		return &runtimeapi.Container{Id: id, PodSandboxId: sandbox, State: st,
+			Image: &runtimeapi.ImageSpec{Image: image}, ImageRef: image}
+	}
+	cs := []*runtimeapi.Container{
+		c("run", "sb-up", "sha256:running", runtimeapi.ContainerState_CONTAINER_RUNNING),
+		c("crash", "sb-up", "sha256:crashloop", runtimeapi.ContainerState_CONTAINER_EXITED),
+		c("job", "sb-done", "sha256:completedjob", runtimeapi.ContainerState_CONTAINER_EXITED),
+	}
+	got := strings.Join(inUseImages(cs, map[string]bool{"sb-up": true}), ",")
+	if !strings.Contains(got, "sha256:running") || !strings.Contains(got, "sha256:crashloop") {
+		t.Fatalf("inUseImages = %q, want the running and the crashlooping image", got)
+	}
+	if strings.Contains(got, "sha256:completedjob") {
+		t.Fatalf("inUseImages = %q: a completed pod's image must not be kept", got)
 	}
 }

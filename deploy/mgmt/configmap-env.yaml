@@ -60,6 +60,19 @@ data:
   PROPAGATE_SEED_TIMEOUT_MIN_S: "120"
   PROPAGATE_SEED_TIMEOUT_MAX_S: "600"
   PROPAGATE_SEED_TIMEOUT_FACTOR: "3"
+  # Blob-by-blob spread (1.8.8). Each node fetches one blob from the
+  # registry and one from a peer at a time; a blob spreads between nodes as
+  # soon as any node has it, and the registry serves each blob about once.
+  # Needs RANK_BY_LAYERS=true; false falls back to whole-image seeding and
+  # propagation (PROPAGATE_*).
+  SPREAD_ENABLED: "true"
+  # Registry blob pulls in flight cluster-wide (default: RANK_TOP_N).
+  SPREAD_MAX_REGISTRY_PULLS: "5"
+  # Registry pulls of one blob at once: an idle node may race a slow one.
+  SPREAD_RACE_PER_BLOB: "2"
+  SPREAD_RETRY_AFTER_S: "15"
+  SPREAD_BACKOFF_MAX_S: "600"
+  SPREAD_TRANSFER_TIMEOUT_S: "1800"
   # Image cleanup, per node. An image not running here is removed if it was
   # unused for GC_UNUSED_FOR_S (any disk usage) OR the disk is above HIGH
   # (oldest first, down to LOW). The newest GC_ROLLBACK_KEEP per repo are

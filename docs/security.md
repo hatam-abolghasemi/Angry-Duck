@@ -33,11 +33,17 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 
 ## Trust boundaries
 
-- **Workers serve image content to each other.** `/blobs/*`, `/snapshots/*`
-  and `/mirror/content/*` hand out layers of any image on the node, private
-  images included, to anyone holding the shared token. Without a token,
-  rescue, propagation and the mirror stay off rather than serve
-  unauthenticated. Traffic is plain HTTP between pod IPs; use a CNI with
+- **Workers serve image content to each other.** `/blobs/*`, `/snapshots/*`,
+  `/spread/content/*` and `/mirror/content/*` hand out layers of any image
+  on the node, private images included, to anyone holding the shared token.
+  Without a token, rescue, spreading, propagation and the mirror stay off
+  rather than serve unauthenticated.
+- **Spread content is verified, never trusted.** A blob a worker fetches,
+  from the registry or a peer, is committed only if its size and SHA-256
+  match the digest the controller read from the registry; a mismatch is
+  discarded on the spot. The metadata a finalize carries is checked against
+  its digests before anything is imported. Orders are refused unless their
+  digest, size and job ID are well formed, and a fetch can't exceed 64 GiB. Traffic is plain HTTP between pod IPs; use a CNI with
   encryption between nodes if the network itself isn't trusted.
 - **`/report`, `/pull` and `/pull/cancel` require the shared token** when one
   is configured (`AUTH_MODE`, see [Configuration](configuration.md)).

@@ -5,7 +5,7 @@ disk-pressure image GC would, and with more knowledge of which images matter.
 
 ## Rules
 
-An image that isn't running on the node is removed when **either** of these
+An image that isn't in use on the node is removed when **either** of these
 holds:
 
 - **It has been unused for `GC_UNUSED_FOR_S`** (6 hours), whatever the disk
@@ -39,7 +39,10 @@ above the high mark.
 
 ## Never removed
 
-- images with a running container on the node;
+- images in use on the node: a running container uses it, or a container of
+  a pod that is still up does. A crashlooping container is exited most of the
+  time, but kubelet restarts it from the same image, so its image stays. A
+  completed Job's image doesn't: its pod is no longer up;
 - images being pulled or received right now;
 - a rescue's temporary base images;
 - images whose name contains a `GC_PROTECT_SUBSTRINGS` entry (`pause` by
@@ -74,6 +77,7 @@ defense.
 | Metric | Meaning |
 |---|---|
 | `angryduck_worker_gc_images_deleted_total{tier}` | `old` (unused past `GC_UNUSED_FOR_S`), `pressure` (removed early for disk space), `rollback`, or `error`. |
+| `angryduck_worker_gc_image_returns{image}` | Images that came back within an hour of being removed, and how often: something still uses them. Only the last hour is kept. |
 | `angryduck_worker_gc_candidates{tier}` | Images that could be removed right now, per tier. |
 | `angryduck_worker_gc_cleaning` | 1 while the disk is above high and not yet back to low. |
 

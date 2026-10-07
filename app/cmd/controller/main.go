@@ -80,6 +80,7 @@ func main() {
 	// registry (a few KB), with the same pull secret the workers use.
 	platform := config.String("RANK_PLATFORM", "linux/amd64")
 	var resolver controller.LayerResolver
+	var regClient *registryclient.Client
 	if config.Bool("RANK_BY_LAYERS", true) {
 		credsPath := config.String("REGISTRY_CREDENTIALS_PATH", "")
 		creds, err := registryauth.Load(credsPath)
@@ -87,7 +88,8 @@ func main() {
 			log.Printf("angryduck-controller: WARNING: registry credentials from %s unusable, resolving anonymously: %v", credsPath, err)
 			creds = registryauth.Empty()
 		}
-		resolver = registryclient.New(creds, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5), config.Duration("RANK_RESOLVE_CACHE_S", 600))
+		regClient = registryclient.New(creds, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5), config.Duration("RANK_RESOLVE_CACHE_S", 600))
+		resolver = regClient
 		ranker.SetLayerResolver(resolver, platform, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5))
 		log.Printf("angryduck-controller: layer ranking on: platform=%s credentials for %d registr(y/ies)", platform, creds.Count())
 	}
@@ -121,6 +123,13 @@ func main() {
 			}
 			server.SetPropagator(propagator)
 			go propagator.Run(ctx)
+		}
+		if spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN); spreader != nil {
+			if rescuer != nil {
+				spreader.SetWaiting(rescuer.Waiting)
+			}
+			server.SetSpreader(spreader)
+			go spreader.Run(ctx)
 		}
 	}
 
@@ -202,4 +211,37 @@ func newPropagator(registry *controller.Registry, token string, rankExclude []st
 		Platform:              platform,
 	}
 	return controller.NewPropagator(registry, token, cfg)
+}
+
+// newSpreader sets up spreading pushed images blob by blob, or returns nil
+// when it's off or can't work: it reads each image's layers from its
+// registry, so it needs RANK_BY_LAYERS. Without it, preheats seed whole
+// images and propagation spreads them.
+func newSpreader(registry *controller.Registry, rc *registryclient.Client, token string, rankExclude []string, platform string, topN int) *controller.Spreader {
+	if !config.Bool("SPREAD_ENABLED", true) {
+		log.Println("angryduck-controller: blob-by-blob spreading disabled (SPREAD_ENABLED=false): seeding and propagating whole images")
+		return nil
+	}
+	if rc == nil {
+		log.Println("angryduck-controller: blob-by-blob spreading needs RANK_BY_LAYERS=true: seeding and propagating whole images")
+		return nil
+	}
+	cfg := controller.SpreaderConfig{
+		Interval:       config.Duration("PROPAGATE_INTERVAL_S", 10),
+		MaxRegistry:    config.Int("SPREAD_MAX_REGISTRY_PULLS", topN),
+		RacePerBlob:    config.Int("SPREAD_RACE_PER_BLOB", 2),
+		MaxPeer:        config.Int("PROPAGATE_MAX_CONCURRENT", 8),
+		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 1),
+		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
+		Exclude:        config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),
+		RetryAfter:     config.Duration("SPREAD_RETRY_AFTER_S", 15),
+		BackoffMax:     config.Duration("SPREAD_BACKOFF_MAX_S", 600),
+		// A bit longer than the worker's own limit, so the worker's report
+		// normally arrives first.
+		TransferTimeout: config.Duration("SPREAD_TRANSFER_TIMEOUT_S", 1800) + time.Minute,
+		ResolveTimeout:  config.Duration("RANK_RESOLVE_TIMEOUT_S", 5),
+		Window:          config.Duration("PROPAGATE_WINDOW_S", 0),
+		Platform:        platform,
+	}
+	return controller.NewSpreader(registry, rc, token, cfg)
 }

@@ -19,6 +19,7 @@ type Server struct {
 	ranker     *Ranker
 	rescuer    *Rescuer    // nil when rescue is off
 	propagator *Propagator // nil when propagation is off
+	spreader   *Spreader   // nil when spreading is off
 	auth       *sharedtoken.Auth
 	webhook    *sharedtoken.Auth // CI's token for /webhook/preheat
 	mux        *http.ServeMux
@@ -27,6 +28,14 @@ type Server struct {
 // SetPropagator makes accepted preheats also start a propagation, and adds
 // propagation state to /status.
 func (s *Server) SetPropagator(p *Propagator) { s.propagator = p }
+
+// SetSpreader makes accepted preheats spread blob by blob, mounts
+// /spread/done (workers' transfer reports) behind the shared token, and
+// adds spreads to /status. Call after SetToken.
+func (s *Server) SetSpreader(sp *Spreader) {
+	s.spreader = sp
+	s.mux.HandleFunc("/spread/done", sharedtoken.Require(s.auth.Token, sp.HandleDone))
+}
 
 // SetToken mounts /layers/holders, which workers' mirrors call, behind
 // the shared token, and makes /report require it too (subject to the
@@ -122,6 +131,16 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.spreader != nil {
+		ordered, err := s.spreader.Start(r.Context(), req.Image)
+		if err == nil {
+			logging.Infof("angryduck-controller: accepted preheat for image=%s: spreading blob by blob, %d node(s) pulling from the registry first: %v", req.Image, len(ordered), ordered)
+			writeJSON(w, http.StatusAccepted, model.PreheatResponse{Accepted: true, TargetImage: req.Image, OrderedNodes: ordered})
+			return
+		}
+		logging.Warnf("angryduck-controller: can't spread image=%s blob by blob (%v); seeding it whole instead", req.Image, err)
+	}
+
 	s.registry.SetTarget(req.Image)
 	ordered := s.ranker.OrderNow(req.Image)
 	if s.propagator != nil {
@@ -173,6 +192,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.propagator != nil {
 		status.Propagations = s.propagator.Status()
+	}
+	if s.spreader != nil {
+		status.Spreads = s.spreader.Status()
 	}
 	writeJSON(w, http.StatusOK, status)
 }

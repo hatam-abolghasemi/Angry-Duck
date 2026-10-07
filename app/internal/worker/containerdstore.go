@@ -584,3 +584,113 @@ func randomSuffix() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// --- spread: single blobs held by a lease ---
+//
+// A spread lands an image blob by blob, long before any image references
+// them, so each job's blobs are held by a containerd lease. The lease
+// expires on its own: a job abandoned by a crash or a restart frees its
+// blobs without anyone cleaning up. A finished job deletes its lease once
+// the imported image references the blobs.
+
+// CreateLease makes sure lease id exists, expiring ttl from now.
+func (s *ContainerdStore) CreateLease(ctx context.Context, id string, ttl time.Duration) error {
+	_, err := s.client.LeasesService().Create(s.ns(ctx), leases.WithID(id), leases.WithExpiration(ttl))
+	if errdefs.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+// MoveLease creates lease to (expiring ttl from now), moves every resource
+// of lease from to it, and deletes from. It keeps a long job's blobs held
+// past the first lease's expiry.
+func (s *ContainerdStore) MoveLease(ctx context.Context, from, to string, ttl time.Duration) error {
+	ctx = s.ns(ctx)
+	lm := s.client.LeasesService()
+	if _, err := lm.Create(ctx, leases.WithID(to), leases.WithExpiration(ttl)); err != nil && !errdefs.IsAlreadyExists(err) {
+		return err
+	}
+	res, err := lm.ListResources(ctx, leases.Lease{ID: from})
+	if err != nil && !errdefs.IsNotFound(err) {
+		return err
+	}
+	for _, r := range res {
+		if err := lm.AddResource(ctx, leases.Lease{ID: to}, r); err != nil && !errdefs.IsNotFound(err) {
+			return err
+		}
+	}
+	return s.DeleteLease(ctx, from)
+}
+
+// DeleteLease deletes lease id; containerd's GC then frees whatever
+// nothing else references. A lease already gone is not an error.
+func (s *ContainerdStore) DeleteLease(ctx context.Context, id string) error {
+	err := s.client.LeasesService().Delete(s.ns(ctx), leases.Lease{ID: id})
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// WriteBlob streams exactly size bytes from r into the content store as
+// dgst, held by lease, and returns the bytes read. containerd checks the
+// digest and size at commit, so a wrong or truncated stream never lands.
+// ref names the ingest; a leftover ingest under the same ref (a crash
+// mid-transfer) is restarted from zero, and a failed write is aborted
+// right away, so partial data never stays on disk.
+func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string, size int64, r io.Reader) (int64, error) {
+	d, err := digest.Parse(dgst)
+	if err != nil {
+		return 0, err
+	}
+	ctx = leases.WithLease(s.ns(ctx), lease)
+	cs := s.client.ContentStore()
+	hold := func() error {
+		err := s.client.LeasesService().AddResource(ctx, leases.Lease{ID: lease}, leases.Resource{ID: dgst, Type: "content"})
+		if err == nil || errdefs.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	cw, err := content.OpenWriter(ctx, cs, content.WithRef(ref), content.WithDescriptor(ocispec.Descriptor{Digest: d, Size: size}))
+	if errdefs.IsAlreadyExists(err) {
+		return 0, hold() // committed meanwhile, by us or anyone: just hold it
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer s.invalidate()
+	abort := func() {
+		cw.Close()
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		_ = cs.Abort(actx, ref)
+		cancel()
+	}
+	if st, err := cw.Status(); err == nil && st.Offset > 0 {
+		if err := cw.Truncate(0); err != nil {
+			abort()
+			return 0, err
+		}
+	}
+	// Every Write is one synchronous round trip to containerd: batch them
+	// at 1 MiB, the same as snapshot staging.
+	bw := bufio.NewWriterSize(cw, rpcChunk)
+	n, err := io.Copy(bw, io.LimitReader(r, size+1))
+	if err == nil {
+		err = bw.Flush()
+	}
+	if err == nil && n != size {
+		err = fmt.Errorf("got %d bytes, want %d", n, size)
+	}
+	if err != nil {
+		abort()
+		return n, err
+	}
+	if err := cw.Commit(ctx, size, d); err != nil && !errdefs.IsAlreadyExists(err) {
+		abort()
+		return n, err
+	}
+	cw.Close()
+	return n, hold()
+}

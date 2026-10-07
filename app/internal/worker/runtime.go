@@ -39,6 +39,13 @@ type Runtime interface {
 	// against running containers or deletes any of them.
 	LocalImages() (refs []string, err error)
 	ListRunningImages() ([]string, error)
+	// ListInUseImages is what image cleanup must keep: the images of
+	// running containers plus those of any container, in any state, whose
+	// pod sandbox is still ready. A crashlooping container is exited most
+	// of the time, but kubelet restarts it from the same image, so it
+	// counts. A completed Job's or deleted pod's container doesn't: its
+	// sandbox is no longer ready. Alias forms as in ListRunningImages.
+	ListInUseImages() ([]string, error)
 	// RunningImageRepos counts currently-running containers on this node,
 	// grouped by bare repository identity (imageref.Repo) — one count per
 	// actual container. This is deliberately NOT built on top of
@@ -192,6 +199,56 @@ func (r criRuntime) ListRunningImages() ([]string, error) {
 		}
 	}
 	return images, nil
+}
+
+// ListInUseImages returns the images of every container image cleanup must
+// keep (see Runtime.ListInUseImages): two CRI calls, the ready sandboxes and
+// all containers, under one listing slot.
+func (r criRuntime) ListInUseImages() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listingTimeout)
+	defer cancel()
+	release, err := acquireListing(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	sb, err := r.rt.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{Filter: &runtimeapi.PodSandboxFilter{
+		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
+	}})
+	if err != nil {
+		return nil, fmt.Errorf("listing pod sandboxes: %w", err)
+	}
+	cs, err := r.rt.ListContainers(ctx, &runtimeapi.ListContainersRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("listing containers: %w", err)
+	}
+	ready := make(map[string]bool, len(sb.GetItems()))
+	for _, s := range sb.GetItems() {
+		ready[s.GetId()] = true
+	}
+	return inUseImages(cs.GetContainers(), ready), nil
+}
+
+// inUseImages is the selection half of ListInUseImages, split out to be
+// tested without a node: every alias of a container's image when the
+// container is running or its sandbox is ready.
+// Each name appears once: kubelet usually puts the same image ID in both
+// fields, and many containers share an image.
+func inUseImages(cs []*runtimeapi.Container, readySandbox map[string]bool) []string {
+	seen := make(map[string]struct{}, len(cs))
+	images := make([]string, 0, len(cs))
+	for _, c := range cs {
+		if c.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING && !readySandbox[c.GetPodSandboxId()] {
+			continue
+		}
+		for _, ref := range [...]string{c.GetImage().GetImage(), c.GetImage().GetUserSpecifiedImage(), c.GetImageRef()} {
+			if _, dup := seen[ref]; ref != "" && !dup {
+				seen[ref] = struct{}{}
+				images = append(images, ref)
+			}
+		}
+	}
+	return images
 }
 
 // countRunningReposByContainer groups crictl's per-container ps output by

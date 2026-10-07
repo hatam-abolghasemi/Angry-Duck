@@ -133,6 +133,7 @@ type ControllerStatus struct {
 	TargetSetAt  *time.Time          `json:"target_set_at,omitempty"`
 	Rescues      []RescueStatus      `json:"rescues,omitempty"`
 	Propagations []PropagationStatus `json:"propagations,omitempty"`
+	Spreads      []SpreadStatus      `json:"spreads,omitempty"`
 }
 
 // PropagationStatus is the propagator's view of one image being spread.
@@ -224,4 +225,104 @@ type BlobExportRequest struct {
 type Holder struct {
 	NodeID  string `json:"node_id"`
 	Address string `json:"address"`
+}
+
+// Spread: an image is spread blob by blob. The controller assigns each
+// node at most one registry pull and one peer transfer at a time, each
+// for one blob, and the node reports back as each finishes. When a node
+// holds every layer, the controller sends it the image's few KB of
+// metadata to register it (SpreadFinalize).
+
+// Spread transfer paths.
+const (
+	SpreadPathRegistry = "registry" // north-south: from the image's registry
+	SpreadPathPeer     = "peer"     // east-west: from another node
+)
+
+// SpreadFetch orders a worker to fetch one blob (POST /spread/fetch).
+type SpreadFetch struct {
+	Job    string  `json:"job"`
+	Image  string  `json:"image"` // the registry repository to pull from, for SpreadPathRegistry
+	Digest string  `json:"digest"`
+	Size   int64   `json:"size"`
+	Path   string  `json:"path"`
+	Peer   *Holder `json:"peer,omitempty"` // for SpreadPathPeer
+}
+
+// SpreadFetchAck is the worker's immediate answer to a SpreadFetch.
+// Accepted: the transfer started, a SpreadDone follows. Present: the
+// blob is already here. Neither: the slot for that path is busy.
+type SpreadFetchAck struct {
+	Accepted bool   `json:"accepted"`
+	Present  bool   `json:"present,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// Spread results, in SpreadDone.Result.
+const (
+	SpreadResultOK        = "ok"
+	SpreadResultFailed    = "failed"
+	SpreadResultCancelled = "cancelled" // the blob arrived by the other path first, or the job was dropped
+)
+
+// SpreadDone is a worker's report that one transfer ended (POST
+// /spread/done on the controller).
+type SpreadDone struct {
+	Node    string  `json:"node"`
+	Job     string  `json:"job"`
+	Digest  string  `json:"digest"`
+	Path    string  `json:"path"`
+	Result  string  `json:"result"`
+	Error   string  `json:"error,omitempty"`
+	Bytes   int64   `json:"bytes"`
+	Seconds float64 `json:"seconds"`
+}
+
+// SpreadFinalize hands a node that holds every layer the image's metadata
+// blobs (index, manifest, config), so it registers and unpacks the image
+// (POST /spread/finalize). Metadata digests are checked on arrival.
+type SpreadFinalize struct {
+	Job      string            `json:"job"`
+	Image    string            `json:"image"`
+	TopType  string            `json:"top_type"`
+	TopDig   string            `json:"top_digest"`
+	TopSize  int64             `json:"top_size"`
+	Metadata map[string][]byte `json:"metadata"`
+}
+
+// SpreadFinalizeResult is the worker's answer to a SpreadFinalize.
+type SpreadFinalizeResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// SpreadDrop tells a worker a job is over for it: cancel its transfers
+// and release the blobs held for it (POST /spread/drop).
+type SpreadDrop struct {
+	Job string `json:"job"`
+}
+
+// SpreadStatus is the controller's view of one image being spread, for
+// /status.
+type SpreadStatus struct {
+	Image     string             `json:"image"`
+	Job       string             `json:"job"`
+	StartedAt time.Time          `json:"started_at"`
+	Layers    int                `json:"layers"`
+	Bytes     int64              `json:"bytes"`
+	Done      []string           `json:"done"`
+	Skipped   []string           `json:"skipped,omitempty"`
+	Nodes     []SpreadNodeStatus `json:"nodes,omitempty"` // nodes not done yet
+}
+
+// SpreadNodeStatus is one node still working on a spread.
+type SpreadNodeStatus struct {
+	Node          string `json:"node"`
+	MissingLayers int    `json:"missing_layers"`
+	MissingBytes  int64  `json:"missing_bytes"`
+	Registry      string `json:"registry,omitempty"` // blob being pulled from the registry
+	Peer          string `json:"peer,omitempty"`     // blob being received from a peer
+	PeerFrom      string `json:"peer_from,omitempty"`
+	Finalizing    bool   `json:"finalizing,omitempty"`
+	Failures      int    `json:"failures,omitempty"`
 }

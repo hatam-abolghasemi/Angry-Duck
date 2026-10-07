@@ -123,7 +123,7 @@
     }
   ],
   "cursorSync": "Crosshair",
-  "description": "Preheat, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.7. Pick data source → cluster → node; click any node, image or row to focus.",
+  "description": "Preheat, spread, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.8. Pick data source → cluster → node; click any node, image or row to focus.",
   "editable": true,
   "elements": {
     "panel-1": {
@@ -4186,7 +4186,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "count(count by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"})) or vector(0)",
+                      "expr": "(count(count by (image) (angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"})) or vector(0)) + (count(count by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"})) or vector(0))",
                       "instant": false,
                       "legendFormat": "__auto",
                       "range": true
@@ -4203,10 +4203,10 @@
             "transformations": []
           }
         },
-        "description": "Pushed images currently being spread across the fleet.",
+        "description": "Images being spread to the fleet right now, blob by blob or (fallback) whole.",
         "id": 3,
         "links": [],
-        "title": "Active Propagations",
+        "title": "Images Spreading",
         "transparent": true,
         "vizConfig": {
           "group": "stat",
@@ -7963,6 +7963,1616 @@
           "version": "13.1.1"
         }
       }
+    },
+    "panel-47": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sort_desc(max by (node, image) (max_over_time(angryduck_worker_gc_image_returns{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                      "format": "table",
+                      "instant": true,
+                      "legendFormat": "__auto",
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "kind": "organize",
+                "spec": {
+                  "id": "organize",
+                  "options": {
+                    "excludeByName": {
+                      "Time": true
+                    },
+                    "indexByName": {
+                      "node": 0,
+                      "image": 1,
+                      "Value": 2
+                    },
+                    "renameByName": {
+                      "Value": "returns"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Images that came back to a node within an hour of cleanup removing them, and how many times. Something on the node still uses them, so every removal costs a registry pull. Empty is healthy.",
+        "id": 47,
+        "links": [],
+        "title": "Images Coming Back After Cleanup",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "orange",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 3
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "returns"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-background",
+                        "mode": "basic"
+                      }
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 110
+                    },
+                    {
+                      "id": "decimals",
+                      "value": 0
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "node"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 280
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": [
+                {
+                  "desc": true,
+                  "displayName": "returns"
+                }
+              ]
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-48": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (image, state) (angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"})",
+                      "legendFormat": "__auto",
+                      "format": "table",
+                      "instant": true,
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "nodes"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (image, state) (label_replace(angryduck_controller_spread_layers{k8s_source_cluster=~\"$cluster\"}, \"state\", \"layers $1\", \"state\", \"(.*)\"))",
+                      "legendFormat": "__auto",
+                      "format": "table",
+                      "instant": true,
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "layers"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "kind": "merge",
+                "spec": {
+                  "id": "merge",
+                  "options": {}
+                }
+              },
+              {
+                "kind": "groupingToMatrix",
+                "spec": {
+                  "id": "groupingToMatrix",
+                  "options": {
+                    "columnField": "state",
+                    "rowField": "image",
+                    "valueField": "Value",
+                    "emptyValue": "zero"
+                  }
+                }
+              },
+              {
+                "kind": "organize",
+                "spec": {
+                  "id": "organize",
+                  "options": {
+                    "renameByName": {
+                      "image\\state": "image"
+                    },
+                    "indexByName": {
+                      "image\\state": 0,
+                      "done": 1,
+                      "finalizing": 2,
+                      "transferring": 3,
+                      "waiting": 4,
+                      "skipped": 5,
+                      "layers held": 6,
+                      "layers pulling": 7,
+                      "layers missing": 8
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Each image being spread now: how many nodes are in each state, and how many of its layers some node already holds (peers can fetch those) versus are still only coming from the registry.",
+        "id": 48,
+        "links": [],
+        "title": "Spreads Running",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "done"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "waiting"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "orange",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "layers missing"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": []
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-49": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (image, node) (angryduck_controller_spread_node_missing_layers{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "legendFormat": "__auto",
+                      "format": "table",
+                      "instant": true,
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "layers"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (image, node) (angryduck_controller_spread_node_missing_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "legendFormat": "__auto",
+                      "format": "table",
+                      "instant": true,
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "bytes"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "kind": "merge",
+                "spec": {
+                  "id": "merge",
+                  "options": {}
+                }
+              },
+              {
+                "kind": "organize",
+                "spec": {
+                  "id": "organize",
+                  "options": {
+                    "excludeByName": {
+                      "Time": true
+                    },
+                    "indexByName": {
+                      "image": 0,
+                      "node": 1,
+                      "Value #layers": 2,
+                      "Value #bytes": 3
+                    },
+                    "renameByName": {
+                      "Value #layers": "missing layers",
+                      "Value #bytes": "missing bytes"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Per image and node, what is still missing. A node leaves this table once it has registered the image.",
+        "id": 49,
+        "links": [],
+        "title": "Nodes Still Missing the Image",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "missing bytes"
+                  },
+                  "properties": [
+                    {
+                      "id": "unit",
+                      "value": "bytes"
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": [
+                {
+                  "desc": true,
+                  "displayName": "missing bytes"
+                }
+              ]
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-50": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (image, node, path, source, blob) (angryduck_controller_spread_transfer_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "legendFormat": "__auto",
+                      "format": "table",
+                      "instant": true,
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "kind": "organize",
+                "spec": {
+                  "id": "organize",
+                  "options": {
+                    "excludeByName": {
+                      "Time": true
+                    },
+                    "indexByName": {
+                      "image": 0,
+                      "node": 1,
+                      "path": 2,
+                      "source": 3,
+                      "blob": 4,
+                      "Value": 5
+                    },
+                    "renameByName": {
+                      "Value": "size"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Every blob moving now: which node receives it, from the registry or from which node, and its size. One registry pull and one peer transfer per node at most. The same blob on both paths of one node is a race: the first to finish cancels the other.",
+        "id": 50,
+        "links": [],
+        "title": "Transfers Right Now",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "size"
+                  },
+                  "properties": [
+                    {
+                      "id": "unit",
+                      "value": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "path"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 90
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": [
+                {
+                  "desc": true,
+                  "displayName": "size"
+                }
+              ]
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-51": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (state) (angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"})",
+                      "legendFormat": "{{state}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Nodes per state across the images being spread.",
+        "id": 51,
+        "links": [],
+        "title": "Nodes by State",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": 0,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "short"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "done"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "waiting"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "orange",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "transferring"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "blue",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "sum",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Total",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-52": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (path, result) (sum_over_time((clamp_min(angryduck_controller_spread_transfers_total{k8s_source_cluster=~\"$cluster\"} - angryduck_controller_spread_transfers_total{k8s_source_cluster=~\"$cluster\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "legendFormat": "{{path}} {{result}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Blob transfers that ended. registry ok should stay close to the number of distinct new blobs: each is pulled about once. cancelled is the slower path of a race.",
+        "id": 52,
+        "links": [],
+        "title": "Transfers by Path & Result",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": 0,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "short"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "registry ok"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "blue",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "peer ok"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "sum",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Total",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-53": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (path) (rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"registry|peer\"}[$__rate_interval]))",
+                      "legendFormat": "{{path}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Spread bytes nodes received, from the registry (north-south) and from peers (east-west). Peer bytes are bytes the registry didn't serve.",
+        "id": 53,
+        "links": [],
+        "title": "Bytes Received by Path",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": null,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "Bps"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "registry"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "blue",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "peer"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "sum",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Total",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-54": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (path) (rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"registry|peer\"}[5m])) / (sum by (path) (rate(angryduck_worker_spread_transfer_milliseconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[5m])) / 1000)",
+                      "legendFormat": "{{path}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Bytes per second while transferring, per path. A path much slower than the other is the one races are won against.",
+        "id": 54,
+        "links": [],
+        "title": "Average Throughput per Path",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": null,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "Bps"
+              },
+              "overrides": []
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "sum",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Total",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-55": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_controller_spreads_total{k8s_source_cluster=~\"$cluster\"} - angryduck_controller_spreads_total{k8s_source_cluster=~\"$cluster\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "legendFormat": "spread {{result}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_controller_spread_finalizes_total{k8s_source_cluster=~\"$cluster\"} - angryduck_controller_spread_finalizes_total{k8s_source_cluster=~\"$cluster\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "legendFormat": "registration {{result}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Spreads that ended (complete, superseded, expired) and nodes that registered a spread image.",
+        "id": 55,
+        "links": [],
+        "title": "Finished Spreads & Registrations",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": 0,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "short"
+              },
+              "overrides": []
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "sum",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Total",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-56": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max(angryduck_controller_spread_last_duration_seconds{k8s_source_cluster=~\"$cluster\"})",
+                      "legendFormat": "__auto",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "maxDataPoints": 100
+            },
+            "transformations": []
+          }
+        },
+        "description": "From the preheat to the last eligible node registering the image, for the last complete spread.",
+        "id": 56,
+        "links": [],
+        "title": "Last Spread Took",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "fixedColor": "#4e93c1",
+                  "mode": "fixed"
+                },
+                "noValue": "-",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "s"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-57": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (node, image, in_flight) (angryduck_controller_rescue_stuck_pods{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "legendFormat": "__auto",
+                      "format": "table",
+                      "instant": true,
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "kind": "organize",
+                "spec": {
+                  "id": "organize",
+                  "options": {
+                    "excludeByName": {
+                      "Time": true
+                    },
+                    "indexByName": {
+                      "node": 0,
+                      "image": 1,
+                      "in_flight": 2,
+                      "Value": 3
+                    },
+                    "renameByName": {
+                      "Value": "pods",
+                      "in_flight": "rescue running"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Pods stuck pulling an image, per node and image, and whether a rescue is running for it right now. Only pairs stuck as of the rescuer's last look.",
+        "id": 57,
+        "links": [],
+        "title": "Stuck Pods per Node & Image",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "rescue running"
+                  },
+                  "properties": [
+                    {
+                      "id": "mappings",
+                      "value": [
+                        {
+                          "type": "value",
+                          "options": {
+                            "0": {
+                              "text": "no",
+                              "color": "orange"
+                            },
+                            "1": {
+                              "text": "yes",
+                              "color": "green"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-text"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": [
+                {
+                  "desc": true,
+                  "displayName": "pods"
+                }
+              ]
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
     }
   },
   "layout": {
@@ -8399,6 +10009,164 @@
                               "spec": {
                                 "element": {
                                   "kind": "ElementReference",
+                                  "name": "panel-48"
+                                },
+                                "height": 7,
+                                "width": 20,
+                                "x": 0,
+                                "y": 0
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-56"
+                                },
+                                "height": 7,
+                                "width": 4,
+                                "x": 20,
+                                "y": 0
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-49"
+                                },
+                                "height": 10,
+                                "width": 12,
+                                "x": 0,
+                                "y": 7
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-50"
+                                },
+                                "height": 10,
+                                "width": 12,
+                                "x": 12,
+                                "y": 7
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "title": "Now"
+                    }
+                  },
+                  {
+                    "kind": "RowsLayoutRow",
+                    "spec": {
+                      "collapse": false,
+                      "layout": {
+                        "kind": "GridLayout",
+                        "spec": {
+                          "items": [
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-51"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 0,
+                                "y": 0
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-52"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 12,
+                                "y": 0
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-53"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 0,
+                                "y": 9
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-54"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 12,
+                                "y": 9
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-55"
+                                },
+                                "height": 9,
+                                "width": 24,
+                                "x": 0,
+                                "y": 18
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "title": "History"
+                    }
+                  }
+                ]
+              }
+            },
+            "title": "Spread"
+          }
+        },
+        {
+          "kind": "TabsLayoutTab",
+          "spec": {
+            "layout": {
+              "kind": "RowsLayout",
+              "spec": {
+                "rows": [
+                  {
+                    "kind": "RowsLayoutRow",
+                    "spec": {
+                      "collapse": false,
+                      "layout": {
+                        "kind": "GridLayout",
+                        "spec": {
+                          "items": [
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
                                   "name": "panel-22"
                                 },
                                 "height": 6,
@@ -8591,6 +10359,19 @@
                                 "width": 12,
                                 "x": 12,
                                 "y": 9
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-57"
+                                },
+                                "height": 9,
+                                "width": 24,
+                                "x": 0,
+                                "y": 18
                               }
                             }
                           ]
@@ -8895,6 +10676,19 @@
                                 "width": 24,
                                 "x": 0,
                                 "y": 17
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-47"
+                                },
+                                "height": 10,
+                                "width": 24,
+                                "x": 0,
+                                "y": 26
                               }
                             }
                           ]

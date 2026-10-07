@@ -40,6 +40,11 @@ var (
 		"Failed rescue attempts in a row for one node and image. Only stuck pairs with at least one failure are listed.",
 		"node", "image",
 	)
+	rescueStuckPods = metrics.NewGaugeVec(
+		"angryduck_controller_rescue_stuck_pods",
+		"Pods stuck pulling an image on a node, per node and image, and whether a rescue is running for it (in_flight 1 or 0). Only pairs stuck as of the last rescuer tick.",
+		"node", "image", "in_flight",
+	)
 	rescuesInFlight = metrics.NewGaugeVec(
 		"angryduck_controller_rescues_in_flight",
 		"Rescues currently running.",
@@ -373,6 +378,7 @@ func (rs *Rescuer) send(ctx context.Context, st *pairState, s stuckImage, target
 func (rs *Rescuer) publishMetricsLocked() {
 	rescueStuckImages.Reset()
 	rescueConsecutiveFailures.Reset()
+	rescueStuckPods.Reset()
 	perNode := map[string]int{}
 	inFlight := 0
 	for _, st := range rs.pairs {
@@ -380,9 +386,12 @@ func (rs *Rescuer) publishMetricsLocked() {
 		if st.failures > 0 {
 			rescueConsecutiveFailures.Set(float64(st.failures), st.Node, st.Image)
 		}
+		flight := "0"
 		if st.inFlight {
 			inFlight++
+			flight = "1"
 		}
+		rescueStuckPods.Set(float64(len(st.Pods)), st.Node, st.Image, flight)
 	}
 	for node, n := range perNode {
 		rescueStuckImages.Set(float64(n), node)

@@ -330,3 +330,15 @@ func (r *Registry) Holders(digest, exclude string, max int) []model.Holder {
 	}
 	return out
 }
+
+// worker returns a copy of node's entry, or nil.
+func (r *Registry) worker(node string) *workerEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	w := r.workers[node]
+	if w == nil {
+		return nil
+	}
+	cp := *w
+	return &cp
+}

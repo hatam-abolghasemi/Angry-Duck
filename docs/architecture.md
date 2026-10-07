@@ -39,21 +39,24 @@ sequenceDiagram
 
     CI->>R: push app:1.2.3
     CI->>C: POST /webhook/preheat
-    C->>R: read manifest (a few KB)
-    C->>S: POST /pull (RANK_TOP_N nodes)
-    S->>R: pull, mostly changed layers
-    S->>C: report: has app:1.2.3
-    loop until every eligible node has it
-        C->>W: POST /rescue (reason=propagate)
-        W->>S: fetch missing layers
+    C->>R: read manifest and config (a few KB)
+    C->>S: POST /spread/fetch: one missing blob each
+    S->>R: pull that blob
+    S->>C: POST /spread/done
+    loop every blob, as soon as any node has it
+        C->>W: POST /spread/fetch from a peer
+        W->>S: GET /spread/content/<digest>
+        W->>C: POST /spread/done
     end
-    Note over W: kubelet finds the image locally
+    C->>W: POST /spread/finalize (metadata)
+    Note over W: image registered; kubelet finds it locally
 ```
 
-1. **[Preheat](preheat.md).** The nodes lacking the fewest bytes of the new
-   image pull it from the registry.
-2. **[Propagation](propagation.md).** Every other eligible node gets it from
-   peers, until all of them have it.
+1. **[Preheat and spread](propagation.md).** Missing blobs are pulled from
+   the registry about once each, and every blob spreads from node to node
+   the moment any node has it, until every eligible node has registered the
+   image. Pushes whose manifest can't be read are [seeded](preheat.md) and
+   [propagated](propagation.md#fallbacks) whole instead.
 3. **[Mirror](mirror.md).** Any pull containerd still makes, for example on a
    node that joined later or for a third-party image, is served from the node
    or a peer when possible.
@@ -62,14 +65,17 @@ sequenceDiagram
 5. **[Image cleanup](image-cleanup.md).** Once nothing has used it on a node
    for 6 hours, or sooner when the disk runs high, the node removes it.
 
-Propagation and rescue share one [transfer mechanism](transfers.md).
+Whole-image propagation and rescue share one
+[transfer mechanism](transfers.md); spread moves single blobs by digest.
 
 ## Talking to containerd
 
 The worker image contains only the worker binary. Everything it does with
 images goes through containerd's socket: its own gRPC API for content,
 images, snapshots, leases and diffs, and CRI for seed pulls and container
-listings, the calls `crictl` makes. A seed pull is therefore the exact pull
+listings, the calls `crictl` makes. Spread's registry pulls stream single
+blobs by digest straight into the content store, with the same pull
+secret; a whole-image seed pull is therefore the exact pull
 kubelet would make. Work that needs privileges on the node (unpacking
 layers, mounting snapshots, writing files with their owners and whiteouts)
 happens inside containerd, so the worker has no capabilities and no host

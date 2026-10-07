@@ -140,8 +140,71 @@ func TestGCUsesRollbackOnlyAboveHighAndPersists(t *testing.T) {
 	}
 	// Usage times survive a restart.
 	g.save(true)
-	g2 := NewImageGC(f, g.running, g.util, nil, "n1", g.cfg)
+	g2 := NewImageGC(f, g.inUse, g.util, nil, "n1", g.cfg)
 	if len(g2.firstSeen) != len(g.firstSeen) {
 		t.Fatalf("state not reloaded: %d vs %d", len(g2.firstSeen), len(g.firstSeen))
+	}
+}
+
+func TestGCKeepsImageOfCrashloopingContainer(t *testing.T) {
+	// The worker20 case: a crashlooping pod's container is exited most of
+	// the time, so its image never showed up as running and pressure
+	// removed it between restarts, forcing a re-pull every back-off.
+	// ListInUseImages reports it while its pod is up; the GC must keep it.
+	u := 0.90
+	held := "registry.example.com/vendor-menu/dev:v5375"
+	g, f := gcFixture(t, &u, []string{"sha256:held"}) // kubelet's bare image ID
+	g.cfg.Settle, g.cfg.RollbackKeep = 0, 0
+	addImage(g, f, held, "sha256:held", time.Hour)
+	f.targets["sha256:held"] = "sha256:held"
+	addImage(g, f, "registry.example.com/other/app:1", "sha256:o1", time.Hour)
+	g.Tick(context.Background())
+	if got := removedTags(f); strings.Contains(got, "v5375") {
+		t.Fatalf("removed %q: the crashlooping pod's image went", got)
+	}
+	if got := removedTags(f); got != "registry.example.com/other/app:1" {
+		t.Fatalf("removed %q, want the unused image", got)
+	}
+}
+
+func TestGCReportsImagesThatComeBackAndForgetsThem(t *testing.T) {
+	u := 0.90
+	g, f := gcFixture(t, &u, nil)
+	g.cfg.Settle, g.cfg.RollbackKeep = 0, 0
+	addImage(g, f, "r.io/loop:1", "sha256:l1", time.Hour)
+	g.Tick(context.Background()) // removed
+	want := `angryduck_worker_gc_image_returns{node="n1",image="r.io/loop:1"} 1`
+	if strings.Contains(scrapeMetrics(t), want) {
+		t.Fatal("reported a return before the image came back")
+	}
+	addImage(g, f, "r.io/loop:1", "sha256:l1", 0) // kubelet pulled it again
+	delete(g.firstSeen, "sha256:l1")
+	g.Tick(context.Background()) // sees it back, removes it again
+	if !strings.Contains(scrapeMetrics(t), want) {
+		t.Fatalf("return not reported:\n%s", scrapeMetrics(t))
+	}
+	// An hour later both maps are empty again and the series is gone.
+	g.publishChurn(time.Now().Add(2 * returnWindow))
+	if len(g.removed) != 0 || len(g.returned) != 0 {
+		t.Fatalf("churn state kept: removed=%d returned=%d", len(g.removed), len(g.returned))
+	}
+	if strings.Contains(scrapeMetrics(t), `image="r.io/loop:1"`) {
+		t.Fatal("stale return still published")
+	}
+}
+
+func TestDisplayName(t *testing.T) {
+	for _, tc := range []struct {
+		names []string
+		want  string
+	}{
+		{[]string{"r.io/a:1", "r.io/a@sha256:x", "sha256:x"}, "r.io/a:1"},
+		{[]string{"r.io/a@sha256:x", "sha256:x"}, "r.io/a@sha256:x"},
+		{[]string{"sha256:x"}, "sha256:x"},
+	} {
+		sort.Strings(tc.names)
+		if got := displayName(tc.names); got != tc.want {
+			t.Errorf("displayName(%v) = %q, want %q", tc.names, got, tc.want)
+		}
 	}
 }
