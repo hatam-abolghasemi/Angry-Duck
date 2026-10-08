@@ -4,7 +4,7 @@ metadata:
   name: angryduck-config
   namespace: angryduck
   labels:
-    app.kubernetes.io/env: mgmt
+    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
 data:
   LOG_LEVEL: "info"
@@ -14,8 +14,6 @@ data:
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
   RANK_TOP_N: "5"
-  # Seeds are the nodes already holding the most bytes of the pushed image
-  # (layer inventory + the image's manifest, read from its registry).
   RANK_BY_LAYERS: "true"
   RANK_PLATFORM: "linux/amd64"
   RANK_RESOLVE_TIMEOUT_S: "5"
@@ -23,7 +21,6 @@ data:
   RANK_PREFER_IMAGE_LOCALITY: "true"
   RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
   WORKER_LISTEN_ADDR: ":18081"
-  # NODE_EXPORTER_URL is set in the DaemonSet, from the node IP.
   CONTROLLER_URL: "http://angryduck-controller.angryduck.svc.cluster.local:8080"
   REPORT_INTERVAL_S: "15"
   PREHEAT_ATTRIBUTION_INTERVAL_S: "300"
@@ -34,6 +31,7 @@ data:
   RESCUE_ENABLED: "true"
   RESCUE_TOKEN_PATH: "/etc/angryduck/rescue-token/token"
   RESCUE_INTERVAL_S: "15"
+  RESCUE_RESYNC_INTERVAL_S: "600"
   RESCUE_RETRY_AFTER_S: "120"
   RESCUE_BACKOFF_MAX_S: "3600"
   RESCUE_PIN_TTL_S: "3600"
@@ -43,40 +41,25 @@ data:
   RESCUE_MAX_SOURCES: "3"
   RESCUE_NODE_MAX_CONCURRENT: "2"
   RESCUE_CONTAINERD_NAMESPACE: "k8s.io"
-  # Layer inventory: blob digests + snapshot chainIDs per node, sent as
-  # deltas. Used to pick seed nodes and to plan cleanup.
   LAYER_INVENTORY_ENABLED: "true"
   LAYER_SCAN_INTERVAL_S: "60"
+  INVENTORY_EVENTS_ENABLED: "true"
+  LAYER_RESYNC_INTERVAL_S: "600"
   PROPAGATE_ENABLED: "true"
   PROPAGATE_INTERVAL_S: "10"
-  # 0: spread until every eligible node has it (or a newer tag replaces it).
   PROPAGATE_WINDOW_S: "0"
   PROPAGATE_MAX_CONCURRENT: "8"
-  # 1: a source finishes one node completely before starting the next.
   PROPAGATE_PER_SOURCE: "1"
   PROPAGATE_MAX_UTILIZATION: "0.70"
-  # A seed still pulling after max(MIN, FACTOR x the first seed's pull
-  # time) (MAX while none finished) is cancelled and served from peers.
   PROPAGATE_SEED_TIMEOUT_MIN_S: "120"
   PROPAGATE_SEED_TIMEOUT_MAX_S: "600"
   PROPAGATE_SEED_TIMEOUT_FACTOR: "3"
-  # Blob-by-blob spread (1.8.8). Each node fetches one blob from the
-  # registry and one from a peer at a time; a blob spreads between nodes as
-  # soon as any node has it, and the registry serves each blob about once.
-  # Needs RANK_BY_LAYERS=true; false falls back to whole-image seeding and
-  # propagation (PROPAGATE_*).
   SPREAD_ENABLED: "true"
-  # Registry blob pulls in flight cluster-wide (default: RANK_TOP_N).
   SPREAD_MAX_REGISTRY_PULLS: "5"
-  # Registry pulls of one blob at once: an idle node may race a slow one.
   SPREAD_RACE_PER_BLOB: "2"
   SPREAD_RETRY_AFTER_S: "15"
   SPREAD_BACKOFF_MAX_S: "600"
   SPREAD_TRANSFER_TIMEOUT_S: "1800"
-  # Image cleanup, per node. An image not running here is removed if it was
-  # unused for GC_UNUSED_FOR_S (any disk usage) OR the disk is above HIGH
-  # (oldest first, down to LOW). The newest GC_ROLLBACK_KEEP per repo are
-  # kept, and go last, only while still above HIGH.
   GC_ENABLED: "true"
   GC_INTERVAL_S: "60"
   GC_HIGH_UTILIZATION: "0.70"
@@ -86,9 +69,7 @@ data:
   GC_BATCH: "5"
   GC_SETTLE_S: "10"
   GC_PROTECT_SUBSTRINGS: "pause"
-  # Pull-only P2P mirror for each node's containerd (127.0.0.1 only).
-  # Needs containerd's CRI registry config_path = MIRROR_CONTAINERD_CONFIG_DIR.
-  MIRROR_ENABLED: "false"
-  MIRROR_LISTEN_ADDR: "127.0.0.1:18082"
+  MIRROR_ENABLED: "true"
+  MIRROR_LISTEN_ADDR: ":18082"
   MIRROR_CONTAINERD_CONFIG_DIR: "/etc/containerd/certs.d"
   MIRROR_REGISTRIES: "registry.example.com"

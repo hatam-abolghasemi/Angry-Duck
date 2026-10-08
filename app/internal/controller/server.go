@@ -58,7 +58,11 @@ func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "digest required", http.StatusBadRequest)
 		return
 	}
-	holders := s.registry.Holders(digest, r.URL.Query().Get("exclude"), 3)
+	var spreading []string
+	if s.spreader != nil {
+		spreading = s.spreader.Holders(digest)
+	}
+	holders := s.registry.Holders(digest, r.URL.Query().Get("exclude"), spreading)
 	if holders == nil {
 		holders = []model.Holder{}
 	}

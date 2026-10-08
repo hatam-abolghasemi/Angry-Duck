@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -96,5 +98,104 @@ func TestHostsConfigOnlyTouchesItsOwnFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatal("foreign hosts.toml removed")
+	}
+}
+
+// brokenLocal claims every blob it holds but can't open any of them.
+type brokenLocal struct{ *blobship.MemStore }
+
+func (brokenLocal) OpenContent(context.Context, string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("disk said no")
+}
+
+// A local blob that can't be read is a miss, not an error page or an empty
+// 200: containerd only moves on to the next host (the registry) on a 404.
+func TestMirrorTreatsAnUnreadableLocalBlobAsAMiss(t *testing.T) {
+	local := blobship.NewMemStore()
+	d := local.Put([]byte("layer"))
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]model.Holder{})
+	}))
+	defer controller.Close()
+	srv := httptest.NewServer(NewMirror(brokenLocal{local}, "w1", testToken, controller.URL).Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v2/team/app/blobs/" + d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 so containerd falls back to the registry", resp.StatusCode)
+	}
+}
+
+// A peer that holds a blob but can't read it answers 404, so the asking
+// mirror moves on to its next holder instead of forwarding an empty 200.
+func TestMirrorSkipsAPeerThatCantReadItsBlob(t *testing.T) {
+	broken := blobship.NewMemStore()
+	d := broken.Put([]byte("layer"))
+	healthy := blobship.NewMemStore()
+	healthy.Put([]byte("layer"))
+	peer := func(store MirrorStore, name string) string {
+		mux := http.NewServeMux()
+		NewMirror(store, name, testToken, "").RegisterPeer(mux)
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		return strings.TrimPrefix(srv.URL, "http://")
+	}
+	holders := []model.Holder{{NodeID: "b", Address: peer(brokenLocal{broken}, "b")}, {NodeID: "c", Address: peer(healthy, "c")}}
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(holders)
+	}))
+	defer controller.Close()
+	srv := httptest.NewServer(NewMirror(blobship.NewMemStore(), "a", testToken, controller.URL).Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v2/team/app/blobs/" + d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "layer" {
+		t.Fatalf("status %d body %q, want the blob from the second peer", resp.StatusCode, body)
+	}
+}
+
+// An empty holder list isn't cached: a blob that lands on a peer a moment
+// later is found on the next request. A list whose holders all failed is
+// dropped too.
+func TestMirrorAsksAgainAfterAMiss(t *testing.T) {
+	peerStore := blobship.NewMemStore()
+	d := peerStore.Put([]byte("layer"))
+	mux := http.NewServeMux()
+	NewMirror(peerStore, "b", testToken, "").RegisterPeer(mux)
+	peerSrv := httptest.NewServer(mux)
+	defer peerSrv.Close()
+	var asks int
+	var holders []model.Holder
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asks++
+		_ = json.NewEncoder(w).Encode(holders)
+	}))
+	defer controller.Close()
+	srv := httptest.NewServer(NewMirror(blobship.NewMemStore(), "a", testToken, controller.URL).Handler())
+	defer srv.Close()
+	status := func() int {
+		resp, err := http.Get(srv.URL + "/v2/team/app/blobs/" + d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := status(); c != 404 {
+		t.Fatalf("nobody holds it yet: %d", c)
+	}
+	holders = []model.Holder{{NodeID: "b", Address: strings.TrimPrefix(peerSrv.URL, "http://")}}
+	if c := status(); c != 200 || asks != 2 {
+		t.Fatalf("status %d after %d asks: the empty answer must not have been cached", c, asks)
+	}
+	if c := status(); c != 200 || asks != 2 {
+		t.Fatalf("status %d after %d asks: a useful answer is reused", c, asks)
 	}
 }

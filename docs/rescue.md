@@ -12,9 +12,8 @@ sequenceDiagram
     participant T as Worker on stuck node
     participant S as Worker on source node
 
-    loop every RESCUE_INTERVAL_S
-        C->>K: list Pending pods
-    end
+    C->>K: list Pending pods, then watch them
+    K-->>C: pod X on node T: ImagePullBackOff
     C->>C: pod stuck on image X on node T,<br/>node S has X
     C->>T: POST /rescue {image X, sources [S, ...]}
     T->>S: fetch only the layers T lacks
@@ -24,8 +23,13 @@ sequenceDiagram
 
 ## Behavior
 
-- **Detection.** Every `RESCUE_INTERVAL_S`, the controller lists Pending pods
-  and finds containers in `ImagePullBackOff` or `ErrImagePull`.
+- **Detection.** The controller lists Pending pods once, then watches them:
+  a container in `ImagePullBackOff` or `ErrImagePull` is seen as kubelet
+  reports it, not at the next poll. The watch resumes where it stopped, and
+  pods are listed again only when the API server no longer has that version,
+  after an error, or every `RESCUE_RESYNC_INTERVAL_S` as a safety net. It
+  needs `watch` on pods; with only `list`, pods are listed every
+  `RESCUE_INTERVAL_S` instead.
 - **Sources.** Up to `RESCUE_MAX_SOURCES` nodes holding the exact image are
   offered, lowest disk utilization first. The worker tries them in order.
 - **Transfer.** Only the layers the node lacks are fetched; see
@@ -65,7 +69,7 @@ row and the next attempt. The key metrics are
 
 ## Settings
 
-`RESCUE_ENABLED`, `RESCUE_INTERVAL_S`, `RESCUE_RETRY_AFTER_S`,
+`RESCUE_ENABLED`, `RESCUE_INTERVAL_S`, `RESCUE_RESYNC_INTERVAL_S`, `RESCUE_RETRY_AFTER_S`,
 `RESCUE_BACKOFF_MAX_S`, `RESCUE_TIMEOUT_S`, `RESCUE_MAX_CONCURRENT`,
 `RESCUE_MAX_SOURCES`, `RESCUE_NODE_MAX_CONCURRENT`. Rescue needs the shared
 token and a controller service account allowed to list pods. See

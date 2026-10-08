@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.8.10
+
+### Changed
+
+- **Spread has no cluster-wide cap on peer transfers.** Until now at most
+  `PROPAGATE_MAX_CONCURRENT` (8) blobs moved between nodes at once across
+  the whole cluster, so once a layer had more holders than that, most of
+  them sat idle. The per-node slots are now the only limit: each node
+  receives one blob from a peer at a time and serves
+  `PROPAGATE_PER_SOURCE` at once. Per-node CPU, disk and network load and
+  registry traffic are unchanged; transfers in flight grow with the
+  holders. `PROPAGATE_MAX_CONCURRENT` keeps applying to the whole-image
+  fallback.
+- **Reports follow containerd's events.** Workers subscribe to containerd's
+  image and content events, so any pull or removal (kubelet's own pulls
+  included, which Angry Duck doesn't make) reaches the controller in about
+  a second instead of at the next 60-second layer scan. Bursts settle into
+  one report. While the stream is up, layer scans only resync every
+  `LAYER_RESYNC_INTERVAL_S` (600); while it is down, they run every
+  `LAYER_SCAN_INTERVAL_S` as before. One idle gRPC stream per node.
+  `INVENTORY_EVENTS_ENABLED=false` turns it off.
+- **Rescue watches Pending pods instead of listing them every 15 seconds.**
+  A pod stuck pulling is seen as kubelet reports it. The watch resumes where
+  it stopped; a full list happens only when the API server no longer has
+  that version, after an error, or every `RESCUE_RESYNC_INTERVAL_S` (600).
+  The controller's ClusterRole needs `watch` on pods (added to the manifests
+  and chart); with only `list`, it lists every `RESCUE_INTERVAL_S` as
+  before.
+- **Mirror lookups find every holder.** `/layers/holders` returns every
+  fresh node holding the blob (it stopped at 3), plus nodes a running spread
+  just delivered it to, ahead of their next report. The mirror tries them
+  all before answering `404`, doesn't cache an empty answer, and forgets a
+  list once none of its holders could serve. A `404` now means no node the
+  controller knows of, about a second ago, could serve the blob.
+- **Blobs are served with their length, by sendfile.** `/spread/content`
+  and the node mirror sent blobs chunked and copied them through
+  userspace (32 KiB writes). They now set `Content-Length` and hand the
+  blob file to the kernel: a 64 MB blob goes out in a few dozen `sendfile`
+  calls instead of thousands of writes. A peer's size check, skipped on
+  chunked replies, applies again, and a `HEAD` answers with the size.
+
+### Repository
+
+- Plain manifests moved from `deploy/stg/` to `k8s/`; the `mgmt` example is
+  gone. The Grafana dashboard moved from `deploy/grafana/` to `grafana/`.
+- The manifests use the published images,
+  `ghcr.io/hatam-abolghasemi/angry-duck-{controller,worker}:1.8.10`.
+
+### Fixed
+
+- **The mirror falls through when it can't read a blob it holds.** Reading
+  a local blob could fail after the node said it had it (a stale content
+  listing, a blob removed meanwhile). The mirror then answered an empty
+  `200`, which containerd took as the content: the pull failed with a short
+  read, and neither the registry nor another holder was tried. The peer
+  endpoint did the same, so the asking node forwarded the empty body to its
+  own containerd instead of trying its next holder. Now both treat it as a
+  miss: the next holder, then a `404`, the only answer on which containerd
+  moves on to the registry. Checked end to end with containerd 2.2.1:
+  every case that failed before pulls, from the next peer when there is
+  one, and pulls through a healthy mirror are unchanged. Logged as before;
+  counted by where the request ended up (`peer` or `miss`) instead of
+  `error`.
+
 ## 1.8.9
 
 ### Fixed

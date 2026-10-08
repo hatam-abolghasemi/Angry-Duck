@@ -39,9 +39,21 @@ For each request, the mirror:
 
 1. serves it from the node's own content store, if present, reading the
    blob file directly (see [`CONTAINERD_ROOT`](configuration.md#worker));
-2. otherwise streams it from a peer that the controller's layer index says
-   holds it (`GET /layers/holders`);
+2. otherwise streams it from a peer that holds it, trying every holder the
+   controller knows (`GET /layers/holders`): those its layer index lists,
+   then those a running spread just delivered the blob to. Workers report
+   pulls and removals from containerd's events, so the index is about a
+   second behind. A holder that can't serve it answers `404`, and the next
+   one is tried;
 3. otherwise answers `404`, and containerd pulls from the registry as usual.
+   So a `404` means no node the controller knows of could serve the blob.
+   An empty answer from the controller isn't cached, so a blob that lands on
+   a peer a moment later is found on the next request.
+
+A node that holds a layer only as an unpacked snapshot can't serve it here:
+containerd checks the blob's digest, and a snapshot never rebuilds the same
+bytes. If the registry fails too, [rescue](rescue.md) takes over, snapshots
+included.
 
 containerd verifies every digest, so a peer can't slip in different content.
 

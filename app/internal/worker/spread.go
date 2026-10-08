@@ -77,7 +77,7 @@ type SpreadStore interface {
 	DeleteLease(ctx context.Context, id string) error
 	Import(ctx context.Context, r io.Reader, platform string) error
 	Resolve(ctx context.Context, image string) (mediaType, digest string, err error)
-	StreamContent(ctx context.Context, dgst string, w io.Writer) error
+	OpenContent(ctx context.Context, dgst string) (io.ReadCloser, int64, error)
 }
 
 // BlobOpener streams one blob of an image's repository from its registry.
@@ -421,20 +421,25 @@ func (s *Spread) HandleContent(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	body, size, err := s.store.OpenContent(r.Context(), dgst)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer body.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Docker-Content-Digest", dgst)
 	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		return
 	}
-	cw := &countWriter{w: w}
-	err := s.store.StreamContent(r.Context(), dgst, cw)
-	spreadBytesTotal.Add(cw.n, s.nodeID, "served")
+	n, err := serveBody(w, body, size)
+	spreadBytesTotal.Add(n, s.nodeID, "served")
 	if err != nil {
-		logging.Warnf("angryduck-worker[%s]: spread: serving %s to %s failed after %d bytes: %v", s.nodeID, dgst, r.RemoteAddr, cw.n, err)
-		if cw.n > 0 {
-			panic(http.ErrAbortHandler) // cut it: the receiver must see a short read
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		logging.Warnf("angryduck-worker[%s]: spread: serving %s to %s failed after %d bytes: %v", s.nodeID, dgst, r.RemoteAddr, n, err)
+		// Cut the connection: with Content-Length promised, the receiver
+		// sees a short read rather than an error page.
+		panic(http.ErrAbortHandler)
 	}
 }
 

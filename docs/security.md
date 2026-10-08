@@ -77,8 +77,8 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 
 ## Kubernetes permissions
 
-- **Controller**: can list pods cluster-wide, to find stuck pulls, and nothing
-  else. It mounts the registry pull secret to read manifests.
+- **Controller**: can list and watch pods cluster-wide, to find stuck pulls,
+  and nothing else. It mounts the registry pull secret to read manifests.
 - **Worker**: `get` on its own DaemonSet and nothing else, used on shutdown
   to tell an uninstall from a rollout. It writes `hosts.toml` files under
   containerd's config directory and deletes images on its node.

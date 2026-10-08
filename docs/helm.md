@@ -120,7 +120,7 @@ controller logs a warning at startup.
 `serviceMonitor.enabled: true` adds ServiceMonitors for the controller and
 the workers. Add the labels your Prometheus selects ServiceMonitors by in
 `serviceMonitor.labels`. Import the dashboard from
-`deploy/grafana/angryduck-dashboard.json`; see
+`grafana/angryduck-dashboard.json`; see
 [Observability](observability.md).
 
 ## Values

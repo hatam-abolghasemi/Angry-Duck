@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -68,9 +69,14 @@ func TestDirectBlobReads(t *testing.T) {
 	if _, err := s.ReadBlob(ctx, digest, 10); err == nil {
 		t.Fatal("ReadBlob ignored max")
 	}
-	cw := &countWriter{w: &bytes.Buffer{}}
-	if err := s.StreamContent(ctx, digest, cw); err != nil || cw.n != int64(len(data)) {
-		t.Fatalf("StreamContent: %v, %d bytes", err, cw.n)
+	rc, size, err := s.OpenContent(ctx, digest)
+	if err != nil || size != int64(len(data)) {
+		t.Fatalf("OpenContent: %v, size %d", err, size)
+	}
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("OpenContent read: %v, %d bytes", err, len(got))
 	}
 	// Not on disk: would go through the content API.
 	missing := "sha256:" + hex.EncodeToString(make([]byte, 32))

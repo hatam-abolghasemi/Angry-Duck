@@ -72,8 +72,9 @@ type RescuerConfig struct {
 // serve the image to that node (a broken route, a firewall rule, an image
 // deleted upstream) but the image is sitting on other nodes.
 //
-// Each tick it lists Pending pods, groups stuck containers by (node,
-// image), and for each one sends the node's worker a RescueOrder naming a
+// Each tick it reads the Pending pods (watched, see kube.PodWatch), groups
+// stuck containers by (node, image), and for each one sends the node's
+// worker a RescueOrder naming a
 // few fresh workers that reported the exact image. The worker does the
 // transfer (see internal/worker/rescue.go). Nothing here restarts pods:
 // kubelet's own backoff retry (at most 5 minutes) finds the image locally.
@@ -113,6 +114,10 @@ func (rs *Rescuer) SetLayerResolver(r LayerResolver, platform string) {
 }
 
 // Waiting returns, per image, the nodes where a Pending pod needs it.
+// Wake runs a check now (settled), instead of at the next tick: the pod
+// watch calls it on every change.
+func (rs *Rescuer) Wake() { rs.wakeup.wake() }
+
 func (rs *Rescuer) Waiting() map[string]map[string]bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()

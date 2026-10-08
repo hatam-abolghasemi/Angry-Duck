@@ -1,5 +1,5 @@
 // Package kube is the smallest Kubernetes API client Angry Duck needs:
-// the controller lists pods with a field selector, and a worker checks on
+// the controller lists and watches pods with a field selector, and a worker checks on
 // shutdown whether its DaemonSet is being deleted. It is written
 // against net/http directly to keep Angry Duck free of client-go.
 package kube
@@ -62,8 +62,9 @@ func New(baseURL, tokenPath string, hc *http.Client) *Client {
 // Pod is the part of a pod object the rescuer reads.
 type Pod struct {
 	Metadata struct {
-		Namespace string `json:"namespace"`
-		Name      string `json:"name"`
+		Namespace       string `json:"namespace"`
+		Name            string `json:"name"`
+		ResourceVersion string `json:"resourceVersion"`
 	} `json:"metadata"`
 	Spec struct {
 		NodeName       string      `json:"nodeName"`
@@ -97,15 +98,23 @@ type ContainerStatus struct {
 type podList struct {
 	Items    []Pod `json:"items"`
 	Metadata struct {
-		Continue string `json:"continue"`
+		Continue        string `json:"continue"`
+		ResourceVersion string `json:"resourceVersion"`
 	} `json:"metadata"`
 }
 
 // ListPods lists pods in every namespace matching fieldSelector, following
 // pagination.
 func (c *Client) ListPods(ctx context.Context, fieldSelector string) ([]Pod, error) {
+	pods, _, err := c.listPods(ctx, fieldSelector)
+	return pods, err
+}
+
+// listPods also returns the list's resourceVersion, where a watch resumes.
+// Every page of a paginated list is served at the first page's version.
+func (c *Client) listPods(ctx context.Context, fieldSelector string) ([]Pod, string, error) {
 	var all []Pod
-	cont := ""
+	cont, rv := "", ""
 	for {
 		q := url.Values{}
 		q.Set("fieldSelector", fieldSelector)
@@ -115,41 +124,55 @@ func (c *Client) ListPods(ctx context.Context, fieldSelector string) ([]Pod, err
 		}
 		var page podList
 		if err := c.get(ctx, "/api/v1/pods?"+q.Encode(), &page); err != nil {
-			return nil, err
+			return nil, "", err
+		}
+		if rv == "" {
+			rv = page.Metadata.ResourceVersion
 		}
 		all = append(all, page.Items...)
 		if page.Metadata.Continue == "" {
-			return all, nil
+			return all, rv, nil
 		}
 		cont = page.Metadata.Continue
 	}
 }
 
 func (c *Client) get(ctx context.Context, path string, into interface{}) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	resp, err := c.open(ctx, c.http, path)
 	if err != nil {
 		return err
+	}
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(into)
+}
+
+// open sends an authenticated GET and returns the 200 response; any other
+// status is a *StatusError.
+func (c *Client) open(ctx context.Context, hc *http.Client, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
 	}
 	// Re-read every call: projected service account tokens are rotated by
 	// kubelet (hourly by default), and a cached one would start failing.
 	if c.tokenPath != "" {
 		tok, err := os.ReadFile(c.tokenPath)
 		if err != nil {
-			return fmt.Errorf("reading service account token: %w", err)
+			return nil, fmt.Errorf("reading service account token: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return &StatusError{Code: resp.StatusCode, msg: fmt.Sprintf("GET %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(b)))}
+		resp.Body.Close()
+		return nil, &StatusError{Code: resp.StatusCode, msg: fmt.Sprintf("GET %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(b)))}
 	}
-	return json.NewDecoder(resp.Body).Decode(into)
+	return resp, nil
 }
 
 // StatusError is a non-200 answer from the API server.

@@ -2,6 +2,7 @@ package blobship
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -245,16 +246,15 @@ func (m *MemStore) StreamBlob(_ context.Context, digest string, size int64, w io
 	return nil
 }
 
-// StreamContent writes a whole blob to w.
-func (m *MemStore) StreamContent(_ context.Context, digest string, w io.Writer) error {
+// OpenContent opens a whole blob, with its size.
+func (m *MemStore) OpenContent(_ context.Context, digest string) (io.ReadCloser, int64, error) {
 	m.mu.Lock()
 	b, ok := m.blobs[digest]
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("blob %s not found", digest)
+		return nil, 0, fmt.Errorf("blob %s not found", digest)
 	}
-	_, err := w.Write(b)
-	return err
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
 
 // Digests implements Store.

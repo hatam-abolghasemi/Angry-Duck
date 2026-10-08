@@ -56,7 +56,6 @@ How pushed images reach every node blob by blob. See
 | `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller frees a slot nobody reported on a minute after. |
 
 Spread also uses `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
-`PROPAGATE_MAX_CONCURRENT` (peer transfers cluster-wide),
 `PROPAGATE_PER_SOURCE`, `PROPAGATE_MAX_UTILIZATION` and
 `PROPAGATE_EXCLUDE_NODE_SUBSTRINGS` below.
 
@@ -70,8 +69,8 @@ The whole-image fallback, and the limits spread shares.
 | `PROPAGATE_ENABLED` | `true` | Spread pushed images to every eligible node. |
 | `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. A finished transfer also advances them, after about a second. |
 | `PROPAGATE_WINDOW_S` | `0` | How long to keep spreading a push. `0` means until done or superseded. |
-| `PROPAGATE_MAX_CONCURRENT` | `8` | Transfers in flight cluster-wide. |
-| `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node. |
+| `PROPAGATE_MAX_CONCURRENT` | `8` | Whole-image transfers in flight cluster-wide. Spread has no cluster-wide cap. |
+| `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node, spread included. |
 | `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this wait for cleanup. |
 | `PROPAGATE_SEED_TIMEOUT_MIN_S` | `120` | Lower bound before a slow seed is cancelled. |
 | `PROPAGATE_SEED_TIMEOUT_MAX_S` | `600` | Timeout while no seed has finished. |
@@ -83,7 +82,8 @@ The whole-image fallback, and the limits spread shares.
 | Variable | Default | Runs on | Description |
 |---|---|---|---|
 | `RESCUE_ENABLED` | `true` | both | Rescue pods stuck on pulls. |
-| `RESCUE_INTERVAL_S` | `15` | controller | How often Pending pods are listed. |
+| `RESCUE_INTERVAL_S` | `15` | controller | How often backoffs are re-checked (in memory). Pending pods are watched; without `watch` permission they are listed this often instead. |
+| `RESCUE_RESYNC_INTERVAL_S` | `600` | controller | Full relist of Pending pods behind the watch, as a safety net. |
 | `RESCUE_RETRY_AFTER_S` | `120` | controller | First retry delay; doubles after each failure. |
 | `RESCUE_BACKOFF_MAX_S` | `3600` | controller | Cap for the retry delay. |
 | `RESCUE_TIMEOUT_S` | `600` | controller | How long to wait for one rescue. |
@@ -113,7 +113,9 @@ The whole-image fallback, and the limits spread shares.
 | `CONTAINERD_ROOT` | from `/etc/containerd/config.toml`, else `/var/lib/containerd` | containerd's root directory, as mounted into the worker. Blobs are read directly from its content store when mounted, otherwise through containerd's content API. |
 | `HOST_ROOT` | *(empty)* | Prefix for the node paths the worker mounts (state dir, containerd's config and `certs.d`). The manifests mount them at the same paths. Not a chroot. |
 | `LAYER_INVENTORY_ENABLED` | `true` | Report layer blobs and snapshot chainIDs to the controller. |
-| `LAYER_SCAN_INTERVAL_S` | `60` | Minimum time between layer scans. A pull or transfer triggers one at once. |
+| `LAYER_SCAN_INTERVAL_S` | `60` | Time between layer scans while containerd's event stream is down (or `INVENTORY_EVENTS_ENABLED=false`). A transfer triggers one at once. |
+| `INVENTORY_EVENTS_ENABLED` | `true` | Follow containerd's events (images created, updated or deleted, content deleted): any pull or removal, kubelet's included, reaches the controller in about a second. |
+| `LAYER_RESYNC_INTERVAL_S` | `600` | Time between layer scans while the event stream is up: a safety net only. |
 | `PREHEAT_ATTRIBUTION_INTERVAL_S` | `300` | How often running containers from preheated repos are sampled. `0` disables it. |
 | `PREHEAT_ATTRIBUTION_RETENTION_S` | `360` | How long after a preheat its repo still counts. |
 

@@ -117,15 +117,14 @@ func (f *fakeSpreadStore) Resolve(_ context.Context, image string) (string, stri
 	}
 	return "", d, nil
 }
-func (f *fakeSpreadStore) StreamContent(_ context.Context, d string, w io.Writer) error {
+func (f *fakeSpreadStore) OpenContent(_ context.Context, d string) (io.ReadCloser, int64, error) {
 	f.mu.Lock()
 	b, ok := f.blobs[d]
 	f.mu.Unlock()
 	if !ok {
-		return errors.New("not found")
+		return nil, 0, errors.New("not found")
 	}
-	_, err := w.Write(b)
-	return err
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
 func (f *fakeSpreadStore) leaseCount() int {
 	f.mu.Lock()
@@ -426,5 +425,31 @@ func TestSpreadContentServesOnlyWhatIsHere(t *testing.T) {
 	}
 	if resp := get("sha256:../../etc/passwd"); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad digest: status %d", resp.StatusCode)
+	}
+}
+
+// Blobs are served with their length, never chunked, so the receiver can
+// check the size up front and the body can leave by sendfile.
+func TestSpreadServesContentWithItsLength(t *testing.T) {
+	blob := []byte(strings.Repeat("layer", 5000))
+	d := digestOf(blob)
+	store, ctl := newFakeSpreadStore(), newControllerSink(t)
+	store.blobs[d] = blob
+	_, srv := newTestSpread(t, store, &fakeRegistry{}, ctl, "n1")
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		req, _ := http.NewRequest(method, srv.URL+"/spread/content/"+d, nil)
+		req.Header.Set("Authorization", "Bearer "+spreadToken)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.ContentLength != int64(len(blob)) || len(resp.TransferEncoding) > 0 {
+			t.Fatalf("%s: status %d length %d encoding %v, want 200 with length %d", method, resp.StatusCode, resp.ContentLength, resp.TransferEncoding, len(blob))
+		}
+		if method == http.MethodGet && !bytes.Equal(body, blob) {
+			t.Fatalf("GET body differs: %d bytes", len(body))
+		}
 	}
 }

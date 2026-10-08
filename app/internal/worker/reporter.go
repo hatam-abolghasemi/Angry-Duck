@@ -101,9 +101,10 @@ func (rp *Reporter) Run(ctx context.Context) {
 // inventoryMaxAge is how old an image listing a regular report may reuse.
 // Reports go out every REPORT_INTERVAL_S for liveness and disk usage, but
 // the image set rarely changes between them, and every change this worker
-// makes (a pull, a transfer) kicks a report with a fresh listing. Pulls by
-// kubelet show up within a minute, which is well inside what ranking and
-// rescue need.
+// makes (a pull, a transfer) kicks a report with a fresh listing, and so
+// does every pull or removal containerd announces (InventoryWatch),
+// kubelet's included. Without that stream, kubelet's pulls show up within
+// a minute.
 func inventoryMaxAge(interval time.Duration) time.Duration {
 	if m := interval / 2; m > time.Minute {
 		return m

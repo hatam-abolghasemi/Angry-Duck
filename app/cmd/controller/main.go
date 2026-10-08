@@ -105,12 +105,13 @@ func main() {
 		server.SetToken(token)
 		ranker.SetToken(token)
 		log.Printf("angryduck-controller: /report requires the shared token (AUTH_MODE=%s)", authMode)
-		rescuer := newRescuer(registry, token)
+		rescuer, pods := newRescuer(registry, token)
 		if rescuer != nil {
 			if resolver != nil {
 				rescuer.SetLayerResolver(resolver, platform)
 			}
 			server.SetRescuer(rescuer)
+			go pods.Run(ctx)
 			go rescuer.Run(ctx)
 		}
 		if propagator := newPropagator(registry, token, excludeNodeSubstrings, platform); propagator != nil {
@@ -164,15 +165,15 @@ func main() {
 // with a log line saying why. Rescue is on by default but needs two things
 // the base install didn't: a service account allowed to list pods, and the
 // shared token the workers check.
-func newRescuer(registry *controller.Registry, token string) *controller.Rescuer {
+func newRescuer(registry *controller.Registry, token string) (*controller.Rescuer, *kube.PodWatch) {
 	if !config.Bool("RESCUE_ENABLED", true) {
 		log.Println("angryduck-controller: rescue disabled (RESCUE_ENABLED=false)")
-		return nil
+		return nil, nil
 	}
-	pods, err := kube.InCluster()
+	api, err := kube.InCluster()
 	if err != nil {
 		log.Printf("angryduck-controller: WARNING: rescue disabled, no Kubernetes API access: %v", err)
-		return nil
+		return nil, nil
 	}
 	cfg := controller.RescuerConfig{
 		Interval:      config.Duration("RESCUE_INTERVAL_S", 15),
@@ -182,7 +183,17 @@ func newRescuer(registry *controller.Registry, token string) *controller.Rescuer
 		MaxConcurrent: config.Int("RESCUE_MAX_CONCURRENT", 2),
 		MaxSources:    config.Int("RESCUE_MAX_SOURCES", 3),
 	}
-	return controller.NewRescuer(registry, pods, token, cfg)
+	// Pending pods are watched, so a pod stuck pulling is seen as kubelet
+	// reports it; the tick only re-checks backoffs in memory.
+	var rescuer *controller.Rescuer
+	pods := kube.NewPodWatch(api, "status.phase=Pending", config.Duration("RESCUE_RESYNC_INTERVAL_S", 600), cfg.Interval,
+		func() {
+			if rescuer != nil {
+				rescuer.Wake()
+			}
+		})
+	rescuer = controller.NewRescuer(registry, pods, token, cfg)
+	return rescuer, pods
 }
 
 // newPropagator sets up spreading each pushed image to every eligible node
@@ -230,7 +241,6 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		Interval:       config.Duration("PROPAGATE_INTERVAL_S", 10),
 		MaxRegistry:    config.Int("SPREAD_MAX_REGISTRY_PULLS", topN),
 		RacePerBlob:    config.Int("SPREAD_RACE_PER_BLOB", 2),
-		MaxPeer:        config.Int("PROPAGATE_MAX_CONCURRENT", 8),
 		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 1),
 		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
 		Exclude:        config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),

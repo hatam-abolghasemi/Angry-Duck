@@ -141,10 +141,30 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var tracker *worker.LayerTracker
 	if store != nil && config.Bool("LAYER_INVENTORY_ENABLED", true) {
 		interval := config.Duration("LAYER_SCAN_INTERVAL_S", 60)
 		log.Printf("angryduck-worker[%s]: layer inventory enabled: scan_interval=%s", nodeID, interval)
-		reporter.SetLayerTracker(worker.NewLayerTracker(store, nodeID, interval))
+		tracker = worker.NewLayerTracker(store, nodeID, interval)
+		reporter.SetLayerTracker(tracker)
+	}
+	if store != nil && config.Bool("INVENTORY_EVENTS_ENABLED", true) {
+		// containerd's events report pulls and removals as they happen;
+		// periodic scans then only resync.
+		scan := config.Duration("LAYER_SCAN_INTERVAL_S", 60)
+		resync := config.Duration("LAYER_RESYNC_INTERVAL_S", 600)
+		live := func(on bool) {
+			if tracker == nil {
+				return
+			}
+			if on {
+				tracker.SetInterval(resync)
+			} else {
+				tracker.SetInterval(scan)
+			}
+		}
+		log.Printf("angryduck-worker[%s]: inventory follows containerd events (namespace=%s): resync=%s, scans every %s while the stream is down", nodeID, namespace, resync, scan)
+		go worker.NewInventoryWatch(client, namespace, nodeID, reporter.Kick, live).Run(ctx)
 	}
 	go metrics.TrackProcessMemory(ctx, "worker")
 	go memlimit.ReleaseWhenIdle(ctx, time.Minute, 1<<20)

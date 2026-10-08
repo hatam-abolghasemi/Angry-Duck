@@ -24,9 +24,8 @@ app/
     └── model/             wire types shared by both binaries
 charts/
 └── angryduck/             Helm chart
-deploy/
-├── stg/, mgmt/            example Kubernetes manifests per environment
-└── grafana/               Grafana dashboard
+k8s/                       example Kubernetes manifests
+grafana/                   Grafana dashboard
 docs/                      documentation
 ```
 
@@ -103,4 +102,4 @@ containerd and node-exporter.
 
 The Grafana dashboard is plain JSON. Import it, edit it in Grafana, then export
 it with **Share → Export → Save to file** with *Export for sharing externally*
-enabled, and replace `deploy/grafana/angryduck-dashboard.json`.
+enabled, and replace `grafana/angryduck-dashboard.json`.

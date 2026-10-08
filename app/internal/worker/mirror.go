@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,7 +46,7 @@ var (
 type MirrorStore interface {
 	Digests(ctx context.Context) (map[string]bool, error)
 	ReadBlob(ctx context.Context, digest string, max int64) ([]byte, error)
-	StreamContent(ctx context.Context, digest string, w io.Writer) error
+	OpenContent(ctx context.Context, digest string) (io.ReadCloser, int64, error)
 }
 
 // Mirror is a pull-only OCI registry mirror for this node's containerd,
@@ -170,14 +171,16 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 	kindLabel := strings.TrimSuffix(kind, "s")
 	if m.hasLocal(r.Context(), digest) {
 		n, err := m.serveLocal(w, r, kind, digest)
-		if err != nil {
-			mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "error")
-			logging.Warnf("angryduck-worker[%s]: mirror: serving %s %s locally: %v", m.nodeID, kindLabel, digest, err)
+		if err == nil {
+			mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "local")
+			mirrorBytesTotal.Add(n, m.nodeID, "local")
 			return
 		}
-		mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "local")
-		mirrorBytesTotal.Add(n, m.nodeID, "local")
-		return
+		// Nothing was sent (serveLocal cuts the connection otherwise): go on
+		// as if the node didn't have it, to the peers and then a 404, the
+		// only answer that sends containerd on to the next host.
+		logging.Warnf("angryduck-worker[%s]: mirror: serving %s %s locally: %v", m.nodeID, kindLabel, digest, err)
+		clearBlobHeaders(w)
 	}
 	for _, h := range m.lookup(r.Context(), digest) {
 		n, served, err := m.fromPeer(w, r, h, kind, digest)
@@ -195,6 +198,7 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 			logging.Debugf("angryduck-worker[%s]: mirror: node=%s couldn't serve %s: %v", m.nodeID, h.NodeID, digest, err)
 		}
 	}
+	m.forget(digest)
 	mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "miss")
 	http.NotFound(w, r)
 }
@@ -215,16 +219,34 @@ func (m *Mirror) serveLocal(w http.ResponseWriter, r *http.Request, kind, digest
 		n, err := w.Write(b)
 		return int64(n), err
 	}
+	body, size, err := m.store.OpenContent(r.Context(), digest)
+	if err != nil {
+		return 0, err
+	}
+	defer body.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		return 0, nil
 	}
-	cw := &countWriter{w: w}
-	err := m.store.StreamContent(r.Context(), digest, cw)
-	if err != nil && cw.n > 0 {
+	n, err := serveBody(w, body, size)
+	if err != nil {
 		panic(http.ErrAbortHandler) // cut the stream so containerd sees a short read
 	}
-	return cw.n, err
+	return n, nil
+}
+
+// clearBlobHeaders drops what serveLocal set before it failed.
+func clearBlobHeaders(w http.ResponseWriter) {
+	for _, h := range []string{"Content-Length", "Content-Type", "Docker-Content-Digest"} {
+		w.Header().Del(h)
+	}
+}
+
+// missLocal answers 404 after serveLocal failed without sending anything.
+func missLocal(w http.ResponseWriter, r *http.Request) {
+	clearBlobHeaders(w)
+	http.NotFound(w, r)
 }
 
 // manifestMediaType reads mediaType from a manifest, or infers it.
@@ -274,9 +296,21 @@ func (m *Mirror) lookup(ctx context.Context, digest string) []model.Holder {
 			delete(m.holders, d)
 		}
 	}
-	m.holders[digest] = holderEntry{list: list, at: time.Now()}
+	// Only a list worth reusing is kept: an empty answer (or none, the
+	// controller unreachable) is asked again next time, so a blob that
+	// lands on a peer a moment later is found.
+	if len(list) > 0 {
+		m.holders[digest] = holderEntry{list: list, at: time.Now()}
+	}
 	m.mu.Unlock()
 	return list
+}
+
+// forget drops digest's cached holders once none of them could serve it.
+func (m *Mirror) forget(digest string) {
+	m.mu.Lock()
+	delete(m.holders, digest)
+	m.mu.Unlock()
 }
 
 // fromPeer streams digest from h. served is true once a response started
@@ -332,6 +366,10 @@ func (m *Mirror) RegisterPeer(mux *http.ServeMux) {
 		mirrorServedTotal.Add(n, m.nodeID)
 		if err != nil {
 			logging.Warnf("angryduck-worker[%s]: mirror: serving %s to %s: %v", m.nodeID, digest, r.RemoteAddr, err)
+			// Nothing was sent: a 404, so the asking mirror tries its next
+			// holder. An empty 200 would count as served there and reach
+			// containerd as a zero-byte blob.
+			missLocal(w, r)
 		}
 	}))
 }

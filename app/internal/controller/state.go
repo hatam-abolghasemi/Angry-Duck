@@ -309,9 +309,10 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 	return status
 }
 
-// Holders returns up to max fresh workers (least full first) whose layer
-// inventory holds blob digest, leaving out exclude.
-func (r *Registry) Holders(digest, exclude string, max int) []model.Holder {
+// Holders returns every fresh worker (least full first) whose layer
+// inventory holds blob digest, then those in also that it doesn't list
+// yet, leaving out exclude.
+func (r *Registry) Holders(digest, exclude string, also []string) []model.Holder {
 	fresh := r.FreshWorkers()
 	ids := make([]string, 0, len(fresh))
 	addr := make(map[string]string, len(fresh))
@@ -322,10 +323,17 @@ func (r *Registry) Holders(digest, exclude string, max int) []model.Holder {
 		}
 	}
 	var out []model.Holder
+	seen := map[string]bool{}
 	for _, n := range r.layers.Holders(digest, ids) {
 		out = append(out, model.Holder{NodeID: n, Address: addr[n]})
-		if len(out) == max {
-			break
+		seen[n] = true
+	}
+	// Nodes known to hold it ahead of their next inventory (a blob that
+	// just landed in a spread), if they are fresh and not excluded.
+	for _, n := range also {
+		if a, ok := addr[n]; ok && !seen[n] {
+			out = append(out, model.Holder{NodeID: n, Address: a})
+			seen[n] = true
 		}
 	}
 	return out

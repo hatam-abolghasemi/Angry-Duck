@@ -23,14 +23,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/namespaces"
 	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sys/unix"
 
 	"angryduck/internal/blobship"
@@ -721,5 +724,55 @@ func TestContainerd_DialOptionsConnectAndCount(t *testing.T) {
 	buf := rec.Body
 	if !strings.Contains(buf.String(), `node="dial-test",method="Version/Version"`) {
 		t.Fatalf("call not counted:\n%s", buf.String())
+	}
+}
+
+// containerd's own events drive the inventory: creating and deleting an
+// image each reach the reporter within the settle time.
+func TestContainerd_InventoryFollowsEvents(t *testing.T) {
+	client, err := containerd.New(os.Getenv("ANGRYDUCK_CONTAINERD"))
+	if err != nil {
+		t.Skip(err)
+	}
+	defer client.Close()
+	ns := "angryduck-events-test"
+	var changed atomic.Int32
+	w := NewInventoryWatch(client, ns, "n1", func() { changed.Add(1) }, func(bool) {})
+	w.settle = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	time.Sleep(200 * time.Millisecond) // subscribed
+	nctx := namespaces.WithNamespace(context.Background(), ns)
+	img := images.Image{Name: "example.com/events:1", Target: ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest, Digest: digest.FromString("events"), Size: 6}}
+	if _, err := client.ImageService().Create(nctx, img); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for changed.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if changed.Load() != 1 {
+		t.Fatalf("image create: %d reports, want 1", changed.Load())
+	}
+	if err := client.ImageService().Delete(nctx, img.Name); err != nil {
+		t.Fatal(err)
+	}
+	for changed.Load() < 2 && time.Now().Before(deadline.Add(3*time.Second)) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if changed.Load() != 2 {
+		t.Fatalf("image delete: %d reports, want 2", changed.Load())
+	}
+	// Another namespace's events are not ours.
+	other := namespaces.WithNamespace(context.Background(), ns+"-other")
+	img.Name = "example.com/events:2"
+	if _, err := client.ImageService().Create(other, img); err == nil {
+		defer client.ImageService().Delete(other, img.Name)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if changed.Load() != 2 {
+		t.Fatalf("an event from another namespace was reported (%d)", changed.Load())
 	}
 }

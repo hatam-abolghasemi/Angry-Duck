@@ -28,18 +28,17 @@ and monitoring. See [Helm](helm.md).
 
 ## Deploy with plain manifests
 
-`deploy/stg` and `deploy/mgmt` are two example environments that differ only
-in labels and the ingress host. Copy one and adapt it to your cluster. The
-steps below use `stg`.
+`k8s/` holds example manifests, as run on a staging cluster. Copy them and
+adapt them to your cluster.
 
 ### 1. Get the images
 
 Every release publishes both images to GitHub Container Registry, tagged with
-the version (`1.8.9`) and `latest`:
+the version (`1.8.10`) and `latest`:
 
 ```text
-ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.9
-ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.9
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.10
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.10
 ```
 
 They are public, so kubelet needs no `imagePullSecrets` for them. If you use
@@ -51,10 +50,10 @@ To build and push your own instead:
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.8.9 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.8.9 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.8.9
-docker push $REGISTRY/angry-duck-worker:1.8.9
+docker build -t $REGISTRY/angry-duck-controller:1.8.10 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.8.10 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.8.10
+docker push $REGISTRY/angry-duck-worker:1.8.10
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and
@@ -70,7 +69,7 @@ Set the `image:` fields in `deployment-controller.yaml` and
 | `angryduck-webhook-token` | controller, mounted as a file | CI's token for the webhook. Without it, the webhook is unauthenticated. |
 
 ```bash
-kubectl apply -f deploy/stg/namespace.yaml
+kubectl apply -f k8s/namespace.yaml
 
 kubectl -n angryduck create secret docker-registry gitlab-docker-registry \
   --docker-server=registry.example.com --docker-username=<user> --docker-password=<password>
@@ -91,7 +90,7 @@ listing all of them.
 
 ### 3. Review the configuration
 
-Edit `deploy/stg/configmap-env.yaml`. The values most worth checking:
+Edit `k8s/configmap-env.yaml`. The values most worth checking:
 
 | Setting | Why |
 |---|---|
@@ -108,7 +107,7 @@ All settings are described in [Configuration](configuration.md).
 Delete `servicemonitor-*.yaml` first if you don't run the Prometheus Operator.
 
 ```bash
-kubectl apply -f deploy/stg/
+kubectl apply -f k8s/
 ```
 
 ### 5. Verify

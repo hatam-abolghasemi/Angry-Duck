@@ -68,6 +68,15 @@ func NewLayerTracker(lister LayerLister, nodeID string, interval time.Duration) 
 	}
 }
 
+// SetInterval changes the time between periodic scans: a slow resync while
+// containerd's events drive the reports, the regular interval while they
+// don't.
+func (t *LayerTracker) SetInterval(d time.Duration) {
+	t.mu.Lock()
+	t.interval = d
+	t.mu.Unlock()
+}
+
 // scan refreshes the current inventory if it's due. Caller holds mu.
 func (t *LayerTracker) scan(ctx context.Context, force bool) {
 	if !force && t.curBlobs != nil && time.Since(t.lastScan) < t.interval {

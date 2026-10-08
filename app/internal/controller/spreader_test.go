@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,7 +102,7 @@ func (f *spreadFleet) take() []fetchRec {
 
 func testSpreader(reg *Registry, perSource int) *Spreader {
 	return NewSpreader(reg, fakeImageResolver{testResolved()}, rescueToken, SpreaderConfig{
-		Interval: time.Hour, MaxRegistry: 5, RacePerBlob: 2, MaxPeer: 10, PerSource: perSource, MaxUtilization: 0.7,
+		Interval: time.Hour, MaxRegistry: 5, RacePerBlob: 2, PerSource: perSource, MaxUtilization: 0.7,
 		Exclude: []string{"master"}, RetryAfter: time.Minute, BackoffMax: time.Hour, TransferTimeout: time.Hour,
 		ResolveTimeout: time.Second, Platform: "linux/amd64",
 	})
@@ -427,5 +428,46 @@ func TestSpreader_KeepsRetryingTheRegistryWhenNoNodeHasTheWholeImage(t *testing.
 	}
 	if !retried {
 		t.Fatal("no node has the whole image to fall back on: the registry must be retried, not given up on")
+	}
+}
+
+// No cluster-wide cap on east-west traffic: once a blob has a holder, every
+// node lacking it gets a peer transfer, limited only by the holders'
+// PerSource (until 1.8.9, PROPAGATE_MAX_CONCURRENT=8 capped the cluster).
+func TestSpreader_PeerTransfersLimitedOnlyPerNode(t *testing.T) {
+	f := &spreadFleet{busy: map[string]bool{}}
+	reg := NewRegistry(time.Hour, time.Minute)
+	var nodes []string
+	for i := 1; i <= 12; i++ {
+		n := fmt.Sprintf("w%02d", i)
+		nodes = append(nodes, n)
+		report(reg, n, f.worker(t, n), 0.2)
+	}
+	s := testSpreader(reg, 20)
+	if _, err := s.Start(context.Background(), img); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	var puller string
+	for _, r := range f.take() {
+		if r.Digest == dL1 {
+			puller = r.node
+			break
+		}
+	}
+	job := s.jobFor(img)
+	s.done(model.SpreadDone{Node: puller, Job: job.id, Digest: dL1, Path: model.SpreadPathRegistry, Result: model.SpreadResultOK, Bytes: 20 << 20})
+	s.tick(context.Background())
+	s.wg.Wait()
+	peers := byPath(f.take(), model.SpreadPathPeer)
+	if len(peers) != len(nodes)-1 {
+		t.Fatalf("%d peer orders, want %d: one per node lacking the blob, no cluster-wide cap", len(peers), len(nodes)-1)
+	}
+	seen := map[string]bool{}
+	for _, p := range peers {
+		if p.Digest != dL1 || p.Peer.NodeID != puller || p.node == puller || seen[p.node] {
+			t.Fatalf("bad peer order %+v", p)
+		}
+		seen[p.node] = true
 	}
 }

@@ -86,8 +86,7 @@ type SpreaderConfig struct {
 	Interval        time.Duration // safety tick; transfers ending drive it
 	MaxRegistry     int           // registry pulls in flight across the cluster
 	RacePerBlob     int           // registry pulls of one blob at once (a slow puller can be raced)
-	MaxPeer         int           // peer transfers in flight across the cluster
-	PerSource       int           // peer transfers one node serves at once
+	PerSource       int           // peer transfers one node serves at once (no cluster-wide cap)
 	MaxUtilization  float64       // nodes fuller than this get nothing new (0-1)
 	Exclude         []string      // node name substrings that never receive
 	RetryAfter      time.Duration // after a failure; doubles per failure
@@ -101,10 +100,12 @@ type SpreaderConfig struct {
 // Spreader spreads a pushed image to every eligible node blob by blob.
 //
 // Each node has two slots: one blob from the registry and one from a peer,
-// at a time. As soon as any node holds a blob, every node lacking it can
-// fetch it from that node; the registry is only used for blobs no node
-// has yet, by at most MaxRegistry nodes at once, so it serves each blob
-// about once. No node waits on another's pull: a node whose registry pull
+// at a time, and serves PerSource peers at once. These per-node slots are
+// the only limit on east-west traffic: there is no cluster-wide cap, so
+// every holder's link is used. As soon as any node holds a blob, every
+// node lacking it can fetch it from that node; the registry is only used
+// for blobs no node has yet, by at most MaxRegistry nodes at once, so it
+// serves each blob about once. No node waits on another's pull: a node whose registry pull
 // is slow can be raced by an idle one (RacePerBlob), and a node pulling a
 // blob from the registry still gets it pushed from a peer as soon as a
 // peer has it. Whichever path finishes first wins; the worker cancels the
@@ -177,9 +178,6 @@ func NewSpreader(registry *Registry, resolver ImageResolver, token string, cfg S
 	}
 	if cfg.RacePerBlob < 1 {
 		cfg.RacePerBlob = 1
-	}
-	if cfg.MaxPeer < 1 {
-		cfg.MaxPeer = 1
 	}
 	if cfg.PerSource < 1 {
 		cfg.PerSource = 1
@@ -284,8 +282,8 @@ func (s *Spreader) Run(ctx context.Context) {
 	s.mu.Unlock()
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
-	logging.Infof("angryduck-controller: spreader started: max_registry=%d race_per_blob=%d max_peer=%d per_source=%d max_utilization=%.2f transfer_timeout=%s window=%s exclude=%v",
-		s.cfg.MaxRegistry, s.cfg.RacePerBlob, s.cfg.MaxPeer, s.cfg.PerSource, s.cfg.MaxUtilization, s.cfg.TransferTimeout, s.cfg.Window, s.cfg.Exclude)
+	logging.Infof("angryduck-controller: spreader started: max_registry=%d race_per_blob=%d per_source=%d max_utilization=%.2f transfer_timeout=%s window=%s exclude=%v",
+		s.cfg.MaxRegistry, s.cfg.RacePerBlob, s.cfg.PerSource, s.cfg.MaxUtilization, s.cfg.TransferTimeout, s.cfg.Window, s.cfg.Exclude)
 	for {
 		select {
 		case <-ctx.Done():
@@ -359,18 +357,15 @@ func (s *Spreader) tick(ctx context.Context) {
 
 	// Load across every job, recomputed: nothing to drift when a report
 	// is lost.
-	var regBusy, peerBusy int
+	var regBusy int
 	serving := map[string]int{}
 	for _, j := range jobs {
 		for _, n := range j.nodes {
 			if n.reg != nil {
 				regBusy++
 			}
-			if n.peer != nil {
-				peerBusy++
-				if n.peer.from != "" {
-					serving[n.peer.from]++
-				}
+			if n.peer != nil && n.peer.from != "" {
+				serving[n.peer.from]++
 			}
 		}
 	}
@@ -379,7 +374,7 @@ func (s *Spreader) tick(ctx context.Context) {
 	var drops []dropOrder
 	s.resetMetricsLocked()
 	for _, j := range jobs {
-		o, d := s.planLocked(j, fresh, byNode, ids, waiting[j.image], now, &regBusy, &peerBusy, serving)
+		o, d := s.planLocked(j, fresh, byNode, ids, waiting[j.image], now, &regBusy, serving)
 		orders = append(orders, o...)
 		drops = append(drops, d...)
 	}
@@ -396,7 +391,7 @@ func (s *Spreader) tick(ctx context.Context) {
 // planLocked updates one job from the latest inventories and decides its
 // next orders. Caller holds s.mu.
 func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*workerEntry, ids []string, waiting map[string]bool,
-	now time.Time, regBusy, peerBusy *int, serving map[string]int) ([]order, []dropOrder) {
+	now time.Time, regBusy *int, serving map[string]int) ([]order, []dropOrder) {
 	layers := j.res.Layers
 	nl := len(layers)
 	index := s.registry.Layers()
@@ -537,7 +532,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			continue
 		}
 		// East-west: rarest layer first, then largest.
-		if n.peer == nil && *peerBusy < s.cfg.MaxPeer {
+		if n.peer == nil {
 			best, src := -1, ""
 			for _, i := range nd.missing {
 				h := pickSource(holders[i], w.NodeID, serving, s.cfg.PerSource)
@@ -552,7 +547,6 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			if best >= 0 {
 				x := &sxfer{layer: best, path: model.SpreadPathPeer, from: src, at: now}
 				n.peer, n.touched = x, true
-				*peerBusy++
 				serving[src]++
 				orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
 					fetch: &model.SpreadFetch{Job: j.id, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathPeer,
@@ -586,7 +580,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 		// Last resort: a layer nobody has the blob of and the registry
 		// keeps failing on. Get the whole image from a node that has it
 		// (blobs or snapshots, as rescue does).
-		if fullHolder && n.peer == nil && n.reg == nil && *peerBusy < s.cfg.MaxPeer {
+		if fullHolder && n.peer == nil && n.reg == nil {
 			stuck := false
 			for _, i := range nd.missing {
 				if len(holders[i]) == 0 && j.regFails[i] >= 3 {
@@ -607,7 +601,6 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 				if len(sources) > 0 {
 					x := &sxfer{layer: -1, path: "image", from: sources[0].NodeID, at: now}
 					n.peer, n.touched = x, true
-					*peerBusy++
 					serving[sources[0].NodeID]++
 					orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: -1, image: sources})
 				}
@@ -916,6 +909,22 @@ func (s *Spreader) backoffLocked(n *snode) {
 		wait = s.cfg.BackoffMax
 	}
 	n.next = time.Now().Add(wait)
+}
+
+// Holders returns the nodes a running spread knows to hold blob digest:
+// reported by a finished transfer, ahead of their next inventory.
+func (s *Spreader) Holders(digest string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, j := range s.jobs {
+		if i, ok := j.idx[digest]; ok {
+			for n := range j.got[i] {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
 }
 
 func (j *sjob) addGot(i int, node string) {

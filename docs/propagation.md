@@ -19,8 +19,9 @@ controller fills free slots, about a second later:
 - **East-west first.** A node lacking a layer that some node holds fetches
   it from that node. The rarest layer goes first (fewest holders), so new
   sources appear where they are scarcest. A source serves
-  `PROPAGATE_PER_SOURCE` transfers at a time, and `PROPAGATE_MAX_CONCURRENT`
-  run cluster-wide.
+  `PROPAGATE_PER_SOURCE` transfers at a time. There is no cluster-wide cap:
+  these per-node slots are the only limit, so every holder's link is used
+  and the transfers in flight grow with the holders.
 - **The registry only for what nobody has.** A registry pull is ordered
   only for a layer no node holds yet, by at most
   `SPREAD_MAX_REGISTRY_PULLS` nodes at once (default: `RANK_TOP_N`). Nobody
@@ -119,8 +120,8 @@ still lacks, and every transfer moving right now. See
 `SPREAD_ENABLED`, `SPREAD_MAX_REGISTRY_PULLS`, `SPREAD_RACE_PER_BLOB`,
 `SPREAD_RETRY_AFTER_S`, `SPREAD_BACKOFF_MAX_S`, `SPREAD_TRANSFER_TIMEOUT_S`,
 and from propagation `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
-`PROPAGATE_MAX_CONCURRENT`, `PROPAGATE_PER_SOURCE`,
+`PROPAGATE_PER_SOURCE`,
 `PROPAGATE_MAX_UTILIZATION`, `PROPAGATE_EXCLUDE_NODE_SUBSTRINGS`. The
 whole-image fallback also uses `PROPAGATE_ENABLED` and
-`PROPAGATE_SEED_TIMEOUT_*`. Spreading needs the shared token. See
+`PROPAGATE_SEED_TIMEOUT_*` and `PROPAGATE_MAX_CONCURRENT`. Spreading needs the shared token. See
 [Configuration](configuration.md#spread).

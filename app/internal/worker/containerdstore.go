@@ -257,21 +257,25 @@ func (s *ContainerdStore) StreamBlob(ctx context.Context, dgst string, size int6
 	return err
 }
 
-// StreamContent writes a blob straight to w; the reader (containerd, in
-// the mirror's case) checks the digest.
-func (s *ContainerdStore) StreamContent(ctx context.Context, dgst string, w io.Writer) error {
-	if f, _, ok := s.openBlob(dgst); ok {
-		defer f.Close()
-		_, err := copyContext(ctx, w, f)
-		return err
+// OpenContent opens a blob to serve it, with its size: the file in the
+// content store when it is mounted, so an HTTP response can hand it to
+// sendfile, otherwise a reader over containerd's content API. The reader
+// on the other end (containerd for the mirror, WriteBlob for a peer)
+// checks the digest.
+func (s *ContainerdStore) OpenContent(ctx context.Context, dgst string) (io.ReadCloser, int64, error) {
+	if f, n, ok := s.openBlob(dgst); ok {
+		return f, n, nil
 	}
 	ra, err := s.openContent(s.ns(ctx), dgst)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	defer ra.Close()
-	_, err = copyContext(ctx, w, contentReader(ra))
-	return err
+	return readCloser{contentReader(ra), ra}, ra.Size(), nil
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // Digests lists every blob digest in the namespace's content store. The
