@@ -1,7 +1,7 @@
 # Propagation
 
-Once CI pushes an image, Angry Duck puts it on every eligible node. Since
-1.8.8 it does this **blob by blob**: every layer starts spreading between
+Once CI pushes an image, Angry Duck puts it on every eligible node, **blob by
+blob**: every layer starts spreading between
 nodes the moment any node has it, the registry serves each layer about
 once, and no node waits for another to finish a whole image.
 
@@ -81,8 +81,8 @@ pulls those layers locally.
 ## Fallbacks
 
 - **No layer list.** If the image's manifest can't be read (no credentials
-  for that registry, say), the push is seeded and propagated **whole**, as
-  before 1.8.8: `RANK_TOP_N` seeds pull the image, then nodes copy it from
+  for that registry, say), the push is seeded and propagated **whole**:
+  `RANK_TOP_N` seeds pull the image, then nodes copy it from
   each other, each holder serving one node at a time so holders double each
   round. `SPREAD_ENABLED=false` or `RANK_BY_LAYERS=false` always works this
   way.
@@ -113,7 +113,7 @@ curl -s localhost:8080/status | jq '.spreads[] | {image, done: (.done|length), n
 
 The dashboard's **Spread** tab shows every running spread, what each node
 still lacks, and every transfer moving right now. See
-[Observability](observability.md#spread) for the metrics.
+[Observability](observability.md#grafana-dashboard) for the metrics.
 
 ## Settings
 

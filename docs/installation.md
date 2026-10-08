@@ -28,8 +28,8 @@ and monitoring. See [Helm](helm.md).
 
 ## Deploy with plain manifests
 
-`k8s/` holds example manifests, as run on a staging cluster. Copy them and
-adapt them to your cluster.
+`k8s/` holds a complete set of manifests with the default settings. Copy them
+and adapt them to your cluster.
 
 ### 1. Get the images
 
@@ -41,9 +41,9 @@ ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.10
 ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.10
 ```
 
-They are public, so kubelet needs no `imagePullSecrets` for them. If you use
-them, you can drop `gitlab-docker-registry` from the manifests and skip
-creating it below.
+They are public, so kubelet needs no `imagePullSecrets` for them. If you
+build your own into a private registry, add `imagePullSecrets` to
+`deployment-controller.yaml` and `daemonset-worker.yaml`.
 
 To build and push your own instead:
 
@@ -63,18 +63,14 @@ Set the `image:` fields in `deployment-controller.yaml` and
 
 | Secret | Used by | Holds |
 |---|---|---|
-| `gitlab-docker-registry` | both, as `imagePullSecrets` | Credentials for kubelet to pull the Angry Duck images. |
-| `gitlab-registry-pull` | both, mounted as a file | Credentials for seed pulls and manifest reads (`REGISTRY_CREDENTIALS_PATH`). |
+| `registry-pull` | both, mounted as a file | Credentials for seed pulls and manifest reads (`REGISTRY_CREDENTIALS_PATH`). Optional if every image you push is public. |
 | `angryduck-rescue-token` | both, mounted as a file | The shared token. Without it, rescue, propagation and the mirror stay off. |
 | `angryduck-webhook-token` | controller, mounted as a file | CI's token for the webhook. Without it, the webhook is unauthenticated. |
 
 ```bash
 kubectl apply -f k8s/namespace.yaml
 
-kubectl -n angryduck create secret docker-registry gitlab-docker-registry \
-  --docker-server=registry.example.com --docker-username=<user> --docker-password=<password>
-
-kubectl -n angryduck create secret docker-registry gitlab-registry-pull \
+kubectl -n angryduck create secret docker-registry registry-pull \
   --docker-server=registry.example.com --docker-username=<user> --docker-password=<password>
 
 kubectl -n angryduck create secret generic angryduck-rescue-token \
@@ -84,9 +80,9 @@ kubectl -n angryduck create secret generic angryduck-webhook-token \
   --from-literal=token=$(openssl rand -hex 32)
 ```
 
-The two registry secrets can hold the same credentials. To cover several
-private registries, create `gitlab-registry-pull` from a dockerconfigjson file
-listing all of them.
+To cover several private registries, create `registry-pull` from a
+dockerconfigjson file listing all of them; see
+[Recipes](recipes.md#several-private-registries).
 
 ### 3. Review the configuration
 
@@ -100,7 +96,8 @@ Edit `k8s/configmap-env.yaml`. The values most worth checking:
 | `PROPAGATE_MAX_UTILIZATION`, `GC_*` | Keep below kubelet's `imageGCHighThresholdPercent`. |
 | `MIRROR_ENABLED` | Enable once containerd's `config_path` is set. |
 
-All settings are described in [Configuration](configuration.md).
+All settings are described in [Configuration](configuration.md), and
+[Recipes](recipes.md) has ready-made sets for common setups.
 
 ### 4. Apply
 
@@ -124,8 +121,8 @@ rescuer and propagator starting without warnings.
 
 ### 6. Expose the webhook
 
-Set the host in `ingress-controller-webhook.yaml`. The ingress exposes only
-`/angryduck/webhook/preheat`. Store the `angryduck-webhook-token` value as a
+Set the host and ingress class in `ingress-controller-webhook.yaml`. The
+ingress exposes only `/webhook/preheat`. Store the `angryduck-webhook-token` value as a
 masked CI variable, `ANGRYDUCK_WEBHOOK_TOKEN`, and send it as a bearer token.
 Restricting the ingress to your CI runners as well is a good idea; see
 [Security](security.md).
@@ -133,12 +130,11 @@ Restricting the ingress to your CI runners as well is a good idea; see
 ## Integrate with CI
 
 Call the webhook right after `docker push`, before the deploy job updates
-the manifests, and never let it fail the pipeline. The path is the one your
-ingress exposes: `/angryduck/webhook/preheat` with the example manifests,
-`/webhook/preheat` with the Helm chart's default.
+the manifests, and never let it fail the pipeline. The call returns within
+seconds, and distribution continues while the rest of the pipeline runs.
 
 ```bash
-curl -fsS -m 10 -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+curl -fsS -m 10 -X POST https://angryduck.example.com/webhook/preheat \
   -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```

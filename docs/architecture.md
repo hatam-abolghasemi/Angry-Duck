@@ -1,5 +1,9 @@
 # Architecture
 
+This page is the map: what runs where, what it knows, and how an image moves
+from a CI push to cleanup. For why it's built this way, see
+[Design](design.md).
+
 Angry Duck has two components. Both are static Go binaries with no external
 Go dependencies.
 
@@ -10,8 +14,8 @@ Go dependencies.
 
 ## Reporting and state
 
-Every `REPORT_INTERVAL_S` (15s), each worker posts a report to the controller
-with:
+Each worker posts a report to the controller every `REPORT_INTERVAL_S` (15s),
+and right away when containerd reports a pull or removal. A report has:
 
 - root filesystem utilization, read from the local node-exporter;
 - every image reference on the node;
@@ -57,12 +61,12 @@ sequenceDiagram
    the moment any node has it, until every eligible node has registered the
    image. Pushes whose manifest can't be read are [seeded](preheat.md) and
    [propagated](propagation.md#fallbacks) whole instead.
-3. **[Mirror](mirror.md).** Any pull containerd still makes, for example on a
+2. **[Mirror](mirror.md).** Any pull containerd still makes, for example on a
    node that joined later or for a third-party image, is served from the node
    or a peer when possible.
-4. **[Rescue](rescue.md).** If a pod still gets stuck pulling the image, it is
+3. **[Rescue](rescue.md).** If a pod still gets stuck pulling the image, it is
    copied to that node from a node that has it.
-5. **[Image cleanup](image-cleanup.md).** Once nothing has used it on a node
+4. **[Image cleanup](image-cleanup.md).** Once nothing has used it on a node
    for 6 hours, or sooner when the disk runs high, the node removes it.
 
 Whole-image propagation and rescue share one

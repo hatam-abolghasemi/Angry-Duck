@@ -44,8 +44,9 @@ the image from each other, before a single pod asks for it.
 
 **They don't ask which node the pod will land on.** Pods get rescheduled.
 Nodes drain, spot instances vanish, the scheduler changes its mind. So the
-ducks don't guess. The image goes to *every* pond, duck to duck, one at a time
-per sender, until the whole fleet has it. When a pod lands anywhere, its image
+ducks don't guess. The image goes to *every* pond, layer by layer, duck to
+duck, each layer swimming on as soon as any duck has it, until the whole
+fleet has it. When a pod lands anywhere, its image
 is already there. Rescheduling should cost seconds, not a trip to the harbor.
 
 **They don't wait to be asked for help.** A pod stuck in `ImagePullBackOff`
@@ -93,3 +94,6 @@ might roll back to.
 
 A small bird, a sharp knife and a short list of rules. That's all it takes to
 keep a harbor full of whales moving.
+
+And a name you remember. Somewhere among the whales, the ships and the
+harbors, there are small ducks with knives in hand, taking care of things.

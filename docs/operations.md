@@ -58,37 +58,25 @@ utilization math.
 
 ### Controller
 
-Measured with 1.8.4 against a simulated fleet of 150 nodes, each holding
-about 300 images and 9,000 layers: ~13m CPU, ~22Mi steady, ~26Mi right after
-a restart (manifest: 20m / 150m CPU, 32Mi / 64Mi memory). Memory grows roughly
-linearly with the number of nodes and peaks after a restart, when every worker
-resends its full layer inventory. Raise the request and limit for much larger
-fleets.
+Against a simulated fleet of 150 nodes, each holding about 300 images and
+9,000 layers, the controller used ~13m CPU and ~22 MiB steady, ~26 MiB right
+after a restart. The defaults (20m / 150m CPU, 32 / 64 MiB memory) cover
+that. Memory grows roughly linearly with the number of nodes and peaks after a
+restart, when every worker resends its full layer inventory. Raise the request
+and limit for much larger fleets; see [Recipes](recipes.md#a-large-fleet).
 
 ### Worker
 
-Measured with 1.8.6 against containerd 2.2 on a node holding 304 images,
-614 snapshots and 918 blobs, next to 1.8.5 on the same node:
+On a node holding 304 images, 614 snapshots and 918 blobs, with containerd 2.2:
 
-| | 1.8.5 | 1.8.6 |
-|---|---|---|
-| CPU at steady state, worker + its subprocesses + containerd | ≈0.9% of a core | ≈0.17% |
-| Calls to containerd | 5 full listings a minute, each a new `ctr`/`crictl` process (up to ~27 MiB each) | the same listings at the same intervals, as single gRPC calls |
-| Memory really held at idle (`rss_anon`) | ~3 MiB, plus the subprocesses | ~5–7 MiB, no subprocesses |
-| Peak during a 300 MB rescue | ~4 MiB + subprocesses | ~10 MiB |
-| 300 MB rescue as blobs | ~6 s | ~3–4 s |
-| 300 MB rescue as snapshots | ~8 s | ~10–14 s |
-| 400 mirror requests | ~4 s | ~2 s |
-
-1.8.7 speeds up snapshot shipping. Measured on one CPU against containerd
-2.2.1, with a 150 MiB layer that only exists as a snapshot, the same harness
-and machine for both (see [Development](development.md#test)):
-
-| | 1.8.6 | 1.8.7 |
-|---|---|---|
-| Source export, 5 MiB of layers below | ~3.1 s | ~1.1 s |
-| Source export, 300 MiB of layers below | ~5.7 s | ~2.8 s |
-| Whole rescue | ~17 s | ~10.5 s |
+| | |
+|---|---|
+| CPU at steady state, worker and containerd together | ≈0.17% of a core |
+| Memory really held at idle (`rss_anon`) | ~5–7 MiB |
+| Peak during a 300 MB rescue | ~10 MiB |
+| 300 MB rescue as blobs | ~3–4 s |
+| 150 MiB layer rescued as a snapshot, on one CPU | ~10.5 s |
+| 400 mirror requests | ~2 s |
 
 - The worker's container memory (`kubectl top`) is about 15 MiB higher than
   `rss_anon`: that is its own code, mapped from the binary, which the kernel
@@ -108,14 +96,13 @@ and machine for both (see [Development](development.md#test)):
 
 ## Upgrading
 
-1. Build and push the new images.
+1. Read the [changelog](../CHANGELOG.md) for setting and metric changes.
 2. If any node can't reach the registry, [bootstrap the new worker image
    there by hand](#bootstrapping-a-node-by-hand) first.
-3. Apply the new manifests. The controller and workers are independent: the
-   controller rebuilds its state from worker reports within seconds, and
-   workers keep serving peers during a controller restart.
-
-Read the [changelog](../CHANGELOG.md) for setting and metric changes.
+3. Bump the image tags (or `helm upgrade`) and apply. The controller and
+   workers are independent: the controller rebuilds its state from worker
+   reports within seconds, and workers keep serving peers during a controller
+   restart.
 
 ## Rotating the token
 

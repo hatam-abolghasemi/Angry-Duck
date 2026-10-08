@@ -1,6 +1,6 @@
 apiVersion: v2
 name: angryduck
-description: Peer-to-peer image distribution, pull rescue and image cleanup for Kubernetes nodes running containerd.
+description: Image lifecycle manager for Kubernetes nodes running containerd - preheat on push, peer-to-peer spreading, pull rescue and image cleanup.
 type: application
 version: 1.8.10
 appVersion: "1.8.10"

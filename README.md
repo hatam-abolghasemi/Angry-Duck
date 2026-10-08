@@ -3,57 +3,67 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/hatam-abolghasemi/Angry-Duck)](https://github.com/hatam-abolghasemi/Angry-Duck/releases)
 
-**Peer-to-peer image distribution, pull rescue and image cleanup for Kubernetes nodes running containerd.**
+**An image lifecycle manager for Kubernetes.** It gets new images onto your
+nodes before the rollout asks for them, gets pods started when the registry
+can't help, and keeps disks healthy, from the push to the cleanup.
 
-Angry Duck pre-pulls a freshly pushed image onto every node before your pods
-ask for it. The registry serves each image only a handful of times, and the rest of
-the fleet gets it from peers. When a node can't pull an image that another
-node already has, Angry Duck copies it over. It also keeps node disks tidy by
-removing images nothing has used.
+Angry Duck gets a freshly pushed image onto your nodes while the rest of your
+pipeline is still running, so when the rollout starts, the image is already
+there. The registry serves each new layer about once and nodes share the rest
+among themselves. When a node can't pull an image a neighbor already has, the
+neighbor hands it over. Recent images stay on the nodes, so rolling back starts
+containers instead of downloading, and images nothing uses anymore are
+cleaned up before they crowd the disk.
 
-It is two small, dependency-free Go binaries: a controller and a per-node
-worker. It works with the containerd and registry you already run.
+Two small Go binaries, a controller and a worker per node, working with the
+containerd and registry you already run. No database, no extra storage, no
+changes to your pods.
 
-## Why we built it
+## How it started
 
-We run large Kubernetes fleets, and every deploy looked the same: CI pushed an
-image, the rollout started, and dozens of nodes asked the registry for the same
-layers at the same moment. The trouble came in three forms.
+It started with speed. Our clusters see hundreds of deploys a day, and every
+rollout waited on the same thing: dozens of nodes downloading the same layers
+from the registry at the same moment, only after pods had been scheduled. CI
+had pushed the image minutes earlier. Why was nobody fetching it yet?
 
-- **Rollouts waited on the registry.** Each node downloaded the full set of
-  changed layers on its own, so a rollout was only as fast as the registry's
-  slowest moment.
-- **Pods got stuck on images that were right next door.** A broken route, a
-  firewall rule, a registry hiccup or an image deleted upstream left pods in
-  `ImagePullBackOff`, while the exact image sat on other nodes in the same
-  cluster.
-- **Disks filled with images nobody used.** kubelet's image GC only acts at
-  disk pressure, late and without knowing which images matter for a rollback.
+Then the other problems showed up, one by one:
 
-Peer-to-peer image tools help once a pull is under way. We wanted something
-that also acts *before* the pull, by placing images ahead of the rollout,
-rescues pulls that fail anyway, cleans up afterwards, and gets out of the way
-when it has nothing to add.
+- **The registry went down,** and rollouts and rollbacks stopped with it.
+- **The registry was up, but the image wasn't there anymore,** while the exact
+  image was sitting on the node next door. Pods stayed in `ImagePullBackOff`
+  anyway.
+- **Disks hit pressure because apps logged too much.** Container logs and
+  images share the same disk. We can't make an app log less, but we could make
+  sure images never made it worse, and free space early when it happened,
+  without throwing away the image the next rollback needs.
 
-## Philosophy
+We tried Dragonfly, then Spegel. Neither made us happy, and each covered only
+part of the problem. So we built the tool we wanted, one that looks after an
+image's whole life on the node. The full story is in
+[How Angry Duck came to be](docs/story.md).
 
-- **Never in the critical path.** Every feature is best-effort. If Angry Duck
-  is down or wrong, containerd pulls from the registry exactly as it would
-  without it. CI calls the webhook with `|| true`.
-- **The registry stays the source of truth.** Tags always resolve at the
-  registry, so a moved tag is never served stale. Angry Duck only moves
-  content that is addressed by digest.
-- **Verify what can be verified.** Layers travel as blobs and containerd checks
-  every digest on import. Unpacked snapshots are shipped only as a last resort.
-- **Ask containerd, don't impersonate it.** The worker talks to containerd
-  over its socket (its own API and CRI) and lets containerd do everything
-  that needs privileges on the node. The worker runs with no Linux
-  capabilities, no host PID namespace and the default seccomp and AppArmor
-  profiles.
-- **Be gentle.** Transfers are bounded per node and per cluster, retries back
-  off, and cleanup works in small batches.
-- **Explain every decision.** Each decision is logged on one line, exposed in
-  `/status` and counted in Prometheus.
+## The idea
+
+**Start early, run in parallel, never block.** A push is the earliest moment
+anyone knows an image will be needed, so CI tells Angry Duck right then with a
+webhook and moves on. While CI updates manifests and your GitOps tool syncs,
+the image is already spreading through the cluster. CI never waits for it, and
+a deploy never depends on it: if Angry Duck is down or wrong, containerd pulls
+from the registry exactly as it would without it.
+
+Inside, the same rule holds. Nothing waits for a schedule when it can react to
+an event: workers follow containerd's events, the controller watches stuck
+pods, and every finished transfer immediately starts the next one. Each layer
+spreads on its own, from any node that has it, without waiting for whole
+images. The registry is only asked for what no node has yet.
+
+**Cleanup is the other half of distribution.** Putting every new image on
+every node is only safe if something keeps disks healthy. Angry Duck removes
+images nothing has used for hours, frees space early when a disk runs high,
+and keeps the last few images of each app for rollbacks. Distribution pauses
+on a full node until cleanup has made room.
+
+Read [Design](docs/design.md) for the reasoning behind each choice.
 
 ## How it works
 
@@ -76,7 +86,7 @@ and cleanup.
 | Feature | What it does | Details |
 |---|---|---|
 | **Preheat** | Image pre-pull on push: the few nodes that already hold most of the image pull it, so the registry serves little more than the changed layers. | [Preheat](docs/preheat.md) |
-| **Propagation** | Every other node gets the image from peers, one transfer per source at a time, doubling the holders every round. | [Propagation](docs/propagation.md) |
+| **Propagation** | Every other node gets each layer from whichever node already has it, the moment any node has it. The registry serves each layer about once. | [Propagation](docs/propagation.md) |
 | **Rescue** | A pod stuck in `ImagePullBackOff` gets its image copied from a node that has it, for any image. | [Rescue](docs/rescue.md) |
 | **Transfers** | Only missing layers move, as digest-verified blobs from any peer, with snapshots as a last resort. | [Transfers](docs/transfers.md) |
 | **Mirror** | A pull-only mirror on every node answers containerd from the node or a peer, and falls back to the registry. | [Mirror](docs/mirror.md) |
@@ -112,12 +122,18 @@ curl -fsS -m 10 -X POST https://angryduck.example.com/webhook/preheat \
 
 ## Documentation
 
+New here? Read [Design](docs/design.md), then [Installation](docs/installation.md)
+or [Helm](docs/helm.md), then pick a setup from [Recipes](docs/recipes.md).
+
 | Guide | Contents |
 |---|---|
+| [Story](docs/story.md) | How Angry Duck came to be, one problem at a time. |
+| [Design](docs/design.md) | Why it works the way it does. |
 | [Architecture](docs/architecture.md) | Components, reporting, state, and an image's life from push to cleanup. |
 | [Installation](docs/installation.md) | Requirements, deployment, CI integration and verification. |
 | [Helm](docs/helm.md) | Installing with the chart, its values, tokens and the webhook ingress. |
 | [Node settings and limits](docs/node-settings.md) | containerd and kubelet settings that help, CI and workload usage, and what Angry Duck can't do. |
+| [Recipes](docs/recipes.md) | Ready-made settings for common clusters and goals. |
 | [Configuration](docs/configuration.md) | Every setting, with defaults. |
 | [Operations](docs/operations.md) | Status, logs, troubleshooting, upgrades and bootstrapping a node. |
 | [Observability](docs/observability.md) | Metrics, the Grafana dashboard and suggested alerts. |
@@ -135,6 +151,15 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 The current version is **1.8.10**; see the [changelog](CHANGELOG.md). Angry
 Duck targets Linux nodes running containerd 1.6 or later.
+
+## Feedback and contributing
+
+Running Angry Duck, or thinking about it? Tell us how it goes in
+[Discussions](https://github.com/hatam-abolghasemi/Angry-Duck/discussions).
+Bugs and feature requests go in
+[Issues](https://github.com/hatam-abolghasemi/Angry-Duck/issues), and security
+reports through the [private advisory form](https://github.com/hatam-abolghasemi/Angry-Duck/security/advisories/new).
+See [Development](docs/development.md) to build and test it.
 
 ## License
 

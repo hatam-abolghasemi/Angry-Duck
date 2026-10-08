@@ -1,13 +1,20 @@
 # Configuration
 
 Angry Duck is configured entirely through environment variables. In
-Kubernetes they come from the ConfigMap. Locally they can come from a `.env`
-file (path set by `ENV_FILE`, default `.env`), and real environment variables
-always win over the file. [`app/.env.example`](../app/.env.example) lists
-every setting with comments.
+Kubernetes they come from the ConfigMap (or the chart's `config` values).
+Locally they can come from a `.env` file (path set by `ENV_FILE`, default
+`.env`), and real environment variables always win over the file.
+[`app/.env.example`](../app/.env.example) lists every setting with its
+default.
 
-Durations are integers in seconds. Utilizations are fractions between 0 and
-1.
+- Durations are integers in seconds. Utilizations are fractions between 0
+  and 1.
+- An empty or unparsable value means the default.
+- Each binary ignores the settings it doesn't use, so both share one
+  ConfigMap.
+
+Looking for a starting point rather than a reference? See
+[Recipes](recipes.md).
 
 ## General
 
@@ -66,16 +73,16 @@ The whole-image fallback, and the limits spread shares.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROPAGATE_ENABLED` | `true` | Spread pushed images to every eligible node. |
+| `PROPAGATE_ENABLED` | `true` | Whole-image propagation, used when an image can't spread blob by blob. Blob-by-blob spreading is controlled by `SPREAD_ENABLED`; turn both off to seed only. |
 | `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. A finished transfer also advances them, after about a second. |
 | `PROPAGATE_WINDOW_S` | `0` | How long to keep spreading a push. `0` means until done or superseded. |
 | `PROPAGATE_MAX_CONCURRENT` | `8` | Whole-image transfers in flight cluster-wide. Spread has no cluster-wide cap. |
 | `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node, spread included. |
-| `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this wait for cleanup. |
-| `PROPAGATE_SEED_TIMEOUT_MIN_S` | `120` | Lower bound before a slow seed is cancelled. |
-| `PROPAGATE_SEED_TIMEOUT_MAX_S` | `600` | Timeout while no seed has finished. |
-| `PROPAGATE_SEED_TIMEOUT_FACTOR` | `3` | Multiple of the first seed's pull time. |
-| `PROPAGATE_EXCLUDE_NODE_SUBSTRINGS` | same as `RANK_EXCLUDE_NODE_SUBSTRINGS` | Nodes to skip. |
+| `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this receive nothing new until cleanup makes room. Keep it at or below `GC_HIGH_UTILIZATION`. |
+| `PROPAGATE_SEED_TIMEOUT_MIN_S` | `120` | A seed still pulling after `max(MIN, FACTOR × the first seed's pull time)` is cancelled, and peers serve it instead. |
+| `PROPAGATE_SEED_TIMEOUT_MAX_S` | `600` | The timeout while no seed has finished yet. |
+| `PROPAGATE_SEED_TIMEOUT_FACTOR` | `3` | See `PROPAGATE_SEED_TIMEOUT_MIN_S`. |
+| `PROPAGATE_EXCLUDE_NODE_SUBSTRINGS` | same as `RANK_EXCLUDE_NODE_SUBSTRINGS` | Node name substrings that never receive pushed images. They still serve what they hold, and rescue still covers them. |
 
 ## Rescue
 
@@ -107,7 +114,7 @@ The whole-image fallback, and the limits spread shares.
 | `NODE_EXPORTER_URL` | `http://localhost:9100/metrics` | Source of root filesystem utilization. The DaemonSet sets it to `http://$(HOST_IP):9100/metrics`. |
 | `POD_IP`, `POD_NAMESPACE`, `HOST_IP` | from the downward API | Set by the DaemonSet. `POD_IP` is the mirror's address in `hosts.toml`. |
 | `DAEMONSET_NAME` | `angryduck-worker` | The DaemonSet the worker checks on shutdown: gone or being deleted means an uninstall, and the worker cleans up the node. |
-| `CONTAINER_RUNTIME` | `containerd` | Only containerd is supported. The pre-1.8.6 values `crictl` and `ctr` are accepted and mean the same. |
+| `CONTAINER_RUNTIME` | `containerd` | Only containerd is supported. `crictl` and `ctr`, from older configurations, are accepted and mean the same. |
 | `CONTAINER_RUNTIME_ENDPOINT` | `unix:///run/containerd/containerd.sock` | containerd's socket, as mounted into the worker. |
 | `CONTAINERD_SNAPSHOTTER` | `overlayfs` | The snapshotter kubelet's images are unpacked with. |
 | `CONTAINERD_ROOT` | from `/etc/containerd/config.toml`, else `/var/lib/containerd` | containerd's root directory, as mounted into the worker. Blobs are read directly from its content store when mounted, otherwise through containerd's content API. |
@@ -124,19 +131,24 @@ The whole-image fallback, and the limits spread shares.
 | Variable | Default | Description |
 |---|---|---|
 | `MIRROR_ENABLED` | `false` | Run the mirror and manage containerd's `hosts.toml` files. |
-| `MIRROR_LISTEN_ADDR` | `:18082` | Listen address, on the pod network. A loopback address (the pre-1.8.6 default) is turned into `:<port>`. |
+| `MIRROR_LISTEN_ADDR` | `:18082` | Listen address, on the pod network. A loopback address, from older configurations, is turned into `:<port>`. |
 | `MIRROR_ADVERTISE_ADDR` | `$POD_IP:<port>` | The address written into `hosts.toml`. |
-| `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | containerd's CRI registry `config_path`. |
+| `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | Where `hosts.toml` files are written. containerd's CRI registry `config_path` must point here. |
 | `MIRROR_REGISTRIES` | *(empty)* | Registries to mirror even before the node uses them. |
 
 ## Image cleanup
+
+An image not in use on the node is removed when it has been unused for
+`GC_UNUSED_FOR_S`, or, while the disk is above `GC_HIGH_UTILIZATION`, oldest
+first until it is back to `GC_LOW_UTILIZATION`. The newest `GC_ROLLBACK_KEEP`
+unused images per repo go last. See [Image cleanup](image-cleanup.md).
 
 | Variable | Default | Description |
 |---|---|---|
 | `GC_ENABLED` | `true` | Clean up images on each node. |
 | `GC_INTERVAL_S` | `60` | How often usage is sampled and the disk checked. |
 | `GC_UNUSED_FOR_S` | `21600` | Remove images unused this long, whatever the disk usage. |
-| `GC_HIGH_UTILIZATION` | `0.70` | Above this, remove unused images oldest first... |
+| `GC_HIGH_UTILIZATION` | `0.70` | Above this, remove unused images oldest first... Keep it below kubelet's `imageGCHighThresholdPercent`. |
 | `GC_LOW_UTILIZATION` | `0.60` | ...until the disk is back down to this. |
 | `GC_ROLLBACK_KEEP` | `3` | Newest unused images per repo kept for rollback. |
 | `GC_BATCH` | `5` | Images removed per batch. |

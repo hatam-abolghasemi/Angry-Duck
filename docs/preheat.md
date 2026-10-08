@@ -1,7 +1,7 @@
 # Preheat
 
 Preheat puts a new image on a few well-chosen **seed** nodes as soon as CI
-pushes it. The seeds are the only nodes that talk to the registry for that
+pushes it, while the rest of the pipeline is still running. The seeds are the only nodes that talk to the registry for that
 image; [propagation](propagation.md) takes it from there.
 
 ## Triggering it
@@ -9,7 +9,7 @@ image; [propagation](propagation.md) takes it from there.
 CI calls the controller's webhook right after `docker push`:
 
 ```bash
-curl -fsS -X POST https://angryduck.example.com/angryduck/webhook/preheat \
+curl -fsS -X POST https://angryduck.example.com/webhook/preheat \
   -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```

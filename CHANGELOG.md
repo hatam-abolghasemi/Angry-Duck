@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Example manifests are generic.** `k8s/` no longer carries a staging
+  label, an internal ingress host and path, or `imagePullSecrets` for the
+  public images. The registry credentials Secret is `registry-pull` (was
+  `gitlab-registry-pull`) and is optional for the worker too. The webhook
+  path is `/webhook/preheat`, as in the Helm chart. Selectors changed, so
+  plain-manifest installs must delete the controller Deployment and worker
+  DaemonSet before applying, or keep their own labels.
+- **No comments in configuration files.** `app/.env.example`, the chart's
+  `values.yaml` and the Dockerfiles are plain; `.env.example` now lists every
+  setting with its default. The docs are the reference.
+
+### Docs
+
+- New [Design](docs/design.md) page: why Angry Duck starts at the push, runs
+  everything in parallel, reacts to events and pairs distribution with
+  cleanup.
+- New [Story](docs/story.md) page: the problems that shaped Angry Duck,
+  from slow rollouts to registry outages, stuck pulls and full disks. The
+  README and the chart now describe it as an image lifecycle manager.
+- New [Recipes](docs/recipes.md) page with settings for common clusters and
+  goals.
+- Security: corrected how seed pulls get credentials, documented the open
+  `/status` and `/metrics` endpoints, added a hardening checklist and a
+  private reporting channel.
+- `PROPAGATE_ENABLED` is described correctly: it controls the whole-image
+  fallback; blob-by-blob spreading is `SPREAD_ENABLED`.
+- Issue and pull request templates, and a security policy.
+
 ## 1.8.10
 
 ### Changed
