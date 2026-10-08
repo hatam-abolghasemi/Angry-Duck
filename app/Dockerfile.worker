@@ -6,8 +6,6 @@ COPY internal ./internal
 COPY cmd/worker ./cmd/worker
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/angryduck-worker ./cmd/worker
 
-# One static binary on distroless/static. No container CLIs: the worker
-# talks to containerd's API and CRI over the mounted socket.
 FROM gcr.io/distroless/static-debian13
 COPY --from=build /out/angryduck-worker /angryduck-worker
 ENTRYPOINT ["/angryduck-worker"]
