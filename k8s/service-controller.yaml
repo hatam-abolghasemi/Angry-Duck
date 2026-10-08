@@ -4,12 +4,10 @@ metadata:
   name: angryduck-controller
   namespace: angryduck
   labels:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: controller
 spec:
   selector:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: controller
   ports:

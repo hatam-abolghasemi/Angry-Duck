@@ -3,5 +3,4 @@ kind: Namespace
 metadata:
   name: angryduck
   labels:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck

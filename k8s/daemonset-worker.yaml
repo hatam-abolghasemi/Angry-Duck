@@ -4,27 +4,22 @@ metadata:
   name: angryduck-worker
   namespace: angryduck
   labels:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: worker
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/env: stg
       app.kubernetes.io/name: angryduck
       app.kubernetes.io/component: worker
   template:
     metadata:
       labels:
-        app.kubernetes.io/env: stg
         app.kubernetes.io/name: angryduck
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: angryduck-worker
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 30
-      imagePullSecrets:
-        - name: gitlab-docker-registry
       containers:
         - name: worker
           image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.10
@@ -109,7 +104,8 @@ spec:
       volumes:
         - name: registry-creds
           secret:
-            secretName: gitlab-registry-pull
+            secretName: registry-pull
+            optional: true
         - name: rescue-token
           secret:
             secretName: angryduck-rescue-token

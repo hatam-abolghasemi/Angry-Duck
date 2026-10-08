@@ -3,7 +3,6 @@ kind: ClusterRole
 metadata:
   name: angryduck-controller
   labels:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: controller
 rules:

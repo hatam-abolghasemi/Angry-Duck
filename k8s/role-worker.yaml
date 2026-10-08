@@ -4,7 +4,6 @@ metadata:
   name: angryduck-worker
   namespace: angryduck
   labels:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: worker
 rules:

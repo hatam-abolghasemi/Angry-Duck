@@ -4,7 +4,6 @@ metadata:
   name: angryduck-config
   namespace: angryduck
   labels:
-    app.kubernetes.io/env: stg
     app.kubernetes.io/name: angryduck
 data:
   LOG_LEVEL: "info"
