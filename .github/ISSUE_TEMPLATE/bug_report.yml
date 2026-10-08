@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in Angry Duck didn't work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please redact tokens, internal hostnames and registry addresses before posting.
+        Security issues should not be reported here. Use the private advisory form linked from the issue chooser instead.
+  - type: input
+    id: version
+    attributes:
+      label: Angry Duck version
+      placeholder: "1.8.10"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed with
+      options:
+        - Helm chart (charts/angryduck)
+        - Plain manifests (k8s/)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Preheat
+        - Propagation
+        - Rescue
+        - Transfers
+        - Mirror
+        - Image cleanup
+        - Webhook / CI integration
+        - Helm chart
+        - Metrics / Grafana dashboard
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes version, containerd version and snapshotter, node count, node OS and kernel.
+      placeholder: |
+        Kubernetes: 1.31.2
+        containerd: 1.7.22, overlayfs
+        Nodes: 24
+        OS / kernel: Ubuntu 22.04, 5.15
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps, the image involved (redacted if needed) and any non-default settings.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Controller and worker logs
+      description: The relevant lines around the problem. Each decision is logged on one line, so a few lines are usually enough.
+      render: shell
+  - type: textarea
+    id: status
+    attributes:
+      label: /status output
+      description: "The relevant part of the controller's /status, e.g. `.rescues` or `.propagations`. See docs/operations.md."
+      render: json

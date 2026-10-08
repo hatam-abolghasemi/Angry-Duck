@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest a change or a new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How you imagine Angry Duck could handle it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other tools, settings or workarounds you have tried.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Preheat
+        - Propagation
+        - Rescue
+        - Transfers
+        - Mirror
+        - Image cleanup
+        - Webhook / CI integration
+        - Helm chart
+        - Metrics / Grafana dashboard
+        - Other
+  - type: textarea
+    id: context
+    attributes:
+      label: Your setup
+      description: Fleet size, deploy frequency, registry setup, anything that shapes the need.

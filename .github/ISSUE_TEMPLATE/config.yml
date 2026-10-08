@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/hatam-abolghasemi/Angry-Duck/discussions
+    about: Ask how something works, share how you run Angry Duck, or float an idea before opening an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/hatam-abolghasemi/Angry-Duck/security/advisories/new
+    about: Report security issues privately, not as a public issue.
+  - name: Documentation
+    url: https://github.com/hatam-abolghasemi/Angry-Duck/tree/main/docs
+    about: Installation, configuration, operations and troubleshooting guides.
