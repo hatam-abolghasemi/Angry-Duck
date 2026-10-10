@@ -55,6 +55,13 @@ func (p *Puller) OnSuccess(fn func()) { p.onSuccess = fn }
 
 // NewPuller builds a Puller.
 func NewPuller(runtime Runtime, nodeID string, labelRegistry bool) *Puller {
+	if !labelRegistry {
+		for _, r := range []string{"success", "failure", "cancelled"} {
+			pullsTotal.Add(0, nodeID, r, "")
+			pullSecondsTotal.Add(0, nodeID, r, "")
+		}
+	}
+	pullsInFlight.Set(0, nodeID)
 	return &Puller{
 		runtime:       runtime,
 		nodeID:        nodeID,

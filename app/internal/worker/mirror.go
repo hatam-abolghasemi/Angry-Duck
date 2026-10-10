@@ -89,6 +89,14 @@ const holderTTL = 30 * time.Second
 func (m *Mirror) RequireClientToken(token string) { m.clientToken = token }
 
 func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
+	for _, kind := range []string{"blob", "manifest"} {
+		for _, r := range []string{"local", "peer", "miss", "error"} {
+			mirrorRequestsTotal.Add(0, nodeID, kind, r)
+		}
+	}
+	mirrorBytesTotal.Add(0, nodeID, "local")
+	mirrorBytesTotal.Add(0, nodeID, "peer")
+	mirrorServedTotal.Add(0, nodeID)
 	return &Mirror{
 		store: store, nodeID: nodeID, token: token, controllerURL: strings.TrimRight(controllerURL, "/"),
 		client: &http.Client{Transport: &http.Transport{

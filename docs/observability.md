@@ -10,14 +10,15 @@ covers every metric, in these tabs:
 
 | Tab | Answers |
 |---|---|
-| **Overview** | Workers reporting, stuck images, images spreading, mirror hit ratio, registry bytes avoided, nodes cleaning; a per-node overview table; running containers from preheated repos. |
+| **Overview** | Workers reporting, stuck images, images unpullable from their registry, images spreading, mirror hit ratio, registry bytes avoided, nodes cleaning and disk-stalled; a per-node overview table; running containers from preheated repos. |
+| **Registry Health** | What the registries answered for the images the nodes hold (see [Origin check](#origin-check)): totals per status, every image a registry no longer serves with the copies left, each registry's answers, and how the copies of unserved images dwindle over time. |
 | **Preheat** | Registry pulls by result and node, blobs (spread) and whole images (fallback) side by side, their average duration, pulls in flight, registry download per node, whole-image seed ranking and registries, layer index size. |
 | **Spread** | Every image being spread now (nodes per state, layers held versus still only coming from the registry), what each node still lacks in layers and bytes, every blob moving right now (receiver, path, source, size), transfers by path and result, bytes and throughput per path, finished spreads, how long the last one took. |
-| **Whole-Image Fallback** | Propagation of images that can't be spread blob by blob: per-image progress, nodes per state, finished propagations, transfers by result and receiving node. Empty while every push spreads. |
 | **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, rescues in flight, peer fetches by reason and result, stuck pods per node and image with whether a rescue is running. |
 | **Transfers** | Node-to-node throughput and top senders (spread blobs and whole-image transfers), layers by delivery method, snapshot share, pinned snapshots and leftover cleanups. |
 | **Mirror** | Requests by result, hit ratio, bytes, misses per node. |
 | **Cleanup** | Disk-pressure cleanup per node (idle, cleaning or stalled), images removed by tier, candidates by tier, removals per node, images coming back after cleanup. |
+| **Whole-Image Fallback** | Propagation of images that can't be spread blob by blob: per-image progress, nodes per state, finished propagations, transfers by result and receiving node. Empty while every push spreads. |
 
 The file uses Grafana's dashboard schema v2, for the tabs and per-tab
 variables. It needs Grafana 13, or Grafana 12 with the `dashboardNewLayouts`
@@ -35,10 +36,11 @@ Variables:
 - **Node**: one or more nodes. Applies to every per-node metric, including
   controller metrics labeled with the target node. Clicking a node name in a
   table sets it.
-- **Registry** (Preheat tab): registries seed pulls came from. Empty unless
-  `METRICS_LABEL_REGISTRY=true`.
-- **Image** (Propagation tab): images being propagated. Clicking an image in
-  the progress table sets it.
+
+No data is drawn as zero: a quiet hour is a flat line, not a gap. Per-node
+charts list the nodes that did something in the time range, and keep them at
+zero the rest of the time. Some queries use the `@ end()` modifier, which
+Prometheus 2.33+ and Mimir support.
 
 Event counts are computed scrape by scrape, so the hidden `scrape_interval`
 constant must match your scrape interval. It is `15s`, as in the included
@@ -51,10 +53,17 @@ time range and the current tab.
 
 ## Metrics
 
+Every counter exists from the start, at zero, for every label value it can
+take (per node as soon as the node reports), so `rate()` and `increase()` see
+the first event too.
+
 ### Controller
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
+| `angryduck_controller_origin_images` | gauge | `registry`, `status` | Distinct images on fresh nodes, by registry and its answer at the last [origin check](#origin-check): `ok`, `missing`, `denied`, `unreachable`, `unchecked`. |
+| `angryduck_controller_origin_unavailable` | gauge | `image`, `status` | Images a registry didn't serve (`missing` or `denied`); the value is how many fresh nodes still hold a copy. Only such images are listed. |
+| `angryduck_controller_origin_checks_total` | counter | `status` | Origin checks sent, by answer. |
 | `angryduck_controller_pull_orders_total` | counter | `node`, `result`, `registry` | Seed pull orders sent to workers: `success` or `failure`. |
 | `angryduck_controller_seed_rankings_total` | counter | `basis` | How seeds were ranked: `layers`, or the `repo` and `utilization` fallbacks. |
 | `angryduck_controller_seed_missing_bytes` | gauge | `node` | Bytes of the latest seeded image each seed lacked, i.e. its registry download. |
@@ -140,6 +149,43 @@ sum by (node) (rate(angryduck_worker_containerd_calls_total[5m])) * 60
 angryduck_process_memory_bytes{component="worker", kind="rss_anon"}
 ```
 
+<a id="origin-check"></a>
+## Origin check
+
+Peers, the mirror, rescue and cleanup can keep an image alive on the nodes
+long after its registry stopped serving it. A pod rescheduled to another node
+gets the image from a peer; cleanup removes it from the old node; the next
+move copies it again. Meanwhile the tag was deleted, or the pull secret was
+rotated, and nothing pulls from the registry, so nobody notices until the
+last copy is removed and every pod needing it is stuck.
+
+So the controller keeps asking. For every image reference a fresh node
+holds (tags and digests), it sends a `HEAD` for the manifest to the image's
+registry with the credentials from `REGISTRY_CREDENTIALS_PATH`, the same ones
+Angry Duck pulls with. Each image is asked every `ORIGIN_CHECK_INTERVAL_S`
+(an hour), and one the registry didn't serve every quarter of that, so a fix
+shows within minutes. The answers:
+
+| Status | Meaning |
+|---|---|
+| `ok` | The registry serves the manifest. |
+| `missing` | The registry says it doesn't exist: the tag, manifest or repository is gone. |
+| `denied` | The registry refused Angry Duck's credentials, or wants credentials and none are configured for it. A whole registry turning `denied` usually means its pull secret changed. The controller reads the secret at startup, so after rotating it, restart the controller. |
+| `unreachable` | No usable answer: network errors, timeouts, rate limits, server errors. |
+
+What it costs: one `HEAD` (no download) per image per interval, plus a token
+request where the registry uses them, sent one at a time and spread evenly
+over the interval: 600 images make about ten requests every 30 seconds. Docker
+Hub doesn't count `HEAD` requests against its pull limit. The check starts
+`ORIGIN_CHECK_DELAY_S` (two minutes) after the controller, runs on its own
+goroutine with its own HTTP client and token cache, and only reads a copy of
+the inventory, so a slow registry delays nothing but the next check. It
+changes nothing on the nodes: cleanup, spread and rescue behave as before.
+
+If the controller can't reach registries the nodes reach through a mirror,
+their images show as `unreachable`; list the registries worth checking in
+`ORIGIN_CHECK_REGISTRIES`. `ORIGIN_CHECK_INTERVAL_S=0` turns the check off.
+
 ## Suggested alerts
 
 ```yaml
@@ -158,6 +204,25 @@ groups:
             and on (node) angryduck_controller_rescue_stuck_images > 0
         annotations:
           summary: "{{ $labels.node }} can't pull an image and no node has it"
+
+      - alert: AngryDuckImageGoneFromRegistry
+        expr: max by (image, status) (angryduck_controller_origin_unavailable) > 0
+        for: 30m
+        annotations:
+          summary: "{{ $labels.image }} is {{ $labels.status }} at its registry; {{ $value }} node(s) still hold it"
+
+      - alert: AngryDuckLastCopy
+        expr: max by (image) (angryduck_controller_origin_unavailable) == 1
+        annotations:
+          summary: "Only one node holds {{ $labels.image }}, and its registry doesn't serve it"
+
+      - alert: AngryDuckRegistryDenied
+        expr: |
+          sum by (registry) (angryduck_controller_origin_images{status="denied"})
+            / sum by (registry) (angryduck_controller_origin_images{status=~"ok|missing|denied"}) > 0.5
+        for: 15m
+        annotations:
+          summary: "{{ $labels.registry }} refuses Angry Duck's credentials; was its pull secret rotated?"
 
       - alert: AngryDuckDiskFullNotFromImages
         expr: angryduck_worker_gc_stalled == 1

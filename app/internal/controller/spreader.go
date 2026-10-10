@@ -173,6 +173,22 @@ type sxfer struct {
 
 // NewSpreader builds a spreader.
 func NewSpreader(registry *Registry, resolver ImageResolver, token string, cfg SpreaderConfig) *Spreader {
+	for _, path := range []string{"registry", "peer"} {
+		for _, r := range []string{"ok", "failed", "cancelled", "present", "rejected"} {
+			spreadTransfersTotal.Add(0, path, r)
+		}
+	}
+	spreadTransfersTotal.Add(0, "image", "ok")
+	spreadTransfersTotal.Add(0, "image", "failed")
+	for _, path := range []string{"registry", "peer", "image"} {
+		spreadBytesTotal.Add(0, path)
+	}
+	for _, r := range []string{"success", "failure"} {
+		spreadFinalizesTotal.Add(0, r)
+	}
+	for _, r := range []string{"complete", "superseded", "expired"} {
+		spreadsTotal.Add(0, r)
+	}
 	if cfg.MaxRegistry < 1 {
 		cfg.MaxRegistry = 1
 	}

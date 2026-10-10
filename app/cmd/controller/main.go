@@ -81,13 +81,14 @@ func main() {
 	platform := config.String("RANK_PLATFORM", "linux/amd64")
 	var resolver controller.LayerResolver
 	var regClient *registryclient.Client
+	originInterval := config.Duration("ORIGIN_CHECK_INTERVAL_S", 3600)
+	credsPath := config.String("REGISTRY_CREDENTIALS_PATH", "")
+	creds, err := registryauth.Load(credsPath)
+	if err != nil {
+		log.Printf("angryduck-controller: WARNING: registry credentials from %s unusable, resolving anonymously: %v", credsPath, err)
+		creds = registryauth.Empty()
+	}
 	if config.Bool("RANK_BY_LAYERS", true) {
-		credsPath := config.String("REGISTRY_CREDENTIALS_PATH", "")
-		creds, err := registryauth.Load(credsPath)
-		if err != nil {
-			log.Printf("angryduck-controller: WARNING: registry credentials from %s unusable, resolving anonymously: %v", credsPath, err)
-			creds = registryauth.Empty()
-		}
 		regClient = registryclient.New(creds, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5), config.Duration("RANK_RESOLVE_CACHE_S", 600))
 		resolver = regClient
 		ranker.SetLayerResolver(resolver, platform, config.Duration("RANK_RESOLVE_TIMEOUT_S", 5))
@@ -132,6 +133,19 @@ func main() {
 			server.SetSpreader(spreader)
 			go spreader.Run(ctx)
 		}
+	}
+
+	if originInterval > 0 {
+		// Its own client: its checks never queue behind, or hold up, the
+		// manifest reads preheats and spreads wait on.
+		origin := controller.NewOriginChecker(registry, registryclient.New(creds, 10*time.Second, 0), controller.OriginConfig{
+			Interval:   originInterval,
+			Delay:      config.Duration("ORIGIN_CHECK_DELAY_S", 120),
+			Registries: config.StringSlice("ORIGIN_CHECK_REGISTRIES", nil),
+		})
+		go origin.Run(ctx)
+	} else {
+		log.Println("angryduck-controller: origin check disabled (ORIGIN_CHECK_INTERVAL_S=0)")
 	}
 
 	go metrics.TrackProcessMemory(ctx, "controller")

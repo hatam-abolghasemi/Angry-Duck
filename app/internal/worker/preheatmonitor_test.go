@@ -38,7 +38,7 @@ func TestPreheatMonitorTickCountsOnlyPreheatedRepos(t *testing.T) {
 }
 
 // TestPreheatMonitorTickResetsWhenNothingPreheated confirms a node with
-// no recent preheats reports no series at all — not a zero-valued one —
+// no recent preheats reports no preheat series at all — not a zero-valued one —
 // and doesn't error just because nothing matched.
 func TestPreheatMonitorTickResetsWhenNothingPreheated(t *testing.T) {
 	rt := newFakeRuntime()
@@ -52,7 +52,7 @@ func TestPreheatMonitorTickResetsWhenNothingPreheated(t *testing.T) {
 	m.tick()
 
 	out := scrapeMetrics(t)
-	if strings.Contains(out, `node="`+nodeID+`"`) {
+	if strings.Contains(out, `angryduck_worker_preheated_containers_running{node="`+nodeID+`"`) {
 		t.Errorf("expected no series for a node with nothing preheated, got:\n%s", out)
 	}
 }
@@ -74,7 +74,7 @@ func TestPreheatMonitorTickExpiresOldPreheats(t *testing.T) {
 	m.tick()
 
 	out := scrapeMetrics(t)
-	if strings.Contains(out, `node="`+nodeID+`"`) {
+	if strings.Contains(out, `angryduck_worker_preheated_containers_running{node="`+nodeID+`"`) {
 		t.Errorf("expected the expired preheat to no longer count, got:\n%s", out)
 	}
 }

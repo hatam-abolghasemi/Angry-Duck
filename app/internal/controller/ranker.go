@@ -150,6 +150,16 @@ func (rk *Ranker) Seeds(image string) map[string]time.Time {
 // container-registry host (METRICS_LABEL_REGISTRY) — off by default
 // since registry host is an unbounded-ish label, unlike node.
 func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubstrings []string, preferImageLocality bool, labelRegistryHost bool) *Ranker {
+	for _, b := range []string{"layers", "repo", "utilization"} {
+		seedRankingsTotal.Add(0, b)
+	}
+	if !labelRegistryHost {
+		registry.OnNewNode(func(node string) {
+			for _, r := range []string{"success", "failure"} {
+				pullOrdersTotal.Add(0, node, r, "")
+			}
+		})
+	}
 	return &Ranker{
 		registry:            registry,
 		topN:                topN,

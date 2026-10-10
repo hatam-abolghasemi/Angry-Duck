@@ -123,7 +123,7 @@
     }
   ],
   "cursorSync": "Crosshair",
-  "description": "Preheat, spread, propagation, rescue, mirror and image cleanup for Angry Duck 1.8.10. Pick data source → cluster → node; click any node, image or row to focus.",
+  "description": "Preheat, spread, rescue, mirror, image cleanup and registry health for Angry Duck 1.8.11. Pick data source → cluster → node; click any node to focus.",
   "editable": true,
   "elements": {
     "panel-1": {
@@ -866,7 +866,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (repo) (angryduck_worker_preheated_containers_running{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "expr": "(sum by (repo) (angryduck_worker_preheated_containers_running{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or 0 * max by (repo) (max_over_time(angryduck_worker_preheated_containers_running{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range] @ end())))",
                       "instant": false,
                       "legendFormat": "{{repo}}",
                       "range": true
@@ -997,7 +997,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} - angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} - angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
                       "instant": false,
                       "legendFormat": "image {{result}}",
                       "range": true
@@ -1096,7 +1096,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -1181,7 +1182,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} - angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} - angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}])) and on (node) (sum by (node) (increase(angryduck_controller_pull_orders_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}} (images)",
                       "range": true
@@ -1204,7 +1205,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} - angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} - angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}])) and on (node) (sum by (node) (increase(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}} (blobs)",
                       "range": true
@@ -1287,7 +1288,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -1341,7 +1343,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} - angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (result) (sum_over_time((clamp_min(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} - angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
                       "instant": false,
                       "legendFormat": "image {{result}}",
                       "range": true
@@ -1440,7 +1442,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -1540,7 +1543,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (increase(angryduck_worker_pull_seconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\", registry=~\"$registry\"}[30m]))\n/ sum by (node) (increase(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\", registry=~\"$registry\"}[30m]))",
+                      "expr": "((sum by (node) (increase(angryduck_worker_pull_seconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"}[30m]))) / ((sum by (node) (increase(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"}[30m]))) > 0) or (sum by (node) (increase(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"}[30m]))) * 0) and on (node) (sum by (node) (increase(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}} (image)",
                       "range": true
@@ -1563,7 +1566,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (increase(angryduck_worker_spread_transfer_milliseconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m])) / 1000\n/ sum by (node) (increase(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m]))",
+                      "expr": "((sum by (node) (increase(angryduck_worker_spread_transfer_milliseconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m])) / 1000) / ((sum by (node) (increase(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m]))) > 0) or (sum by (node) (increase(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[30m]))) * 0) and on (node) (sum by (node) (increase(angryduck_worker_spread_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}} (blob)",
                       "range": true
@@ -1699,7 +1702,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (registry) (sum_over_time((clamp_min(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\", registry=~\"$registry\"} - angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\", registry=~\"$registry\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (registry) (sum_over_time((clamp_min(angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"} - angryduck_worker_pulls_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"success\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
                       "instant": false,
                       "legendFormat": "{{registry}}",
                       "range": true
@@ -1776,7 +1779,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -1906,7 +1910,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -2051,7 +2056,8 @@
                     }
                   ]
                 },
-                "unit": "bytes"
+                "unit": "bytes",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -2196,7 +2202,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_worker_pulls_in_flight{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
+                      "expr": "sum(angryduck_worker_pulls_in_flight{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "image pulls in flight",
                       "range": true
@@ -2242,7 +2248,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_worker_spread_active{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"})",
+                      "expr": "sum(angryduck_worker_spread_active{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "blob pulls in flight",
                       "range": true
@@ -2318,7 +2324,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -2412,7 +2419,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_layer_index_digests{k8s_source_cluster=~\"$cluster\"})",
+                      "expr": "sum(angryduck_controller_layer_index_digests{k8s_source_cluster=~\"$cluster\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "digests and chainIDs",
                       "range": true
@@ -2487,7 +2494,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -2542,7 +2550,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"have\"}) / sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=~\"have|missing|in_flight|seeding\"})",
+                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"have\"}) / sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=~\"have|missing|in_flight|seeding\"})",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -2566,7 +2574,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"have\"})",
+                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"have\"})",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -2590,7 +2598,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"missing\"})",
+                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"missing\"})",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -2614,7 +2622,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"in_flight\"})",
+                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"in_flight\"})",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -2638,7 +2646,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"seeding\"})",
+                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"seeding\"})",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -2662,7 +2670,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"skipped\"})",
+                      "expr": "sum by (image) (angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"skipped\"})",
                       "format": "table",
                       "instant": true,
                       "legendFormat": "__auto",
@@ -3002,7 +3010,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"have\"}) or vector(0)",
+                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"have\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "have",
                       "range": true
@@ -3025,7 +3033,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"missing\"}) or vector(0)",
+                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"missing\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "missing",
                       "range": true
@@ -3048,7 +3056,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"in_flight\"}) or vector(0)",
+                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"in_flight\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "in_flight",
                       "range": true
@@ -3071,7 +3079,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"seeding\"}) or vector(0)",
+                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"seeding\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "seeding",
                       "range": true
@@ -3094,7 +3102,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", image=~\"$image\", state=\"skipped\"}) or vector(0)",
+                      "expr": "sum(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\", state=\"skipped\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "skipped",
                       "range": true
@@ -3168,7 +3176,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -3552,7 +3561,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -3637,7 +3647,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_controller_propagation_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} - angryduck_controller_propagation_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_controller_propagation_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} - angryduck_controller_propagation_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}])) and on (node) (sum by (node) (increase(angryduck_controller_propagation_transfers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -3720,7 +3730,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -3850,7 +3861,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -4171,7 +4183,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(angryduck_controller_rescues_in_flight{k8s_source_cluster=~\"$cluster\"})",
+                      "expr": "sum(angryduck_controller_rescues_in_flight{k8s_source_cluster=~\"$cluster\"}) or vector(0)",
                       "instant": false,
                       "legendFormat": "in flight",
                       "range": true
@@ -4246,7 +4258,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -4465,7 +4478,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -4660,7 +4674,8 @@
                     }
                   ]
                 },
-                "unit": "Bps"
+                "unit": "Bps",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -4758,7 +4773,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "topk(10, sum by (node) (rate({__name__=~\"angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\", path=~\"|served\"}[$__rate_interval])))",
+                      "expr": "sum by (node) (rate({__name__=~\"angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\", path=~\"|served\"}[$__rate_interval])) and on (node) topk(10, sum by (node) (increase({__name__=~\"angryduck_worker_rescue_bytes_total|angryduck_worker_spread_bytes_total\", k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=~\"|served\", path=~\"|served\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -4993,7 +5008,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -5093,7 +5109,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum(increase(angryduck_worker_rescue_layers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", method=\"snapshot\"}[30m]))\n/ sum(increase(angryduck_worker_rescue_layers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", method=~\"blob|snapshot\"}[30m]))",
+                      "expr": "(sum(increase(angryduck_worker_rescue_layers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", method=\"snapshot\"}[30m]))) / ((sum(increase(angryduck_worker_rescue_layers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", method=~\"blob|snapshot\"}[30m]))) > 0) or (sum(increase(angryduck_worker_rescue_layers_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", method=~\"blob|snapshot\"}[30m]))) * 0",
                       "instant": false,
                       "legendFormat": "snapshot share",
                       "range": true
@@ -5176,7 +5192,8 @@
                     }
                   ]
                 },
-                "unit": "percentunit"
+                "unit": "percentunit",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -5231,7 +5248,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (angryduck_worker_rescue_pinned_snapshots{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) > 0",
+                      "expr": "sum by (node) (angryduck_worker_rescue_pinned_snapshots{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) and on (node) (max by (node) (max_over_time(angryduck_worker_rescue_pinned_snapshots{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -5239,6 +5256,29 @@
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_worker_rescue_pinned_snapshots{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "total",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -5445,7 +5485,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -5572,7 +5613,8 @@
                     }
                   ]
                 },
-                "unit": "reqps"
+                "unit": "reqps",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -5688,7 +5730,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))\n/ sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))",
+                      "expr": "(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))) / ((sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) > 0) or (sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) * 0",
                       "instant": false,
                       "legendFormat": "overall",
                       "range": true
@@ -5711,7 +5753,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))\n/ sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))",
+                      "expr": "(sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))) / ((sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) > 0) or (sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) * 0",
                       "instant": false,
                       "legendFormat": "{{kind}}",
                       "range": true
@@ -5797,7 +5839,8 @@
                     }
                   ]
                 },
-                "unit": "percentunit"
+                "unit": "percentunit",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -5989,7 +6032,8 @@
                     }
                   ]
                 },
-                "unit": "Bps"
+                "unit": "Bps",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -6102,7 +6146,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[$__range])) / sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))",
+                      "expr": "(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[$__range]))) / ((sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))) > 0) or (sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))) * 0",
                       "instant": true,
                       "legendFormat": "__auto",
                       "range": false
@@ -6202,7 +6246,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"miss\"} - angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"miss\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}])) > 0",
+                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"miss\"} - angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"miss\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}])) and on (node) (sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"miss\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -6551,7 +6595,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -6740,7 +6785,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -6841,7 +6887,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier!=\"error\"} - angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier!=\"error\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "expr": "sum by (node) (sum_over_time((clamp_min(angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier!=\"error\"} - angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier!=\"error\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}])) and on (node) (sum by (node) (increase(angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier!=\"error\"}[$__range] @ end())) > 0)",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -6979,7 +7025,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval]))",
+                      "expr": "(sum by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval])) or 0 * max by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__range] @ end())))",
                       "instant": false,
                       "legendFormat": "{{state}}",
                       "range": true
@@ -7002,7 +7048,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (state) (max_over_time(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval])) > 0",
+                      "expr": "(sum by (state) (max_over_time(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval])) or 0 * max by (state) (max_over_time(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}[$__range] @ end())))",
                       "instant": false,
                       "legendFormat": "whole-image {{state}}",
                       "range": true
@@ -7076,7 +7122,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -7131,7 +7178,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) > 0",
+                      "expr": "(sum by (node) (angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or 0 * max by (node) (max_over_time(angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range] @ end())))",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -7139,6 +7186,29 @@
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "total",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -7212,7 +7282,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -7565,7 +7636,8 @@
                     }
                   ]
                 },
-                "unit": "Bps"
+                "unit": "Bps",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -7666,7 +7738,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))\n/ sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))",
+                      "expr": "(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))) / ((sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) > 0) or (sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) * 0",
                       "instant": false,
                       "legendFormat": "overall",
                       "range": true
@@ -7689,7 +7761,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))\n/ sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))",
+                      "expr": "(sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[30m]))) / ((sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) > 0) or (sum by (kind) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[30m]))) * 0",
                       "instant": false,
                       "legendFormat": "{{kind}}",
                       "range": true
@@ -7775,7 +7847,8 @@
                     }
                   ]
                 },
-                "unit": "percentunit"
+                "unit": "percentunit",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -7872,7 +7945,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (node) (angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) > 0",
+                      "expr": "(sum by (node) (angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or 0 * max by (node) (max_over_time(angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range] @ end())))",
                       "instant": false,
                       "legendFormat": "{{node}}",
                       "range": true
@@ -7880,6 +7953,29 @@
                     "version": "v0"
                   },
                   "refId": "A"
+                }
+              },
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_rescue_stuck_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "total",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "B"
                 }
               }
             ],
@@ -7953,7 +8049,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -8618,7 +8715,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval]))",
+                      "expr": "(sum by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__interval])) or 0 * max by (state) (max_over_time(angryduck_controller_spread_nodes{k8s_source_cluster=~\"$cluster\"}[$__range] @ end())))",
                       "legendFormat": "{{state}}",
                       "instant": false,
                       "range": true
@@ -8694,7 +8791,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -8869,7 +8967,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -9030,7 +9129,8 @@
                     }
                   ]
                 },
-                "unit": "Bps"
+                "unit": "Bps",
+                "noValue": "0"
               },
               "overrides": [
                 {
@@ -9115,7 +9215,7 @@
                     "spec": {
                       "editorMode": "code",
                       "exemplar": false,
-                      "expr": "sum by (path) (rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"registry|peer\"}[5m])) / (sum by (path) (rate(angryduck_worker_spread_transfer_milliseconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[5m])) / 1000)",
+                      "expr": "(sum by (path) (rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"registry|peer\"}[5m]))) / ((sum by (path) (rate(angryduck_worker_spread_transfer_milliseconds_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[5m])) / 1000) > 0) or sum by (path) (rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"registry|peer\"}[5m])) * 0",
                       "legendFormat": "{{path}}",
                       "instant": false,
                       "range": true
@@ -9191,7 +9291,8 @@
                     }
                   ]
                 },
-                "unit": "Bps"
+                "unit": "Bps",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -9344,7 +9445,8 @@
                     }
                   ]
                 },
-                "unit": "short"
+                "unit": "short",
+                "noValue": "0"
               },
               "overrides": []
             },
@@ -9601,6 +9703,1676 @@
           "version": "13.1.1"
         }
       }
+    },
+    "panel-60": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "count(max by (image) (angryduck_controller_origin_unavailable{k8s_source_cluster=~\"$cluster\"})) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Images on the nodes that their registry no longer serves (missing, or Angry Duck's credentials refused). Peers keep them alive for now; see Registry Health.",
+        "id": 60,
+        "links": [],
+        "title": "Unpullable From Origin",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-61": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_worker_gc_stalled{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Nodes above the cleanup threshold where removing images frees nothing: the disk is filled by something else.",
+        "id": 61,
+        "links": [],
+        "title": "Nodes Disk-Stalled",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-62": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Distinct image references on fresh nodes in the checked registries.",
+        "id": 62,
+        "links": [],
+        "title": "Images Held",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-63": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\", status=\"ok\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Images their registry served at the last check.",
+        "id": 63,
+        "links": [],
+        "title": "Served",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-64": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\", status=\"missing\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Images whose manifest the registry says doesn't exist: the tag or repository was deleted. Only nodes still have them.",
+        "id": 64,
+        "links": [],
+        "title": "Missing at Origin",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-65": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\", status=\"denied\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Images the registry refused with Angry Duck's credentials, or that need credentials none are configured for. A whole registry here usually means its pull secret changed; the controller reads it at startup.",
+        "id": 65,
+        "links": [],
+        "title": "Access Denied",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-66": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\", status=\"unreachable\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Images whose registry gave no usable answer: network errors, timeouts, rate limits, server errors. Narrow ORIGIN_CHECK_REGISTRIES if the controller can't reach registries the nodes use through a mirror.",
+        "id": 66,
+        "links": [],
+        "title": "Registry Unreachable",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "purple",
+                      "value": 1
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-67": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum(angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\", status=\"unchecked\"}) or vector(0)",
+                      "instant": false,
+                      "legendFormat": "__auto",
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Images seen on the nodes and not checked yet. Checks are spread over ORIGIN_CHECK_INTERVAL_S and start ORIGIN_CHECK_DELAY_S after the controller.",
+        "id": 67,
+        "links": [],
+        "title": "Not Checked Yet",
+        "transparent": true,
+        "vizConfig": {
+          "group": "stat",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "noValue": "0",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "none"
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "center",
+              "orientation": "auto",
+              "percentChangeColorMode": "standard",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showPercentChange": false,
+              "textMode": "value",
+              "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-68": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (image, status) (angryduck_controller_origin_unavailable{k8s_source_cluster=~\"$cluster\"})",
+                      "format": "table",
+                      "instant": true,
+                      "legendFormat": "__auto",
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "group": "organize",
+                "kind": "Transformation",
+                "spec": {
+                  "options": {
+                    "excludeByName": {
+                      "Time": true
+                    },
+                    "indexByName": {
+                      "image": 0,
+                      "status": 1,
+                      "Value": 2
+                    },
+                    "renameByName": {
+                      "Value": "copies left"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Every image a node holds that its registry didn't serve at the last check, and how many nodes still hold a copy. Fewest copies first: when the last copy is removed, nothing can pull the image again. Re-push it, restore the tag, or fix the pull secret.",
+        "id": 68,
+        "links": [],
+        "title": "Images Their Registry No Longer Serves",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 2
+                    },
+                    {
+                      "color": "#EAB839",
+                      "value": 3
+                    }
+                  ]
+                },
+                "noValue": "none"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "copies left"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-background",
+                        "mode": "basic"
+                      }
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 110
+                    },
+                    {
+                      "id": "decimals",
+                      "value": 0
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "status"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 110
+                    },
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-text"
+                      }
+                    },
+                    {
+                      "id": "mappings",
+                      "value": [
+                        {
+                          "type": "value",
+                          "options": {
+                            "missing": {
+                              "color": "red",
+                              "index": 0,
+                              "text": "missing"
+                            },
+                            "denied": {
+                              "color": "orange",
+                              "index": 1,
+                              "text": "denied"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": [
+                {
+                  "desc": false,
+                  "displayName": "copies left"
+                }
+              ]
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-69": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "max by (registry, status) (angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\"})",
+                      "format": "table",
+                      "instant": true,
+                      "legendFormat": "__auto",
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": [
+              {
+                "group": "groupingToMatrix",
+                "kind": "Transformation",
+                "spec": {
+                  "options": {
+                    "columnField": "status",
+                    "rowField": "registry",
+                    "valueField": "Value"
+                  }
+                }
+              },
+              {
+                "group": "organize",
+                "kind": "Transformation",
+                "spec": {
+                  "options": {
+                    "indexByName": {
+                      "registry\\status": 0,
+                      "ok": 1,
+                      "missing": 2,
+                      "denied": 3,
+                      "unreachable": 4,
+                      "unchecked": 5
+                    },
+                    "renameByName": {
+                      "registry\\status": "registry"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Images per registry by what it answered at the last origin check.",
+        "id": 69,
+        "links": [],
+        "title": "By Registry",
+        "transparent": true,
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "filterable": true
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": 0
+                    }
+                  ]
+                },
+                "noValue": "0"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "missing"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-text"
+                      }
+                    },
+                    {
+                      "id": "thresholds",
+                      "value": {
+                        "mode": "absolute",
+                        "steps": [
+                          {
+                            "color": "text",
+                            "value": 0
+                          },
+                          {
+                            "color": "red",
+                            "value": 1
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "id": "color",
+                      "value": {
+                        "mode": "thresholds"
+                      }
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 100
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "denied"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-text"
+                      }
+                    },
+                    {
+                      "id": "thresholds",
+                      "value": {
+                        "mode": "absolute",
+                        "steps": [
+                          {
+                            "color": "text",
+                            "value": 0
+                          },
+                          {
+                            "color": "orange",
+                            "value": 1
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "id": "color",
+                      "value": {
+                        "mode": "thresholds"
+                      }
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 100
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "unreachable"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-text"
+                      }
+                    },
+                    {
+                      "id": "thresholds",
+                      "value": {
+                        "mode": "absolute",
+                        "steps": [
+                          {
+                            "color": "text",
+                            "value": 0
+                          },
+                          {
+                            "color": "purple",
+                            "value": 1
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "id": "color",
+                      "value": {
+                        "mode": "thresholds"
+                      }
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 100
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "ok"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 100
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "unchecked"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 100
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true,
+              "sortBy": []
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-70": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (status) (angryduck_controller_origin_images{k8s_source_cluster=~\"$cluster\"})",
+                      "legendFormat": "{{status}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Distinct images on the nodes by their registry's answer at the last check.",
+        "id": 70,
+        "links": [],
+        "title": "Images by Origin Status",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": 0,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "none",
+                "noValue": "0"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "ok"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "missing"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "denied"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "orange",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "unreachable"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "purple",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "unchecked"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "text",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-71": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "sum by (status) (sum_over_time((clamp_min(angryduck_controller_origin_checks_total{k8s_source_cluster=~\"$cluster\"} - angryduck_controller_origin_checks_total{k8s_source_cluster=~\"$cluster\"} offset ${scrape_interval}, 0))[$__interval:${scrape_interval}]))",
+                      "legendFormat": "{{status}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Manifest checks sent to registries, by answer. One HEAD request each, spread over ORIGIN_CHECK_INTERVAL_S.",
+        "id": 71,
+        "links": [],
+        "title": "Origin Checks by Result",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": 0,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "none",
+                "noValue": "0"
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "ok"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "green",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "missing"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "denied"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "orange",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "unreachable"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "purple",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "unchecked"
+                  },
+                  "properties": [
+                    {
+                      "id": "color",
+                      "value": {
+                        "fixedColor": "text",
+                        "mode": "fixed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-72": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "exemplar": false,
+                      "expr": "(max by (image) (angryduck_controller_origin_unavailable{k8s_source_cluster=~\"$cluster\"}) or 0 * max by (image) (max_over_time(angryduck_controller_origin_unavailable{k8s_source_cluster=~\"$cluster\"}[$__range] @ end())))",
+                      "legendFormat": "{{image}}",
+                      "instant": false,
+                      "range": true
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {
+              "interval": "1m"
+            },
+            "transformations": []
+          }
+        },
+        "description": "Nodes holding each image their registry doesn't serve, over time. A line falling toward one is an image about to be lost for good: cleanup removes copies, and spread, rescue and the mirror can only copy what a node still has. It drops to zero when the last copy is gone, or when the registry serves the image again (then it also leaves the table above).",
+        "id": 72,
+        "links": [],
+        "title": "Copies Left of Images Their Registry Doesn't Serve",
+        "transparent": true,
+        "vizConfig": {
+          "group": "timeseries",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic-by-name"
+                },
+                "custom": {
+                  "axisBorderShow": false,
+                  "axisCenteredZero": false,
+                  "axisColorMode": "text",
+                  "axisLabel": "",
+                  "axisPlacement": "auto",
+                  "barAlignment": 0,
+                  "barWidthFactor": 0.6,
+                  "drawStyle": "line",
+                  "fillOpacity": 10,
+                  "gradientMode": "opacity",
+                  "hideFrom": {
+                    "legend": false,
+                    "tooltip": false,
+                    "viz": false
+                  },
+                  "insertNulls": false,
+                  "lineInterpolation": "linear",
+                  "lineWidth": 1,
+                  "pointSize": 3,
+                  "scaleDistribution": {
+                    "type": "linear"
+                  },
+                  "showPoints": "auto",
+                  "showValues": false,
+                  "spanNulls": 60000,
+                  "stacking": {
+                    "group": "A",
+                    "mode": "none"
+                  },
+                  "thresholdsStyle": {
+                    "mode": "off"
+                  }
+                },
+                "decimals": 0,
+                "min": 0,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "none",
+                "noValue": "0"
+              },
+              "overrides": []
+            },
+            "options": {
+              "annotations": {
+                "clustering": -1,
+                "multiLane": false
+              },
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "min"
+                ],
+                "displayMode": "table",
+                "enableFacetedFilter": false,
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Last *",
+                "sortDesc": false
+              },
+              "tooltip": {
+                "hideZeros": true,
+                "maxHeight": 400,
+                "mode": "multi",
+                "sort": "desc"
+              }
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
     }
   },
   "layout": {
@@ -9629,10 +11401,10 @@
                                   "kind": "ElementReference",
                                   "name": "panel-1"
                                 },
-                                "height": 4,
-                                "width": 4,
                                 "x": 0,
-                                "y": 0
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
                               }
                             },
                             {
@@ -9642,10 +11414,23 @@
                                   "kind": "ElementReference",
                                   "name": "panel-2"
                                 },
-                                "height": 4,
-                                "width": 4,
-                                "x": 4,
-                                "y": 0
+                                "x": 3,
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-60"
+                                },
+                                "x": 6,
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
                               }
                             },
                             {
@@ -9655,10 +11440,10 @@
                                   "kind": "ElementReference",
                                   "name": "panel-3"
                                 },
-                                "height": 4,
-                                "width": 4,
-                                "x": 8,
-                                "y": 0
+                                "x": 9,
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
                               }
                             },
                             {
@@ -9668,10 +11453,10 @@
                                   "kind": "ElementReference",
                                   "name": "panel-4"
                                 },
-                                "height": 4,
-                                "width": 4,
                                 "x": 12,
-                                "y": 0
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
                               }
                             },
                             {
@@ -9681,10 +11466,10 @@
                                   "kind": "ElementReference",
                                   "name": "panel-5"
                                 },
-                                "height": 4,
-                                "width": 4,
-                                "x": 16,
-                                "y": 0
+                                "x": 15,
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
                               }
                             },
                             {
@@ -9694,10 +11479,23 @@
                                   "kind": "ElementReference",
                                   "name": "panel-6"
                                 },
-                                "height": 4,
-                                "width": 4,
-                                "x": 20,
-                                "y": 0
+                                "x": 18,
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-61"
+                                },
+                                "x": 21,
+                                "y": 0,
+                                "width": 3,
+                                "height": 4
                               }
                             },
                             {
@@ -9816,6 +11614,190 @@
               }
             },
             "title": "Overview"
+          }
+        },
+        {
+          "kind": "TabsLayoutTab",
+          "spec": {
+            "title": "Registry Health",
+            "layout": {
+              "kind": "RowsLayout",
+              "spec": {
+                "rows": [
+                  {
+                    "kind": "RowsLayoutRow",
+                    "spec": {
+                      "collapse": false,
+                      "title": "Now",
+                      "layout": {
+                        "kind": "GridLayout",
+                        "spec": {
+                          "items": [
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-62"
+                                },
+                                "x": 0,
+                                "y": 0,
+                                "width": 4,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-63"
+                                },
+                                "x": 4,
+                                "y": 0,
+                                "width": 4,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-64"
+                                },
+                                "x": 8,
+                                "y": 0,
+                                "width": 4,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-65"
+                                },
+                                "x": 12,
+                                "y": 0,
+                                "width": 4,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-66"
+                                },
+                                "x": 16,
+                                "y": 0,
+                                "width": 4,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-67"
+                                },
+                                "x": 20,
+                                "y": 0,
+                                "width": 4,
+                                "height": 4
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-68"
+                                },
+                                "x": 0,
+                                "y": 4,
+                                "width": 14,
+                                "height": 10
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-69"
+                                },
+                                "x": 14,
+                                "y": 4,
+                                "width": 10,
+                                "height": 10
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "RowsLayoutRow",
+                    "spec": {
+                      "collapse": false,
+                      "title": "History",
+                      "layout": {
+                        "kind": "GridLayout",
+                        "spec": {
+                          "items": [
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-70"
+                                },
+                                "x": 0,
+                                "y": 0,
+                                "width": 12,
+                                "height": 9
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-71"
+                                },
+                                "x": 12,
+                                "y": 0,
+                                "width": 12,
+                                "height": 9
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-72"
+                                },
+                                "x": 0,
+                                "y": 9,
+                                "width": 24,
+                                "height": 9
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
           }
         },
         {
@@ -10173,153 +12155,6 @@
               }
             },
             "title": "Spread"
-          }
-        },
-        {
-          "kind": "TabsLayoutTab",
-          "spec": {
-            "layout": {
-              "kind": "RowsLayout",
-              "spec": {
-                "rows": [
-                  {
-                    "kind": "RowsLayoutRow",
-                    "spec": {
-                      "collapse": false,
-                      "layout": {
-                        "kind": "GridLayout",
-                        "spec": {
-                          "items": [
-                            {
-                              "kind": "GridLayoutItem",
-                              "spec": {
-                                "element": {
-                                  "kind": "ElementReference",
-                                  "name": "panel-22"
-                                },
-                                "height": 6,
-                                "width": 24,
-                                "x": 0,
-                                "y": 0
-                              }
-                            },
-                            {
-                              "kind": "GridLayoutItem",
-                              "spec": {
-                                "element": {
-                                  "kind": "ElementReference",
-                                  "name": "panel-23"
-                                },
-                                "height": 9,
-                                "width": 12,
-                                "x": 0,
-                                "y": 6
-                              }
-                            },
-                            {
-                              "kind": "GridLayoutItem",
-                              "spec": {
-                                "element": {
-                                  "kind": "ElementReference",
-                                  "name": "panel-24"
-                                },
-                                "height": 9,
-                                "width": 12,
-                                "x": 12,
-                                "y": 6
-                              }
-                            }
-                          ]
-                        }
-                      },
-                      "title": "Progress"
-                    }
-                  },
-                  {
-                    "kind": "RowsLayoutRow",
-                    "spec": {
-                      "collapse": false,
-                      "layout": {
-                        "kind": "GridLayout",
-                        "spec": {
-                          "items": [
-                            {
-                              "kind": "GridLayoutItem",
-                              "spec": {
-                                "element": {
-                                  "kind": "ElementReference",
-                                  "name": "panel-25"
-                                },
-                                "height": 9,
-                                "width": 12,
-                                "x": 0,
-                                "y": 0
-                              }
-                            },
-                            {
-                              "kind": "GridLayoutItem",
-                              "spec": {
-                                "element": {
-                                  "kind": "ElementReference",
-                                  "name": "panel-26"
-                                },
-                                "height": 9,
-                                "width": 12,
-                                "x": 12,
-                                "y": 0
-                              }
-                            }
-                          ]
-                        }
-                      },
-                      "title": "Transfers"
-                    }
-                  }
-                ]
-              }
-            },
-            "title": "Whole-Image Fallback",
-            "variables": [
-              {
-                "kind": "QueryVariable",
-                "spec": {
-                  "allValue": ".*",
-                  "allowCustomValue": true,
-                  "current": {
-                    "text": "All",
-                    "value": [
-                      "$__all"
-                    ]
-                  },
-                  "definition": "label_values(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}, image)",
-                  "description": "Images currently being propagated. Tip: click an image in the progress table to set this.",
-                  "hide": "dontHide",
-                  "includeAll": true,
-                  "label": "Image",
-                  "multi": true,
-                  "name": "image",
-                  "options": [],
-                  "query": {
-                    "datasource": {
-                      "name": "${datasource}"
-                    },
-                    "group": "prometheus",
-                    "kind": "DataQuery",
-                    "spec": {
-                      "qryType": 1,
-                      "query": "label_values(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}, image)",
-                      "refId": "PrometheusVariableQueryEditor-VariableQuery"
-                    },
-                    "version": "v0"
-                  },
-                  "refresh": "onTimeRangeChanged",
-                  "regex": "",
-                  "regexApplyTo": "value",
-                  "skipUrlSync": false,
-                  "sort": "alphabeticalAsc"
-                }
-              }
-            ]
           }
         },
         {
@@ -10729,6 +12564,153 @@
               }
             },
             "title": "Cleanup"
+          }
+        },
+        {
+          "kind": "TabsLayoutTab",
+          "spec": {
+            "layout": {
+              "kind": "RowsLayout",
+              "spec": {
+                "rows": [
+                  {
+                    "kind": "RowsLayoutRow",
+                    "spec": {
+                      "collapse": false,
+                      "layout": {
+                        "kind": "GridLayout",
+                        "spec": {
+                          "items": [
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-22"
+                                },
+                                "height": 6,
+                                "width": 24,
+                                "x": 0,
+                                "y": 0
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-23"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 0,
+                                "y": 6
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-24"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 12,
+                                "y": 6
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "title": "Progress"
+                    }
+                  },
+                  {
+                    "kind": "RowsLayoutRow",
+                    "spec": {
+                      "collapse": false,
+                      "layout": {
+                        "kind": "GridLayout",
+                        "spec": {
+                          "items": [
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-25"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 0,
+                                "y": 0
+                              }
+                            },
+                            {
+                              "kind": "GridLayoutItem",
+                              "spec": {
+                                "element": {
+                                  "kind": "ElementReference",
+                                  "name": "panel-26"
+                                },
+                                "height": 9,
+                                "width": 12,
+                                "x": 12,
+                                "y": 0
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "title": "Transfers"
+                    }
+                  }
+                ]
+              }
+            },
+            "title": "Whole-Image Fallback",
+            "variables": [
+              {
+                "kind": "QueryVariable",
+                "spec": {
+                  "allValue": ".*",
+                  "allowCustomValue": true,
+                  "current": {
+                    "text": "All",
+                    "value": [
+                      "$__all"
+                    ]
+                  },
+                  "definition": "label_values(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}, image)",
+                  "description": "Images currently being propagated. Tip: click an image in the progress table to set this.",
+                  "hide": "dontHide",
+                  "includeAll": true,
+                  "label": "Image",
+                  "multi": true,
+                  "name": "image",
+                  "options": [],
+                  "query": {
+                    "datasource": {
+                      "name": "${datasource}"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "qryType": 1,
+                      "query": "label_values(angryduck_controller_propagation_nodes{k8s_source_cluster=~\"$cluster\"}, image)",
+                      "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "version": "v0"
+                  },
+                  "refresh": "onTimeRangeChanged",
+                  "regex": "",
+                  "regexApplyTo": "value",
+                  "skipUrlSync": false,
+                  "sort": "alphabeticalAsc"
+                }
+              }
+            ]
           }
         }
       ]

@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -274,7 +275,7 @@ func pick(entries []blobship.Descriptor, want blobship.Platform) (string, error)
 // get fetches /v2/<repo>/<path> whole (metadata only, capped at
 // maxMetadata).
 func (c *Client) get(ctx context.Context, ref Ref, path, accept string) ([]byte, string, error) {
-	resp, err := c.do(ctx, c.http, ref, path, accept)
+	resp, err := c.do(ctx, c.http, http.MethodGet, ref, path, accept)
 	if err != nil {
 		return nil, "", err
 	}
@@ -300,21 +301,78 @@ func (c *Client) OpenBlob(ctx context.Context, image, digest string) (body io.Re
 	if err != nil {
 		return nil, 0, err
 	}
-	resp, err := c.do(ctx, c.blob, ref, "blobs/"+digest, "*/*")
+	resp, err := c.do(ctx, c.blob, http.MethodGet, ref, "blobs/"+digest, "*/*")
 	if err != nil {
 		return nil, 0, err
 	}
 	return resp.Body, resp.ContentLength, nil
 }
 
-// do sends GET /v2/<repo>/<path> with hc, answering an auth challenge
+// CheckManifest asks image's registry, with a HEAD request and the same
+// credentials pulls use, whether it still serves the image's manifest.
+// Nothing is downloaded and nothing is cached. Availability classifies
+// the error.
+func (c *Client) CheckManifest(ctx context.Context, image string) error {
+	ref, err := ParseRef(image)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, c.http, http.MethodHead, ref, "manifests/"+ref.Reference, acceptManifests)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// errDenied marks an auth failure: no credentials for a registry that
+// wants them, or credentials it refused.
+var errDenied = errors.New("access denied")
+
+// StatusError is a registry answer other than 200.
+type StatusError struct {
+	Method string
+	URL    string
+	Code   int
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s: status %d: %s", e.Method, e.URL, e.Code, e.Body)
+}
+
+// Availability classifies the outcome of a registry request: "ok" (no
+// error), "missing" (the registry says the manifest or blob doesn't
+// exist), "denied" (the registry refused Angry Duck's credentials, or
+// wants credentials and none are configured) or "unreachable" (no usable
+// answer: network errors, timeouts, rate limits, server errors).
+func Availability(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	if errors.Is(err, errDenied) {
+		return "denied"
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		switch se.Code {
+		case http.StatusNotFound:
+			return "missing"
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "denied"
+		}
+	}
+	return "unreachable"
+}
+
+// do sends method /v2/<repo>/<path> with hc, answering an auth challenge
 // once, and returns a 200 response for the caller to read and close.
-func (c *Client) do(ctx context.Context, hc *http.Client, ref Ref, path, accept string) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, hc *http.Client, method string, ref Ref, path, accept string) (*http.Response, error) {
 	u := "https://" + ref.APIHost + "/v2/" + ref.Repo + "/" + path
 	scope := "repository:" + ref.Repo + ":pull"
 	auth := c.cachedToken(ref.APIHost, scope)
 	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		req, err := http.NewRequestWithContext(ctx, method, u, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -331,18 +389,18 @@ func (c *Client) do(ctx context.Context, hc *http.Client, ref Ref, path, accept 
 			resp.Body.Close()
 			auth, err = c.answer(ctx, ref, challenge, scope)
 			if err != nil {
-				return nil, fmt.Errorf("GET %s: auth: %w", u, err)
+				return nil, fmt.Errorf("%s %s: auth: %w", method, u, err)
 			}
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 			resp.Body.Close()
-			return nil, fmt.Errorf("GET %s: status %d: %s", u, resp.StatusCode, strings.TrimSpace(string(b)))
+			return nil, &StatusError{Method: method, URL: u, Code: resp.StatusCode, Body: strings.TrimSpace(string(b))}
 		}
 		return resp, nil
 	}
-	return nil, fmt.Errorf("GET %s: still unauthorized after answering the challenge", u)
+	return nil, fmt.Errorf("%s %s: still unauthorized after answering the challenge: %w", method, u, errDenied)
 }
 
 func (c *Client) cachedToken(host, scope string) string {
@@ -364,7 +422,7 @@ func (c *Client) answer(ctx context.Context, ref Ref, challenge, scope string) (
 	switch strings.ToLower(scheme) {
 	case "basic":
 		if !haveCreds {
-			return "", fmt.Errorf("registry wants Basic auth and no credentials are configured for %s", ref.Host)
+			return "", fmt.Errorf("registry wants Basic auth and no credentials are configured for %s: %w", ref.Host, errDenied)
 		}
 		user, pass, _ := strings.Cut(userpass, ":")
 		req, _ := http.NewRequest(http.MethodGet, "http://x", nil)
@@ -397,7 +455,11 @@ func (c *Client) answer(ctx context.Context, ref Ref, challenge, scope string) (
 			return "", err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusOK:
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "", fmt.Errorf("token endpoint %s: status %d: %w", realm, resp.StatusCode, errDenied)
+		default:
 			return "", fmt.Errorf("token endpoint %s: status %d", realm, resp.StatusCode)
 		}
 		var tr struct {

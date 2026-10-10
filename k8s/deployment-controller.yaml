@@ -27,7 +27,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: controller
-          image: ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.10
+          image: ghcr.io/hatam-abolghasemi/angry-duck-controller:1.8.11
           ports:
             - containerPort: 8080
               name: http

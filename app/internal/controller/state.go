@@ -71,6 +71,8 @@ type Registry struct {
 	layers *layerindex.Index
 	// names interns repo and image strings across workers. Guarded by mu.
 	names interner
+	// onNewNode runs, under mu, for every node the first time it reports.
+	onNewNode []func(node string)
 }
 
 // interner keeps one copy of each string held by any worker's inventory,
@@ -161,6 +163,32 @@ func NewRegistry(staleAfter, targetTTL time.Duration) *Registry {
 	}
 }
 
+// OnNewNode registers fn to run the first time each node reports, so
+// per-node metrics start at zero instead of appearing with their first
+// event. fn must not call back into the Registry.
+func (r *Registry) OnNewNode(fn func(node string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onNewNode = append(r.onNewNode, fn)
+}
+
+// ImageHolders returns, for every image reference a fresh worker holds,
+// how many fresh workers hold it.
+func (r *Registry) ImageHolders() map[string]int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	now := time.Now()
+	out := make(map[string]int)
+	for _, w := range r.workers {
+		if r.isFresh(w, now) {
+			for _, img := range w.Images {
+				out[img]++
+			}
+		}
+	}
+	return out
+}
+
 // Layers returns the layer index.
 func (r *Registry) Layers() *layerindex.Index { return r.layers }
 
@@ -183,6 +211,9 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 	if !ok {
 		w = &workerEntry{NodeID: rep.NodeID}
 		r.workers[rep.NodeID] = w
+		for _, fn := range r.onNewNode {
+			fn(rep.NodeID)
+		}
 	}
 	w.Address = rep.Address
 	w.Utilization = rep.Utilization

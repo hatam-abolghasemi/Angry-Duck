@@ -149,7 +149,7 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.8.10**; see the [changelog](CHANGELOG.md). Angry
+The current version is **1.8.11**; see the [changelog](CHANGELOG.md). Angry
 Duck targets Linux nodes running containerd 1.6 or later.
 
 ## Feedback and contributing

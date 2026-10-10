@@ -149,6 +149,12 @@ type pairState struct {
 
 // NewRescuer builds a rescuer.
 func NewRescuer(registry *Registry, pods PodLister, token string, cfg RescuerConfig) *Rescuer {
+	rescuesInFlight.Set(0)
+	registry.OnNewNode(func(node string) {
+		for _, r := range []string{"success", "failure", "no_source", "no_target", "pull_policy_always"} {
+			rescuesTotal.Add(0, node, r)
+		}
+	})
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 1
 	}

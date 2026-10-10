@@ -141,6 +141,14 @@ type churn struct {
 
 // NewImageGC builds the cleanup and loads saved usage times.
 func NewImageGC(store ImageStore, inUse func() ([]string, error), util func() (float64, error), busy func([]string) bool, nodeID string, cfg GCConfig) *ImageGC {
+	for _, tier := range []string{"old", "pressure", "rollback", "error"} {
+		imagesDeletedTotal.Add(0, nodeID, tier)
+	}
+	for _, tier := range []string{"old", "pressure", "rollback"} {
+		gcCandidates.Set(0, nodeID, tier)
+	}
+	gcCleaning.Set(0, nodeID)
+	gcStalled.Set(0, nodeID)
 	if cfg.Batch < 1 {
 		cfg.Batch = 5
 	}

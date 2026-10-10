@@ -56,6 +56,10 @@ type InventoryWatch struct {
 // NewInventoryWatch builds a watch; changed is the reporter's Kick, live
 // switches the layer tracker between resync and regular scans.
 func NewInventoryWatch(sub EventSubscriber, namespace, nodeID string, changed func(), live func(bool)) *InventoryWatch {
+	for _, t := range inventoryTopics {
+		inventoryEventsTotal.Add(0, nodeID, t)
+	}
+	inventoryWatchUp.Set(0, nodeID)
 	return &InventoryWatch{sub: sub, namespace: namespace, nodeID: nodeID, settle: time.Second, changed: changed, live: live}
 }
 

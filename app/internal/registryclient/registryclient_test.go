@@ -231,3 +231,32 @@ func TestOpenBlobStreamsOneLayerWithAuth(t *testing.T) {
 		t.Fatal("expected an error for a missing blob")
 	}
 }
+
+func TestCheckManifestClassifiesTheOrigin(t *testing.T) {
+	for _, scheme := range []string{"bearer", "basic"} {
+		f := newFake(t, scheme)
+		c, image := client(t, f)
+		host := strings.TrimPrefix(f.srv.URL, "https://")
+		if got := Availability(c.CheckManifest(context.Background(), image)); got != "ok" {
+			t.Fatalf("%s: existing image: %s", scheme, got)
+		}
+		if got := Availability(c.CheckManifest(context.Background(), host+"/team/app:gone")); got != "missing" {
+			t.Fatalf("%s: deleted tag: %s", scheme, got)
+		}
+		f.wantUser = "deploy:rotated"
+		c.tokens = map[string]token{}
+		if got := Availability(c.CheckManifest(context.Background(), image)); got != "denied" {
+			t.Fatalf("%s: refused credentials: %s", scheme, got)
+		}
+		anon := New(registryauth.Empty(), 5*time.Second, time.Minute).WithHTTPClient(f.srv.Client())
+		if got := Availability(anon.CheckManifest(context.Background(), image)); got != "denied" {
+			t.Fatalf("%s: no credentials: %s", scheme, got)
+		}
+	}
+	f := newFake(t, "bearer")
+	c, image := client(t, f)
+	f.srv.Close()
+	if got := Availability(c.CheckManifest(context.Background(), image)); got != "unreachable" {
+		t.Fatalf("closed registry: %s", got)
+	}
+}

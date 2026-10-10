@@ -145,6 +145,18 @@ func pathIndex(path string) int {
 
 // NewSpread builds the worker's spread handlers.
 func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, controllerURL string, timeout time.Duration) *Spread {
+	for _, path := range []string{"registry", "peer"} {
+		for _, r := range []string{"ok", "failed", "cancelled"} {
+			spreadTransfersTotal.Add(0, nodeID, path, r)
+		}
+		spreadMillisTotal.Add(0, nodeID, path)
+		spreadActive.Set(0, nodeID, path)
+	}
+	for _, path := range []string{"registry", "peer", "served"} {
+		spreadBytesTotal.Add(0, nodeID, path)
+	}
+	spreadFinalizesTotal.Add(0, nodeID, "success")
+	spreadFinalizesTotal.Add(0, nodeID, "failure")
 	return &Spread{
 		store: store, registry: registry, token: token, nodeID: nodeID, platform: platform,
 		controllerURL: strings.TrimRight(controllerURL, "/"), timeout: timeout, epoch: randomSuffix()[:8],

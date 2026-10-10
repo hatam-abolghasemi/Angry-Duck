@@ -22,7 +22,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: worker
-          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.10
+          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.11
           env:
             - name: NODE_ID
               valueFrom:

@@ -54,6 +54,9 @@ type Pins struct {
 
 // NewPins loads any saved pins from path.
 func NewPins(store blobship.Store, nodeID string, ttl time.Duration, path string) *Pins {
+	for _, k := range []string{"temp_snapshot", "temp_image", "expired_pin"} {
+		rescueCleanupsTotal.Add(0, nodeID, k)
+	}
 	p := &Pins{store: store, nodeID: nodeID, ttl: ttl, path: path, pins: map[string]time.Time{}}
 	if path != "" {
 		if b, err := os.ReadFile(path); err == nil {

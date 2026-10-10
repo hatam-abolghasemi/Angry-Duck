@@ -90,6 +90,16 @@ type rescueCall struct {
 // pins may be nil (tests): shipped snapshots are then unpinned right after
 // each attempt instead of being kept for a retry.
 func NewRescue(store blobship.Store, pins *Pins, token, nodeID, platform string, maxConcurrent int) *Rescue {
+	for _, reason := range []string{"rescue", "propagate"} {
+		for _, r := range []string{"success", "failure", "already_present"} {
+			rescuesTotal.Add(0, nodeID, reason, r)
+		}
+	}
+	rescueBytesTotal.Add(0, nodeID, "served")
+	rescueBytesTotal.Add(0, nodeID, "received")
+	for _, m := range []string{"present", "blob", "snapshot"} {
+		rescueLayersTotal.Add(0, nodeID, m)
+	}
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}

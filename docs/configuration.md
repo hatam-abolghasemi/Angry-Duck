@@ -48,6 +48,17 @@ Looking for a starting point rather than a reference? See
 | `RANK_PREFER_IMAGE_LOCALITY` | `true` | In the fallback ranking, prefer nodes holding any tag of the same repo. |
 | `RANK_EXCLUDE_NODE_SUBSTRINGS` | *(empty)* | Comma-separated node name substrings never chosen as seeds. |
 
+## Origin check
+
+Whether the registries still serve the images the nodes hold. See
+[Observability](observability.md#origin-check).
+
+| Variable | Default | Description |
+|---|---|---|
+| `ORIGIN_CHECK_INTERVAL_S` | `3600` | How often the controller asks each held image's registry for its manifest (a `HEAD`, with `REGISTRY_CREDENTIALS_PATH`). Images it didn't serve are asked four times as often. `0` turns the check off. |
+| `ORIGIN_CHECK_DELAY_S` | `120` | Wait after the controller starts before the first check. |
+| `ORIGIN_CHECK_REGISTRIES` | *(empty)* | Comma-separated substrings; only registry hosts containing one are checked. Empty checks every registry. Useful when the controller can't reach public registries the nodes reach through a mirror. |
+
 ## Spread
 
 How pushed images reach every node blob by blob. See

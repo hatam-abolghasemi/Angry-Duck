@@ -1,8 +1,49 @@
 # Changelog
 
-## Unreleased
+## 1.8.11
+
+Metrics, the dashboard and the example manifests. Nothing Angry Duck does on
+the nodes changed.
+
+### Added
+
+- **Origin check.** The controller keeps asking the registries whether they
+  still serve the images the nodes hold: a `HEAD` for each image's manifest,
+  with Angry Duck's credentials, every `ORIGIN_CHECK_INTERVAL_S` (3600),
+  spread evenly and sent one at a time, starting `ORIGIN_CHECK_DELAY_S`
+  (120) after startup, on its own goroutine and HTTP client. Peers, the
+  mirror, rescue and cleanup could keep an image alive on the nodes long
+  after its tag was deleted or its pull secret rotated, and nobody would
+  know until the last copy went. New metrics:
+  `angryduck_controller_origin_unavailable{image, status}` (images a
+  registry answered `missing` or `denied` for, valued by the copies left),
+  `angryduck_controller_origin_images{registry, status}` and
+  `angryduck_controller_origin_checks_total{status}`.
+  `ORIGIN_CHECK_REGISTRIES` limits it to some registries;
+  `ORIGIN_CHECK_INTERVAL_S=0` turns it off. See
+  [Observability](docs/observability.md#origin-check).
+- **Registry Health tab** in the dashboard, and *Unpullable From Origin* and
+  *Nodes Disk-Stalled* on the Overview. Suggested alerts for images gone from
+  their registry, last copies and refused credentials.
 
 ### Changed
+
+- **Counters start at zero.** Every counter exists from the start for every
+  label value it can take; per-node controller counters from the node's first
+  report. Before, a series appeared with its first event, which `rate()` and
+  `increase()` can't see, and charts started mid-way. About 50 series per
+  node, nearly all of which a busy node had after a day anyway.
+- **Dashboard: no data is zero.** Ratios (throughput, hit ratio, pull
+  duration, snapshot share) are zero when nothing moved instead of a gap;
+  gauges that come and go (stuck images, node states, preheated repos,
+  copies left) stay at zero between appearances; per-node charts list the
+  nodes active in the time range and keep them continuous; *Top Senders*
+  ranks over the whole range instead of picking a new ten every step.
+- **Dashboard: fixed panels that showed nothing.** The registry pull panels
+  on the Preheat tab and the progress table and node states on the
+  Whole-Image Fallback tab filtered on `$registry` and `$image`, variables
+  that no longer existed. Whole-Image Fallback moved to the last tab.
+
 
 - **Example manifests are generic.** `k8s/` no longer carries a staging
   label, an internal ingress host and path, or `imagePullSecrets` for the

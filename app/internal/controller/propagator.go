@@ -120,6 +120,14 @@ type propagation struct {
 
 // NewPropagator builds a propagator.
 func NewPropagator(registry *Registry, token string, cfg PropagatorConfig) *Propagator {
+	for _, r := range []string{"complete", "superseded", "expired"} {
+		propagationsTotal.Add(0, r)
+	}
+	registry.OnNewNode(func(node string) {
+		propagationTransfersTotal.Add(0, node, "success")
+		propagationTransfersTotal.Add(0, node, "failure")
+		seedTimeoutsTotal.Add(0, node)
+	})
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 1
 	}
