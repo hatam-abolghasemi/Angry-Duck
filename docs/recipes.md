@@ -145,7 +145,7 @@ kubectl -n angryduck create secret generic registry-pull \
 
 ```yaml
 registryCredentials:
-  existingSecret: registry-pull
+  secretName: registry-pull
 
 config:
   METRICS_LABEL_REGISTRY: "true"

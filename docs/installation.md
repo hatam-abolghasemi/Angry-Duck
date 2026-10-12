@@ -21,10 +21,9 @@ and `serializeImagePulls` in particular decide how much Angry Duck can do.
 
 ## Deploy with Helm
 
-The chart in `charts/angryduck` is the simplest way to install. It generates
-the tokens, wires every path and name together, and leaves you the
-environment-specific parts: registry credentials, the webhook's ingress host,
-and monitoring. See [Helm](helm.md).
+The chart in `helm/angryduck` renders the same objects as `k8s/`, with the
+parts that differ between clusters as values. Create the Secrets from step 2
+below first. See [Helm](helm.md).
 
 ## Deploy with plain manifests
 

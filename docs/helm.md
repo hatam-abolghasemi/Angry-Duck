@@ -1,180 +1,98 @@
 # Helm
 
-The chart in `charts/angryduck` installs the controller, the worker DaemonSet
-and everything they need. It wires names, paths and ports together and
-generates the tokens, so what's left to you is what depends on your
-environment.
+The chart in `helm/angryduck` renders exactly what `k8s/` holds: the same
+objects, names, labels, settings and defaults. Only the Namespace is left to
+Helm's `--create-namespace`. Whatever works with the plain manifests works with
+the chart, and the other way round.
 
 ## Install
 
+Create the Secrets first, as in
+[Installation](installation.md#2-create-the-namespace-and-secrets): the chart
+references `registry-pull`, `angryduck-rescue-token` and
+`angryduck-webhook-token` but doesn't create them.
+
 ```bash
-helm upgrade --install angryduck ./charts/angryduck \
+helm upgrade --install angryduck ./helm/angryduck \
   --namespace angryduck --create-namespace \
   -f my-values.yaml
 ```
 
-A typical `my-values.yaml`:
+`values.yaml` is the example setup, the same as `k8s/`. Your values file only
+needs what differs. For example, images from a pull-through
+cache, a private pull secret, and the webhook under a shared host's path.
 
 ```yaml
+imagePullSecrets:
+  - name: gitlab-docker-registry
+
+controller:
+  image:
+    repository: nexus.example.com/docker-ghcr/hatam-abolghasemi/angry-duck-controller
+
+worker:
+  image:
+    repository: nexus.example.com/docker-ghcr/hatam-abolghasemi/angry-duck-worker
+
 registryCredentials:
-  existingSecret: registry-pull
+  secretName: gitlab-registry-pull
 
 ingress:
-  enabled: true
-  className: nginx
-  host: angryduck.example.com
+  className: ingress-nginx
   annotations:
-    nginx.ingress.kubernetes.io/whitelist-source-range: 10.20.0.0/16
-
-serviceMonitor:
-  enabled: true
-  labels:
-    release: prometheus
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /webhook/preheat
+  host: api-stg.example.com
+  path: /angryduck/webhook/preheat
 
 config:
-  RANK_EXCLUDE_NODE_SUBSTRINGS: "master,control-plane"
-  MIRROR_ENABLED: "true"
-  MIRROR_REGISTRIES: "registry.example.com"
+  MIRROR_REGISTRIES: ""
 ```
 
-Then check that every node has a fresh worker, as the install notes show:
+Keys you set in `config` are merged into the defaults, so the snippets in
+[Recipes](recipes.md) drop straight in.
 
-```bash
-kubectl -n angryduck port-forward svc/angryduck-controller 8080:8080 &
-curl -s localhost:8080/status | jq '{fresh_count, workers: [.workers[] | {node_id, fresh}]}'
-```
-
-## What you set yourself
-
-### Registry credentials
-
-Seeds pull from your registry and the controller reads manifests from it, so
-both need credentials for private images. Create a dockerconfigjson Secret
-covering every private registry you push to, and name it in the values:
-
-```bash
-kubectl -n angryduck create secret docker-registry registry-pull \
-  --docker-server=registry.example.com --docker-username=<user> --docker-password=<password>
-```
-
-```yaml
-registryCredentials:
-  existingSecret: registry-pull
-```
-
-`registryCredentials.dockerconfigjson` takes the JSON inline instead, for
-values files that are themselves encrypted (with SOPS, for example). The
-Angry Duck images on GitHub Container Registry are public, so kubelet needs no
-`imagePullSecrets` for them.
-
-### The webhook
-
-CI calls `POST /webhook/preheat` on the controller. To reach it from outside
-the cluster, enable the ingress and set its host. The ingress exposes only
-that one path (`ingress.path`, `/webhook/preheat` by default), so `/status`,
-`/report` and `/metrics` stay inside the cluster.
-
-```yaml
-ingress:
-  enabled: true
-  className: nginx
-  host: angryduck.example.com
-  tls:
-    - hosts: [angryduck.example.com]
-      secretName: angryduck-tls
-```
-
-CI runners inside the cluster can skip the ingress and call
-`http://angryduck-controller.angryduck.svc:8080/webhook/preheat`.
-
-Restricting the ingress to your CI runners' addresses, with your ingress
-controller's annotation, is a good extra layer.
-
-### Tokens
-
-The chart creates two Secrets, each with a random 64-character token, and
-keeps them across upgrades:
-
-| Secret | Used by | Purpose |
-|---|---|---|
-| `angryduck-token` | controller and workers | The shared token for rescue, propagation, the mirror and reports. Without it they stay off. |
-| `angryduck-webhook-token` | controller | CI's bearer token for the webhook. |
-
-Store the webhook token as a masked CI variable:
-
-```bash
-kubectl -n angryduck get secret angryduck-webhook-token -o jsonpath='{.data.token}' | base64 -d
-```
-
-To manage the tokens yourself, create Secrets with a `token` key of at least
-32 characters and name them in `sharedToken.existingSecret` and
-`webhookToken.existingSecret`. Do this with **Argo CD, Flux or `helm
-template`**: they render without access to the cluster, so the chart can't
-see the existing Secret and would generate a new token on every render.
-
-`webhookToken.enabled: false` leaves the webhook unauthenticated. The
-controller logs a warning at startup.
-
-### Monitoring
-
-`serviceMonitor.enabled: true` adds ServiceMonitors for the controller and
-the workers. Add the labels your Prometheus selects ServiceMonitors by in
-`serviceMonitor.labels`. Import the dashboard from
-`grafana/angryduck-dashboard.json`; see
-[Observability](observability.md).
+Install into `angryduck`, as the manifests do. In another namespace, set
+`config.CONTROLLER_URL` to the controller's Service there.
 
 ## Values
 
 | Value | Default | Description |
 |---|---|---|
+| `imagePullSecrets` | `[]` | For kubelet, when the Angry Duck images come from a private registry. |
 | `controller.image.repository` | `ghcr.io/hatam-abolghasemi/angry-duck-controller` | Controller image. |
 | `controller.image.tag` | the chart's `appVersion` | |
+| `controller.resources` | as in `k8s/` | See [Sizing](operations.md#sizing). |
 | `worker.image.repository` | `ghcr.io/hatam-abolghasemi/angry-duck-worker` | Worker image. |
 | `worker.image.tag` | the chart's `appVersion` | |
-| `imagePullSecrets` | `[]` | For kubelet, when the Angry Duck images come from a private registry. |
-| `controller.resources`, `worker.resources` | as in the example manifests | See [Sizing](operations.md#sizing). |
-| `controller.nodeSelector`, `.tolerations`, `.affinity`, `.priorityClassName` | empty | Controller scheduling. |
-| `worker.nodeSelector`, `.affinity`, `.priorityClassName` | empty | Worker scheduling. |
+| `worker.resources` | as in `k8s/` | See [Sizing](operations.md#sizing). |
 | `worker.tolerations` | `[{operator: Exists}]` | Every node, tainted ones included. |
-| `worker.nodeExporterPort` | `9100` | node-exporter's port on the node IP. |
-| `worker.containerd.socket` | `/run/containerd/containerd.sock` | containerd's socket on the node. |
-| `worker.containerd.root` | `/var/lib/containerd` | containerd's root on the node. Its content store is mounted read-only for direct blob reads. |
-| `worker.containerd.config` | `/etc/containerd/config.toml` | containerd's config file on the node. |
-| `worker.containerd.certsDir` | `/etc/containerd/certs.d` | Where the mirror writes `hosts.toml`. Must be in containerd's `config_path`. |
-| `worker.stateDir` | `/var/lib/angryduck` | Node directory for rescue pins and image-usage history. |
-| `sharedToken.existingSecret` | empty | Use this Secret's `token` instead of a generated one. |
-| `webhookToken.enabled` | `true` | Require a bearer token on the webhook. |
-| `webhookToken.existingSecret` | empty | Use this Secret's `token` instead of a generated one. |
-| `registryCredentials.existingSecret` | empty | dockerconfigjson Secret for seed pulls and manifest reads. |
-| `registryCredentials.dockerconfigjson` | empty | The same, inline. |
-| `ingress.enabled` | `false` | Expose the webhook. |
-| `ingress.host` | empty | Required when the ingress is enabled. |
-| `ingress.className` | empty | Ingress class. |
+| `registryCredentials.secretName` | `registry-pull` | dockerconfigjson Secret for seed pulls and manifest reads. |
+| `registryCredentials.optional` | `true` | Start without the Secret. Set `false` to make a missing Secret block the pods. |
+| `ingress.enabled` | `true` | Expose the webhook. |
+| `ingress.className` | `nginx` | Ingress class. |
+| `ingress.annotations` | `{}` | Passed through. |
+| `ingress.host` | `angryduck.example.com` | |
 | `ingress.path` | `/webhook/preheat` | The only path exposed, matched exactly. |
-| `ingress.annotations`, `ingress.tls` | empty | Passed through. |
-| `serviceMonitor.enabled` | `false` | Add ServiceMonitors (Prometheus Operator). |
-| `serviceMonitor.labels` | `{}` | Extra labels, for your Prometheus's selector. |
+| `serviceMonitor.enabled` | `true` | ServiceMonitors for the controller and the workers (Prometheus Operator). |
+| `serviceMonitor.labels` | `{release: prometheus}` | The labels your Prometheus selects ServiceMonitors by. |
 | `serviceMonitor.interval` | `15s` | Scrape interval. The dashboard assumes 15s. |
-| `config` | the defaults in [Configuration](configuration.md) | Settings for both binaries, as strings. |
+| `config` | as in `k8s/configmap-env.yaml` | Settings for both binaries, as strings. See [Configuration](configuration.md). |
 
-The chart sets these settings itself, and ignores them in `config`: the
-listen addresses, the token and credential paths, `CONTAINER_RUNTIME`,
-`CONTAINER_RUNTIME_ENDPOINT`, `CONTAINERD_ROOT`, `RESCUE_STATE_DIR`,
-`MIRROR_CONTAINERD_CONFIG_DIR` and `DAEMONSET_NAME`. `CONTROLLER_URL`
-defaults to the controller's Service and can be overridden.
-
-A change to `config` restarts the controller and the workers.
+Set `serviceMonitor.enabled: false` without the Prometheus Operator.
 
 ## Upgrading
 
 ```bash
-helm upgrade angryduck ./charts/angryduck -n angryduck -f my-values.yaml
+helm upgrade angryduck ./helm/angryduck -n angryduck -f my-values.yaml
 ```
 
-Read the [changelog](../CHANGELOG.md) first. The controller and workers are
-independent: the controller rebuilds its state from worker reports within
-seconds, and workers keep serving peers during a controller restart. If a node
-can't reach the registry,
+Read the [changelog](../CHANGELOG.md) first. Like `kubectl apply`, a change to
+`config` alone doesn't restart anything: run
+`kubectl -n angryduck rollout restart deploy/angryduck-controller ds/angryduck-worker`.
+The controller and workers are independent: the controller rebuilds its state
+from worker reports within seconds, and workers keep serving peers during a
+controller restart. If a node can't reach the registry,
 [bootstrap the new worker image there by hand](operations.md#bootstrapping-a-node-by-hand)
 before upgrading.
 
@@ -186,4 +104,4 @@ helm uninstall angryduck -n angryduck
 
 Each worker sees its DaemonSet deleted and cleans up its node; see
 [Operations](operations.md#uninstalling). The ClusterRole and
-ClusterRoleBinding go with the release.
+ClusterRoleBinding go with the release; the Secrets you created stay.

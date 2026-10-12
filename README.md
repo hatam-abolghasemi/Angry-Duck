@@ -105,10 +105,9 @@ Prebuilt images for every release are on GitHub Container Registry:
 default:
 
 ```bash
-helm upgrade --install angryduck ./charts/angryduck \
+helm upgrade --install angryduck ./helm/angryduck \
   --namespace angryduck --create-namespace \
-  --set registryCredentials.existingSecret=registry-pull \
-  --set ingress.enabled=true --set ingress.host=angryduck.example.com
+  --set ingress.host=angryduck.example.com
 ```
 
 See [Helm](docs/helm.md) for the values, or [Installation](docs/installation.md)
@@ -131,7 +130,7 @@ or [Helm](docs/helm.md), then pick a setup from [Recipes](docs/recipes.md).
 | [Design](docs/design.md) | Why it works the way it does. |
 | [Architecture](docs/architecture.md) | Components, reporting, state, and an image's life from push to cleanup. |
 | [Installation](docs/installation.md) | Requirements, deployment, CI integration and verification. |
-| [Helm](docs/helm.md) | Installing with the chart, its values, tokens and the webhook ingress. |
+| [Helm](docs/helm.md) | Installing with the chart and its values. |
 | [Node settings and limits](docs/node-settings.md) | containerd and kubelet settings that help, CI and workload usage, and what Angry Duck can't do. |
 | [Recipes](docs/recipes.md) | Ready-made settings for common clusters and goals. |
 | [Configuration](docs/configuration.md) | Every setting, with defaults. |

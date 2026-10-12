@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Helm chart moved to `helm/angryduck` and now renders exactly `k8s/`**:
+  the same objects, names, labels, settings and defaults, apart from the
+  Namespace. It no longer generates tokens or a registry Secret; create them
+  as for the manifests. `registryCredentials.existingSecret` is now
+  `registryCredentials.secretName`, and the ingress and ServiceMonitors are on
+  by default. See [Helm](docs/helm.md).
+
 ## 1.8.11
 
 Metrics, the dashboard and the example manifests. Nothing Angry Duck does on

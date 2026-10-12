@@ -22,8 +22,8 @@ app/
     ├── logging/           leveled logging
     ├── config/            .env loader and typed getters
     └── model/             wire types shared by both binaries
-charts/
-└── angryduck/             Helm chart
+helm/
+└── angryduck/             Helm chart, the same objects as k8s/
 k8s/                       example Kubernetes manifests
 grafana/                   Grafana dashboard
 docs/                      documentation
@@ -84,13 +84,14 @@ cd app && go test -race ./...
 ## Helm chart
 
 ```bash
-helm lint charts/angryduck
-helm template angryduck charts/angryduck -n angryduck \
-  --set ingress.enabled=true --set ingress.host=angryduck.example.com --set serviceMonitor.enabled=true
+helm lint helm/angryduck
+helm template angryduck helm/angryduck -n angryduck
+helm template angryduck helm/angryduck -n angryduck -f helm/angryduck/values-stg.yaml
 ```
 
-Keep `version` and `appVersion` in `charts/angryduck/Chart.yaml` equal to the
-release.
+The default render must match `k8s/` object for object, apart from the
+Namespace. Change both together. Keep `version` and `appVersion` in
+`helm/angryduck/Chart.yaml` equal to the release.
 
 ## Running locally
 
