@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: angryduck-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: angryduck
+    app.kubernetes.io/component: worker
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: angryduck
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: angryduck
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: angryduck-worker
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag | default .Chart.AppVersion }}
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SELF_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: NODE_EXPORTER_URL
+              value: "http://$(HOST_IP):9100/metrics"
+          envFrom:
+            - configMapRef:
+                name: angryduck-config
+          ports:
+            - containerPort: 18081
+              name: http
+            - containerPort: 18082
+              name: mirror
+          volumeMounts:
+            - name: registry-creds
+              mountPath: /etc/angryduck/registry-creds
+              readOnly: true
+            - name: rescue-token
+              mountPath: /etc/angryduck/rescue-token
+              readOnly: true
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: containerd-content
+              mountPath: /var/lib/containerd/io.containerd.content.v1.content
+              readOnly: true
+            - name: containerd-config
+              mountPath: /etc/containerd/config.toml
+              readOnly: true
+            - name: containerd-certs
+              mountPath: /etc/containerd/certs.d
+            - name: state
+              mountPath: /var/lib/angryduck
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 18081
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            runAsUser: 0
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: registry-creds
+          secret:
+            secretName: {{ .Values.registryCredentials.secretName }}
+            {{- if .Values.registryCredentials.optional }}
+            optional: true
+            {{- end }}
+        - name: rescue-token
+          secret:
+            secretName: angryduck-rescue-token
+            optional: true
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        - name: containerd-content
+          hostPath:
+            path: /var/lib/containerd/io.containerd.content.v1.content
+            type: Directory
+        - name: containerd-config
+          hostPath:
+            path: /etc/containerd/config.toml
+            type: File
+        - name: containerd-certs
+          hostPath:
+            path: /etc/containerd/certs.d
+            type: DirectoryOrCreate
+        - name: state
+          hostPath:
+            path: /var/lib/angryduck
+            type: DirectoryOrCreate
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

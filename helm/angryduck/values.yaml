@@ -1,13 +1,9 @@
-nameOverride: ""
-fullnameOverride: ""
-
 imagePullSecrets: []
 
 controller:
   image:
     repository: ghcr.io/hatam-abolghasemi/angry-duck-controller
     tag: ""
-    pullPolicy: IfNotPresent
   resources:
     requests:
       cpu: 20m
@@ -15,16 +11,11 @@ controller:
     limits:
       cpu: 150m
       memory: 64Mi
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-  priorityClassName: ""
 
 worker:
   image:
     repository: ghcr.io/hatam-abolghasemi/angry-duck-worker
     tag: ""
-    pullPolicy: IfNotPresent
   resources:
     requests:
       cpu: 200m
@@ -32,46 +23,30 @@ worker:
     limits:
       cpu: "2"
       memory: 192Mi
-  nodeSelector: {}
   tolerations:
     - operator: Exists
-  affinity: {}
-  priorityClassName: ""
-  nodeExporterPort: 9100
-  containerd:
-    socket: /run/containerd/containerd.sock
-    root: /var/lib/containerd
-    config: /etc/containerd/config.toml
-    certsDir: /etc/containerd/certs.d
-  stateDir: /var/lib/angryduck
-
-sharedToken:
-  existingSecret: ""
-
-webhookToken:
-  enabled: true
-  existingSecret: ""
 
 registryCredentials:
-  existingSecret: ""
-  dockerconfigjson: ""
+  secretName: registry-pull
+  optional: true
 
 ingress:
-  enabled: false
-  className: ""
-  host: ""
-  path: /webhook/preheat
+  enabled: true
+  className: nginx
   annotations: {}
-  tls: []
+  host: angryduck.example.com
+  path: /webhook/preheat
 
 serviceMonitor:
-  enabled: false
-  labels: {}
+  enabled: true
+  labels:
+    release: prometheus
   interval: 15s
 
 config:
   LOG_LEVEL: "info"
   METRICS_LABEL_REGISTRY: "true"
+  CONTROLLER_LISTEN_ADDR: ":8080"
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
@@ -85,15 +60,22 @@ config:
   ORIGIN_CHECK_INTERVAL_S: "3600"
   ORIGIN_CHECK_DELAY_S: "120"
   ORIGIN_CHECK_REGISTRIES: ""
+  WORKER_LISTEN_ADDR: ":18081"
+  CONTROLLER_URL: "http://angryduck-controller.angryduck.svc.cluster.local:8080"
   REPORT_INTERVAL_S: "15"
   PREHEAT_ATTRIBUTION_INTERVAL_S: "300"
   PREHEAT_ATTRIBUTION_RETENTION_S: "360"
+  CONTAINER_RUNTIME: "containerd"
+  CONTAINER_RUNTIME_ENDPOINT: "unix:///run/containerd/containerd.sock"
+  REGISTRY_CREDENTIALS_PATH: "/etc/angryduck/registry-creds/.dockerconfigjson"
   RESCUE_ENABLED: "true"
+  RESCUE_TOKEN_PATH: "/etc/angryduck/rescue-token/token"
   RESCUE_INTERVAL_S: "15"
   RESCUE_RESYNC_INTERVAL_S: "600"
   RESCUE_RETRY_AFTER_S: "120"
   RESCUE_BACKOFF_MAX_S: "3600"
   RESCUE_PIN_TTL_S: "3600"
+  RESCUE_STATE_DIR: "/var/lib/angryduck"
   RESCUE_TIMEOUT_S: "600"
   RESCUE_MAX_CONCURRENT: "2"
   RESCUE_MAX_SOURCES: "3"
@@ -127,5 +109,7 @@ config:
   GC_BATCH: "5"
   GC_SETTLE_S: "10"
   GC_PROTECT_SUBSTRINGS: "pause"
-  MIRROR_ENABLED: "false"
-  MIRROR_REGISTRIES: ""
+  MIRROR_ENABLED: "true"
+  MIRROR_LISTEN_ADDR: ":18082"
+  MIRROR_CONTAINERD_CONFIG_DIR: "/etc/containerd/certs.d"
+  MIRROR_REGISTRIES: "registry.example.com"

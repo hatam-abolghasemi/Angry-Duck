@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: angryduck-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: angryduck
+data:
+  {{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | toString | quote }}
+  {{- end }}
