@@ -78,6 +78,14 @@ type SpreadStore interface {
 	Import(ctx context.Context, r io.Reader, platform string) error
 	Resolve(ctx context.Context, image string) (mediaType, digest string, err error)
 	OpenContent(ctx context.Context, dgst string) (io.ReadCloser, int64, error)
+	// HoldContent and HoldSnapshot put a blob or a committed snapshot that
+	// is already here under a job's lease, and report whether it is here,
+	// asked fresh. A layer counted as "already here" must be held: until
+	// the image is registered nothing else references it, and containerd's
+	// garbage collector can free it before the finalize needs it (kubelet
+	// or the cleanup removed the image it came with).
+	HoldContent(ctx context.Context, lease, dgst string) (bool, error)
+	HoldSnapshot(ctx context.Context, lease, key string) (bool, error)
 }
 
 // BlobOpener streams one blob of an image's repository from its registry.
@@ -119,6 +127,7 @@ type Spread struct {
 
 	finalizing chan struct{} // one finalize at a time
 	onFinalize func()
+	onStale    func()         // the controller's view of this node's layers is off
 	wg         sync.WaitGroup // transfers, for tests
 }
 
@@ -176,6 +185,11 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 // reporter's Kick, so the controller sees the image right away).
 func (s *Spread) OnFinalize(fn func()) { s.onFinalize = fn }
 
+// OnStale registers fn to run when a finalize finds layers gone that the
+// controller counted as here (the reporter's Kick, so its next layer
+// inventory goes out right away and the controller re-plans them).
+func (s *Spread) OnStale(fn func()) { s.onStale = fn }
+
 // Register mounts the spread endpoints, all behind the shared token.
 func (s *Spread) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/spread/fetch", sharedtoken.Require(s.token, s.HandleFetch))
@@ -227,7 +241,7 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid fetch order", http.StatusBadRequest)
 		return
 	}
-	if s.have(r.Context(), o.Digest) {
+	if s.have(r.Context(), o.Digest) && s.holdPresent(r.Context(), o.Job, o.Digest) {
 		writeJSON(w, http.StatusOK, model.SpreadFetchAck{Present: true})
 		return
 	}
@@ -248,6 +262,25 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 	s.wg.Add(1)
 	go s.run(ctx, x, o)
 	writeJSON(w, http.StatusAccepted, model.SpreadFetchAck{Accepted: true})
+}
+
+// holdPresent puts a blob that is already here under job's lease, so it
+// is still here at finalize. False (fetch it after all) when it is gone or
+// can't be held: a fetch of a blob that turns out to be here costs one
+// containerd call, a "present" for one that then vanishes cost a broken
+// image.
+func (s *Spread) holdPresent(ctx context.Context, job, dgst string) bool {
+	lease, err := s.lease(ctx, job)
+	if err != nil {
+		logging.Warnf("angryduck-worker[%s]: spread: holding %s: %v (fetching it instead)", s.nodeID, dgst, err)
+		return false
+	}
+	held, err := s.store.HoldContent(ctx, lease, dgst)
+	if err != nil {
+		logging.Warnf("angryduck-worker[%s]: spread: holding %s: %v (fetching it instead)", s.nodeID, dgst, err)
+		return false
+	}
+	return held
 }
 
 // pruneJobsLocked forgets jobs idle for longer than their lease lives:
@@ -533,6 +566,15 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		spreadFinalizesTotal.Inc(s.nodeID, "failure")
 		logging.Warnf("angryduck-worker[%s]: spread: registering image=%s failed: %v", s.nodeID, image, err)
+		// The controller planned this finalize from an inventory that
+		// turned out wrong: drop cached listings and report again now, so
+		// its retry fetches what is missing instead of finalizing again.
+		if inv, ok := s.store.(interface{ Invalidate() }); ok {
+			inv.Invalidate()
+		}
+		if s.onStale != nil {
+			s.onStale()
+		}
 		writeJSON(w, http.StatusBadGateway, model.SpreadFinalizeResult{Error: err.Error()})
 		return
 	}
@@ -571,8 +613,19 @@ func checkFinalize(f model.SpreadFinalize) error {
 // finalize imports an archive of just the metadata, naming the image: the
 // layers are already in the content store (or unpacked), so containerd
 // registers the name and unpacks what isn't unpacked yet.
+//
+// The controller sends it once its view says every layer is here, a view
+// up to a layer scan old. So first every layer is held under the job's
+// lease and checked: the highest one already unpacked (its snapshot keeps
+// those below it), and the blob of each one above that. A layer that is
+// gone fails the finalize before anything is imported; the import itself
+// only publishes the name once the image is unpacked, so even a layer
+// vanishing after this check can't leave a broken image behind.
 func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image string) error {
 	top := blobship.Descriptor{MediaType: f.TopType, Digest: f.TopDig, Size: f.TopSize}
+	if err := s.holdLayers(ctx, f, top); err != nil {
+		return err
+	}
 	pr, pw := io.Pipe()
 	go func() {
 		pw.CloseWithError(func() error {
@@ -595,6 +648,49 @@ func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image str
 	}
 	if _, got, err := s.store.Resolve(ctx, image); err != nil || got != f.TopDig {
 		return fmt.Errorf("after import, %s resolves to %q (err %v), want %s", image, got, err, f.TopDig)
+	}
+	return nil
+}
+
+// holdLayers is finalize's check (see there). When the layers can't be
+// worked out from the metadata, it holds nothing and leaves it to the
+// import, which then fails cleanly if something is missing.
+func (s *Spread) holdLayers(ctx context.Context, f model.SpreadFinalize, top blobship.Descriptor) error {
+	layers, err := blobship.LayersFromMetadata(top, f.Metadata, s.platform)
+	if err != nil || len(layers) == 0 {
+		if err != nil {
+			logging.Debugf("angryduck-worker[%s]: spread: image=%s: layers not checked before finalize: %v", s.nodeID, f.Image, err)
+		}
+		return nil
+	}
+	lease, err := s.lease(ctx, f.Job)
+	if err != nil {
+		return err
+	}
+	unpacked := -1
+	for i := len(layers) - 1; i >= 0; i-- {
+		ok, err := s.store.HoldSnapshot(ctx, lease, layers[i].ChainID)
+		if err != nil {
+			return fmt.Errorf("holding snapshot of layer %d: %w", i, err)
+		}
+		if ok {
+			unpacked = i
+			break
+		}
+	}
+	var missing []string
+	for i := unpacked + 1; i < len(layers); i++ {
+		ok, err := s.store.HoldContent(ctx, lease, layers[i].Blob.Digest)
+		if err != nil {
+			return fmt.Errorf("holding blob of layer %d: %w", i, err)
+		}
+		if !ok {
+			missing = append(missing, layers[i].Blob.Digest)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%d layer(s) counted as here are gone (removed with another image meanwhile): %s; not registering the image",
+			len(missing), strings.Join(missing, ", "))
 	}
 	return nil
 }

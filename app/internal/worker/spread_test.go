@@ -34,10 +34,62 @@ type fakeSpreadStore struct {
 	imported []string
 	images   map[string]string // name -> top digest
 	topOf    func() (name, digest string)
+	snaps    map[string]bool // committed snapshots by key
+	onImport func()          // runs at the start of each Import
 }
 
 func newFakeSpreadStore() *fakeSpreadStore {
-	return &fakeSpreadStore{blobs: map[string][]byte{}, leases: map[string]map[string]bool{}, images: map[string]string{}}
+	return &fakeSpreadStore{blobs: map[string][]byte{}, leases: map[string]map[string]bool{}, images: map[string]string{}, snaps: map[string]bool{}}
+}
+
+func (f *fakeSpreadStore) HoldContent(_ context.Context, lease, d string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leases[lease] == nil {
+		return false, errors.New("no such lease " + lease)
+	}
+	if _, ok := f.blobs[d]; !ok {
+		return false, nil
+	}
+	f.leases[lease][d] = true
+	return true, nil
+}
+func (f *fakeSpreadStore) HoldSnapshot(_ context.Context, lease, key string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leases[lease] == nil {
+		return false, errors.New("no such lease " + lease)
+	}
+	if !f.snaps[key] {
+		return false, nil
+	}
+	f.leases[lease]["snap:"+key] = true
+	return true, nil
+}
+
+// collect is containerd's garbage collector after an image went away:
+// every blob and snapshot no lease holds is freed.
+func (f *fakeSpreadStore) collect() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	held := func(k string) bool {
+		for _, l := range f.leases {
+			if l[k] {
+				return true
+			}
+		}
+		return false
+	}
+	for d := range f.blobs {
+		if !held(d) {
+			delete(f.blobs, d)
+		}
+	}
+	for k := range f.snaps {
+		if !held("snap:" + k) {
+			delete(f.snaps, k)
+		}
+	}
 }
 
 func (f *fakeSpreadStore) HasBlob(d string) (bool, bool) {
@@ -95,6 +147,9 @@ func (f *fakeSpreadStore) DeleteLease(_ context.Context, id string) error {
 	return nil
 }
 func (f *fakeSpreadStore) Import(_ context.Context, r io.Reader, _ string) error {
+	if f.onImport != nil {
+		f.onImport()
+	}
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
