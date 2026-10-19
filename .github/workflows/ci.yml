@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-ed:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
+
+      - name: Build
+        run: go build ./cmd/controller ./cmd/worker
+
+      - name: Unit tests
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: Integration tests (real containerd)
+    runs-on: ubuntu-latest
+    env:
+      CONTAINERD_VERSION: "1.7.27"
+      SOCK: /run/angryduck-ci/containerd.sock
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.sum
+
+      # A containerd of our own, next to the runner's (Docker's), with its own
+      # root, state and socket: overlayfs snapshotter and CRI, as on the nodes.
+      - name: Start containerd ${{ env.CONTAINERD_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/containerd.tgz \
+            "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
+          mkdir -p /tmp/containerd && tar -xzf /tmp/containerd.tgz -C /tmp/containerd
+          cat > /tmp/containerd/config.toml <<'EOF'
+          version = 2
+          root = "/var/lib/angryduck-ci"
+          state = "/run/angryduck-ci"
+          [grpc]
+            address = "/run/angryduck-ci/containerd.sock"
+          [plugins."io.containerd.grpc.v1.cri"]
+            disable_apparmor = true
+            [plugins."io.containerd.grpc.v1.cri".containerd]
+              snapshotter = "overlayfs"
+          EOF
+          sudo mkdir -p /var/lib/angryduck-ci /run/angryduck-ci
+          sudo sh -c 'nohup /tmp/containerd/bin/containerd --config /tmp/containerd/config.toml > /tmp/containerd/containerd.log 2>&1 &'
+          for i in $(seq 1 30); do
+            sudo /tmp/containerd/bin/ctr -a "$SOCK" version >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "::error::containerd didn't start"; sudo cat /tmp/containerd/containerd.log; exit 1
+
+      - name: Download modules
+        run: go mod download
+
+      # As root: the tests mount snapshots to compare what transfers produced.
+      - name: Integration tests
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            ANGRYDUCK_CONTAINERD="$SOCK" \
+            go test -tags integration -count=1 -timeout 15m ./internal/worker/
+
+      - name: containerd log
+        if: failure()
+        run: sudo tail -n 200 /tmp/containerd/containerd.log

@@ -104,3 +104,26 @@ containerd and node-exporter.
 The Grafana dashboard is plain JSON. Import it, edit it in Grafana, then export
 it with **Share → Export → Save to file** with *Export for sharing externally*
 enabled, and replace `grafana/angryduck-dashboard.json`.
+
+## CI and releases
+
+GitHub Actions run two workflows from `.github/workflows/`:
+
+- **CI** (`ci.yml`), on every pull request and push to `main`: `gofmt`, `go
+  vet` (with and without the `integration` tag), a build of both binaries, the
+  unit tests with `-race`, and the integration tests against a real containerd
+  (the release binaries of the version the nodes run, started next to the
+  runner's own, overlayfs and CRI).
+- **Release** (`release.yml`), on a pushed `vX.Y.Z` tag: checks that the tag,
+  `helm/angryduck/Chart.yaml`'s `appVersion`, the image tags in `k8s/` and a
+  `## X.Y.Z` section of `CHANGELOG.md` all agree, builds and pushes
+  `ghcr.io/<owner>/angry-duck-controller` and `angry-duck-worker` as `X.Y.Z`
+  and `latest`, then publishes the GitHub release with that changelog section
+  as its notes. It can be re-run for an existing tag from the Actions tab.
+
+To release: bump the version in `Chart.yaml`, `k8s/` and `docs/`, add the
+`CHANGELOG.md` section, merge, then:
+
+```bash
+git tag -a vX.Y.Z -m "Angry Duck X.Y.Z" && git push origin vX.Y.Z
+```
