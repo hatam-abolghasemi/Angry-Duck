@@ -280,6 +280,11 @@ func layersOf(ctx context.Context, store Store, m manifestJSON) []Layer {
 	if err != nil {
 		return nil
 	}
+	return pairLayers(m, cfgBytes)
+}
+
+// pairLayers is layersOf once the config is read.
+func pairLayers(m manifestJSON, cfgBytes []byte) []Layer {
 	var cfg struct {
 		RootFS struct {
 			DiffIDs []string `json:"diff_ids"`
