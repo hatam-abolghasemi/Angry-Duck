@@ -197,9 +197,17 @@ func (rs *Rescue) receive(ctx context.Context, order model.RescueOrder) model.Re
 
 	start := time.Now()
 	if _, _, err := rs.store.Resolve(ctx, order.Image); err == nil {
-		logging.Infof("angryduck-worker[%s]: rescue image=%s: already present, nothing to ship", rs.nodeID, order.Image)
-		rescuesTotal.Inc(rs.nodeID, order.Reason, "already_present")
-		return model.RescueResult{OK: true}
+		// A name alone isn't an image that runs: one whose layers can't be
+		// unpacked (see blobship.Health) is received again, and the import
+		// repoints the name once the new copy is unpacked.
+		h, broken := brokenImage(ctx, rs.store, order.Image, rs.platform)
+		if !broken {
+			logging.Infof("angryduck-worker[%s]: rescue image=%s: already present, nothing to ship", rs.nodeID, order.Image)
+			rescuesTotal.Inc(rs.nodeID, order.Reason, "already_present")
+			return model.RescueResult{OK: true}
+		}
+		logging.Warnf("angryduck-worker[%s]: rescue image=%s: registered here but can't be unpacked (%d layer(s) gone, first %s): receiving it again",
+			rs.nodeID, order.Image, len(h.Missing), h.Missing[0].Blob.Digest)
 	}
 	if len(order.Sources) == 0 {
 		rescuesTotal.Inc(rs.nodeID, order.Reason, "failure")
@@ -355,6 +363,24 @@ func (rs *Rescue) receiveFrom(ctx context.Context, order model.RescueOrder, prim
 		}
 	}
 	return model.RescueResult{OK: true, Source: strings.Join(names, ","), Blobs: asm.BlobCount(), Snapshots: asm.SnapshotCount(), Bytes: received}, nil
+}
+
+// brokenImage reports whether image is registered here but can't be
+// unpacked. A broken verdict from cached listings is checked again with
+// fresh ones before it counts; anything that can't be checked counts as
+// fine.
+func brokenImage(ctx context.Context, store blobship.Store, image, platform string) (blobship.Health, bool) {
+	h, err := blobship.Check(ctx, store, image, platform)
+	if err != nil || !h.Broken() {
+		return h, false
+	}
+	if inv, ok := store.(interface{ Invalidate() }); ok {
+		inv.Invalidate()
+		if h, err = blobship.Check(ctx, store, image, platform); err != nil || !h.Broken() {
+			return h, false
+		}
+	}
+	return h, true
 }
 
 // baseImagePrefix names the temporary images a base step imports. They
