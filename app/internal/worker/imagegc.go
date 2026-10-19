@@ -453,8 +453,8 @@ func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now ti
 
 func (g *ImageGC) protected(names []string) bool {
 	for _, n := range names {
-		if strings.HasPrefix(n, baseImagePrefix) {
-			return true // a rescue's temporary base image
+		if strings.HasPrefix(n, tempImageHost) {
+			return true // a rescue's base image or an import's temporary name
 		}
 		for _, sub := range g.cfg.ProtectSubstrings {
 			if sub != "" && strings.Contains(n, sub) {
