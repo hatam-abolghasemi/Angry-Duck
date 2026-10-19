@@ -53,6 +53,34 @@ utilization math.
 | Mirror requests are all `miss` | containerd's `config_path` doesn't point at `MIRROR_CONTAINERD_CONFIG_DIR`, or peers have no blobs. |
 | `image cleanup: ... nothing is removable` | Every image on the node is running, protected or being pulled. The disk needs attention beyond images. |
 | Pod still pending after a successful rescue | kubelet waits for its backoff, up to 5 minutes. Delete the pod to retry now. |
+| `CreateContainerError`: `failed to get reader from content store ... not found`, with `already present on machine` | The image is registered but can't be unpacked. The image repair removes it within two `IMAGE_REPAIR_INTERVAL_S`. See below. |
+
+### An image is present but containers can't be created
+
+kubelet's events alternate between `Container image ... already present on
+machine` and `failed to create containerd container: error unpacking image:
+failed to extract layer ...: failed to get reader from content store: content
+digest ...: not found`. containerd has the image's name and metadata, but its
+top layer isn't unpacked and the blob of some layer is gone, so nothing can
+unpack it; kubelet, seeing the name, never pulls it again.
+
+Before 1.8.12, a spread finalize or a rescue could leave this behind: the
+controller counted a layer as being on the node from a layer scan up to a
+minute old, kubelet or the cleanup removed the image it came with in the
+meantime, containerd's import registered the name, and the unpack failed after
+it. The worker logged `spread: registering image=... failed: unpacking ...`.
+Imports now publish a name only once the image is unpacked, and every layer
+counted as present is held under the transfer's lease.
+
+From 1.8.12 the worker repairs it on its own: the image repair logs
+`image repair: image=... can't be unpacked`, then `removed image=...` one
+interval later, and `angryduck_worker_broken_images_removed_total` goes up. A
+rescue of such an image no longer answers `already present`. To fix it by hand
+right away, on the node:
+
+```bash
+sudo crictl rmi <image>
+```
 
 ## Sizing
 
@@ -130,7 +158,7 @@ local. Workers listen on their pod IPs; find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.11
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.8.12
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

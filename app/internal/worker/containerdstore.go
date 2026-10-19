@@ -1,21 +1,27 @@
 package worker
 
 import (
+	"archive/tar"
 	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	ctrdiff "github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/images/archive"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/namespaces"
@@ -23,6 +29,8 @@ import (
 	"github.com/containerd/platforms"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"angryduck/internal/logging"
 )
 
 // ContainerdStore is blobship.Store (and the mirror's, cleanup's and layer
@@ -51,6 +59,9 @@ type ContainerdStore struct {
 	// named by digest, so they are read directly; anything not found there
 	// is read through containerd's content API.
 	blobDir string
+
+	importsMu sync.Mutex
+	importing map[string]bool // temporary name prefixes of imports running now
 }
 
 // NewContainerdStore wraps a connected client.
@@ -319,6 +330,18 @@ func (s *ContainerdStore) Resolve(ctx context.Context, image string) (string, st
 // does: names come from index.json, then each image is unpacked for the
 // platform. Unpacking skips every layer whose chainID snapshot already
 // exists, so the archive needs no blob for those layers.
+//
+// Unlike containerd's own import, a name is only published once its image
+// is unpacked. containerd's import registers the names first and leaves
+// unpacking to the caller; if the unpack then fails (a layer the archive
+// left out because a snapshot or blob "was already here" got garbage
+// collected meanwhile), the name stays behind pointing at an image that
+// can't be unpacked. kubelet sees that image as present, never pulls it
+// again, and every container create fails with "failed to get reader from
+// content store". So the archive's names are swapped for temporary ones
+// on the way in, the images are unpacked under those, and only then do the
+// real names point at them. A failed import leaves every real name exactly
+// as it was.
 func (s *ContainerdStore) Import(ctx context.Context, r io.Reader, platform string) error {
 	defer s.invalidate()
 	spec, err := platforms.Parse(platform)
@@ -332,20 +355,289 @@ func (s *ContainerdStore) Import(ctx context.Context, r io.Reader, platform stri
 	}
 	defer done(context.WithoutCancel(ctx))
 
-	imgs, err := s.client.Import(ctx, r,
+	ren := newImportRenamer(importTempPrefix + randomSuffix())
+	s.importStarted(ren.prefix)
+	defer s.importEnded(ren.prefix)
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(ren.rewrite(r, pw)) }()
+	imgs, err := s.client.Import(ctx, pr,
 		containerd.WithImageRefTranslator(archive.AddRefPrefix("import-"+time.Now().Format("2006-01-02"))),
 		containerd.WithImportPlatform(match),
 		containerd.WithAllPlatforms(false),
 	)
+	pr.CloseWithError(errImportEnded)
 	if err != nil {
+		// containerd creates names only after reading the whole archive,
+		// so a failed import created none... except when it failed while
+		// creating them: drop any temporary one that made it.
+		s.dropTemps(ctx, ren.temps())
 		return fmt.Errorf("import: %w", err)
 	}
+	if err := s.unpackAndPublish(ctx, imgs, ren, match); err != nil {
+		return err
+	}
+	return nil
+}
+
+// importTempPrefix names the temporary images Import unpacks under. They
+// live for one import; the image repair removes any a killed worker left.
+const importTempPrefix = tempImageHost + "import/"
+
+func (s *ContainerdStore) importStarted(prefix string) {
+	s.importsMu.Lock()
+	defer s.importsMu.Unlock()
+	if s.importing == nil {
+		s.importing = map[string]bool{}
+	}
+	s.importing[prefix] = true
+}
+
+func (s *ContainerdStore) importEnded(prefix string) {
+	s.importsMu.Lock()
+	defer s.importsMu.Unlock()
+	delete(s.importing, prefix)
+}
+
+// ImportInFlight reports whether temporary name belongs to an import
+// running now.
+func (s *ContainerdStore) ImportInFlight(name string) bool {
+	prefix, _, _ := strings.Cut(name, ":")
+	s.importsMu.Lock()
+	defer s.importsMu.Unlock()
+	return s.importing[prefix]
+}
+
+// unpackAndPublish unpacks every imported image, then points each real
+// name at its image and removes the temporary names. Nothing is published
+// unless every image unpacked.
+func (s *ContainerdStore) unpackAndPublish(ctx context.Context, imgs []images.Image, ren *importRenamer, match platforms.MatchComparer) error {
+	temps := ren.temps()
+	defer s.dropTemps(ctx, temps)
 	for _, img := range imgs {
 		if err := containerd.NewImageWithPlatform(s.client, img, match).Unpack(ctx, s.snapshotter); err != nil {
-			return fmt.Errorf("unpacking %s: %w", img.Name, err)
+			name := img.Name
+			if real, ok := ren.real(img.Name); ok {
+				name = real
+			} else {
+				// Not renamed (an archive naming its image some other way
+				// than io.containerd.image.name): containerd already
+				// registered it under its real name. Take it back.
+				s.dropTemps(ctx, []string{img.Name})
+			}
+			return fmt.Errorf("unpacking %s: %w", name, err)
+		}
+	}
+	is := s.client.ImageService()
+	for _, img := range imgs {
+		real, ok := ren.real(img.Name)
+		if !ok {
+			continue // registered under its own name already
+		}
+		pub := images.Image{Name: real, Target: img.Target, Labels: img.Labels}
+		if err := putImage(ctx, is, pub); err != nil {
+			return fmt.Errorf("registering %s: %w", real, err)
 		}
 	}
 	return nil
+}
+
+// putImage points img.Name at img.Target, creating the name if needed, the
+// way containerd's import does.
+func putImage(ctx context.Context, is images.Store, img images.Image) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err := is.Update(ctx, img, "target")
+		if err == nil || !errdefs.IsNotFound(err) {
+			return err
+		}
+		_, err = is.Create(ctx, img)
+		if err == nil || !errdefs.IsAlreadyExists(err) {
+			return err
+		}
+		// Created by someone else between the two calls: update it.
+	}
+	return fmt.Errorf("image %s keeps changing under us", img.Name)
+}
+
+// dropTemps removes temporary image names, best effort, on a context of
+// its own so it still runs when the import's was cancelled.
+func (s *ContainerdStore) dropTemps(ctx context.Context, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	for _, n := range names {
+		if err := s.client.ImageService().Delete(ctx, n); err != nil && !errdefs.IsNotFound(err) {
+			logging.Warnf("angryduck-worker: removing temporary image %s: %v (removed at the next start)", n, err)
+		}
+	}
+}
+
+// importRenamer rewrites an OCI archive's index.json on its way into
+// containerd, replacing each io.containerd.image.name with a temporary
+// name, and remembers which is which.
+type importRenamer struct {
+	prefix string
+	mu     sync.Mutex
+	toReal map[string]string
+}
+
+func newImportRenamer(prefix string) *importRenamer {
+	return &importRenamer{prefix: prefix, toReal: map[string]string{}}
+}
+
+func (ir *importRenamer) real(temp string) (string, bool) {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	r, ok := ir.toReal[temp]
+	return r, ok
+}
+
+func (ir *importRenamer) temps() []string {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	out := make([]string, 0, len(ir.toReal))
+	for t := range ir.toReal {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// maxIndexJSON caps the index.json read into memory (real ones: < 1 KB
+// here, a few KB for big multi-platform images).
+const maxIndexJSON = 4 << 20
+
+// rewrite copies the tar stream from r to w, rewriting index.json.
+// Everything else, blobs included, streams through untouched.
+func (ir *importRenamer) rewrite(r io.Reader, w io.Writer) error {
+	tr := tar.NewReader(r)
+	tw := tar.NewWriter(w)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if path.Clean(strings.TrimPrefix(h.Name, "./")) != "index.json" || h.Typeflag != tar.TypeReg {
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			if _, err := io.Copy(tw, tr); err != nil {
+				return err
+			}
+			continue
+		}
+		b, err := io.ReadAll(io.LimitReader(tr, maxIndexJSON+1))
+		if err != nil {
+			return err
+		}
+		if len(b) > maxIndexJSON {
+			return errors.New("index.json too large")
+		}
+		if b, err = ir.renameIndex(b); err != nil {
+			return err
+		}
+		h.Size = int64(len(b))
+		if err := tw.WriteHeader(h); err != nil {
+			return err
+		}
+		if _, err := tw.Write(b); err != nil {
+			return err
+		}
+	}
+	return tw.Close()
+}
+
+// renameIndex swaps every manifest's io.containerd.image.name for a
+// temporary name, keeping every other field as it was.
+func (ir *importRenamer) renameIndex(b []byte) ([]byte, error) {
+	var idx map[string]json.RawMessage
+	if err := json.Unmarshal(b, &idx); err != nil {
+		return nil, fmt.Errorf("parsing index.json: %w", err)
+	}
+	var manifests []map[string]json.RawMessage
+	if raw, ok := idx["manifests"]; ok {
+		if err := json.Unmarshal(raw, &manifests); err != nil {
+			return nil, fmt.Errorf("parsing index.json manifests: %w", err)
+		}
+	}
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	for i, m := range manifests {
+		raw, ok := m["annotations"]
+		if !ok {
+			continue
+		}
+		var ann map[string]string
+		if err := json.Unmarshal(raw, &ann); err != nil {
+			return nil, fmt.Errorf("parsing index.json annotations: %w", err)
+		}
+		real := ann[images.AnnotationImageName]
+		if real == "" {
+			continue
+		}
+		temp := fmt.Sprintf("%s:%d", ir.prefix, len(ir.toReal))
+		ir.toReal[temp] = real
+		ann[images.AnnotationImageName] = temp
+		nb, err := json.Marshal(ann)
+		if err != nil {
+			return nil, err
+		}
+		manifests[i]["annotations"] = nb
+	}
+	mb, err := json.Marshal(manifests)
+	if err != nil {
+		return nil, err
+	}
+	idx["manifests"] = mb
+	return json.Marshal(idx)
+}
+
+// HoldContent adds blob dgst to lease, so containerd's garbage collector
+// keeps it until the lease goes, and reports whether the blob is in the
+// content store now (asked from containerd, not from a cached listing). A
+// blob that isn't there isn't held.
+func (s *ContainerdStore) HoldContent(ctx context.Context, lease, dgst string) (bool, error) {
+	d, err := digest.Parse(dgst)
+	if err != nil {
+		return false, err
+	}
+	return s.hold(ctx, lease, leases.Resource{ID: dgst, Type: "content"}, func(ctx context.Context) error {
+		_, err := s.client.ContentStore().Info(ctx, d)
+		return err
+	})
+}
+
+// HoldSnapshot adds committed snapshot key to lease and reports whether it
+// exists now, like HoldContent. A snapshot keeps its parents.
+func (s *ContainerdStore) HoldSnapshot(ctx context.Context, lease, key string) (bool, error) {
+	return s.hold(ctx, lease, leases.Resource{ID: key, Type: "snapshots/" + s.snapshotter}, func(ctx context.Context) error {
+		_, err := s.snapshotterSvc().Stat(ctx, key)
+		return err
+	})
+}
+
+// hold adds res to lease first and checks it exists second: checked the
+// other way round, the garbage collector could free it in between.
+func (s *ContainerdStore) hold(ctx context.Context, lease string, res leases.Resource, exists func(context.Context) error) (bool, error) {
+	ctx = s.ns(ctx)
+	lm := s.client.LeasesService()
+	l := leases.Lease{ID: lease}
+	if err := lm.AddResource(ctx, l, res); err != nil && !errdefs.IsAlreadyExists(err) {
+		return false, err
+	}
+	err := exists(ctx)
+	if err == nil {
+		return true, nil
+	}
+	_ = lm.DeleteResource(ctx, l, res) // nothing to hold
+	if errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // ImageNames lists every image name in the namespace.

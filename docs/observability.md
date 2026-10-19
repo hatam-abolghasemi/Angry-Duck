@@ -122,6 +122,9 @@ what is moving, not history:
 | `angryduck_worker_gc_image_returns` | gauge | `node`, `image` | Images that came back within an hour of cleanup removing them, and how many times. Only images that came back in the last hour, so the series count stays small. |
 | `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`, `rollback`. |
 | `angryduck_worker_gc_cleaning` | gauge | `node` | 1 while the disk is above high and not yet back to low. |
+| `angryduck_worker_broken_images` | gauge | `node` | Images registered on the node that can't be unpacked (every container create fails). The image repair removes them on its next check. |
+| `angryduck_worker_broken_images_removed_total` | counter | `node` | Images the repair removed because they couldn't be unpacked. |
+| `angryduck_worker_temp_images_removed_total` | counter | `node` | Temporary import names a killed worker left behind, removed by the repair. |
 | `angryduck_worker_preheated_containers_running` | gauge | `node`, `repo` | Running containers from repos recently preheated on the node. |
 
 | `angryduck_worker_containerd_calls_total` | counter | `node`, `method` | gRPC calls to containerd, by service and method (`Content/List`, `ImageService/PullImage`, ...). The load the worker puts on containerd. |
@@ -223,6 +226,12 @@ groups:
         for: 15m
         annotations:
           summary: "{{ $labels.registry }} refuses Angry Duck's credentials; was its pull secret rotated?"
+
+      - alert: AngryDuckBrokenImage
+        expr: angryduck_worker_broken_images > 0
+        for: 15m
+        annotations:
+          summary: "{{ $labels.node }} has an image that can't be unpacked and the repair hasn't removed it (disabled, or it keeps coming back)"
 
       - alert: AngryDuckDiskFullNotFromImages
         expr: angryduck_worker_gc_stalled == 1

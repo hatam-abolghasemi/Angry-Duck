@@ -9,6 +9,8 @@
 //     from this node or a peer before the registry;
 //   - cleans up images nothing has run here for a while, when the disk is
 //     getting full.
+//   - repairs images registered here that can't be unpacked (kubelet
+//     would call them present and never pull them again).
 //
 // It talks to containerd over its socket only (containerd's own API plus
 // CRI): no node binaries, no chroot, no host PID namespace.
@@ -188,8 +190,28 @@ func main() {
 		timeout := config.Duration("SPREAD_TRANSFER_TIMEOUT_S", 1800)
 		sp := worker.NewSpread(store, registryclient.New(creds, 30*time.Second, 0), token, nodeID, platform, controllerURL, timeout)
 		sp.OnFinalize(reporter.Kick)
+		sp.OnStale(reporter.Kick)
 		extra = append(extra, sp.Register)
 		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s", nodeID, platform, timeout)
+	}
+
+	// Images being pulled or received right now: cleanup and repair never
+	// touch them.
+	busy := func(names []string) bool {
+		for _, n := range names {
+			if puller.Pulling(n) {
+				return true
+			}
+		}
+		return rescue != nil && rescue.Busy(names)
+	}
+
+	if store != nil && config.Bool("IMAGE_REPAIR_ENABLED", true) {
+		platform := config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH)
+		interval := config.Duration("IMAGE_REPAIR_INTERVAL_S", 120)
+		go worker.NewImageRepair(store, platform, nodeID, interval, busy, reporter.Kick).Run(ctx)
+	} else if store != nil {
+		log.Printf("angryduck-worker[%s]: image repair disabled (IMAGE_REPAIR_ENABLED=false): an image that can't be unpacked stays until removed by hand", nodeID)
 	}
 
 	if store != nil && config.Bool("GC_ENABLED", true) {
@@ -199,14 +221,7 @@ func main() {
 				r, err := worker.FetchRootUtilization(metricsURL, 5*time.Second)
 				return r.Utilization, err
 			},
-			func(names []string) bool {
-				for _, n := range names {
-					if puller.Pulling(n) {
-						return true
-					}
-				}
-				return rescue != nil && rescue.Busy(names)
-			},
+			busy,
 			nodeID,
 			worker.GCConfig{
 				Interval:          config.Duration("GC_INTERVAL_S", 60),

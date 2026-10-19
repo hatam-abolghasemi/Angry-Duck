@@ -317,21 +317,41 @@ func (m *MemStore) Import(ctx context.Context, r io.Reader, platform string) err
 		return fmt.Errorf("index.json has no image name")
 	}
 
+	// Like ContainerdStore.Import, the name is published only once the
+	// unpack worked: a failed import leaves whatever the name pointed at
+	// before (or nothing) untouched.
 	m.mu.Lock()
 	for d, b := range staged {
 		m.blobs[d] = b
 	}
+	prev, hadPrev := m.images[name]
 	m.images[name] = [2]string{top.MediaType, top.Digest}
 	m.Imports = append(m.Imports, carried)
 	m.mu.Unlock()
 
 	if err := m.unpack(ctx, name, platform); err != nil {
 		m.mu.Lock()
-		delete(m.images, name)
+		if hadPrev {
+			m.images[name] = prev
+		} else {
+			delete(m.images, name)
+		}
 		m.mu.Unlock()
 		return err
 	}
 	return nil
+}
+
+// ImageTargets maps every image name to the digest it points at, like
+// ContainerdStore's.
+func (m *MemStore) ImageTargets(context.Context) (map[string]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]string, len(m.images))
+	for n, t := range m.images {
+		out[n] = t[1]
+	}
+	return out, nil
 }
 
 // TestImage is a synthetic multi-platform image for tests.

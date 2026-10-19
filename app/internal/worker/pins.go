@@ -213,7 +213,7 @@ func CleanupLeftovers(ctx context.Context, store blobship.Store, pins *Pins, nod
 		}
 		var temps []string
 		for _, n := range names {
-			if strings.HasPrefix(n, baseImagePrefix) {
+			if strings.HasPrefix(n, baseImagePrefix) || strings.HasPrefix(n, importTempPrefix) {
 				temps = append(temps, n)
 			}
 		}

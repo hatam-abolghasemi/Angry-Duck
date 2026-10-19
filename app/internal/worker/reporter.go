@@ -213,6 +213,9 @@ func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []st
 		if ref == "" || strings.HasPrefix(ref, "sha256:") {
 			continue // bare image ID: no name at all
 		}
+		if strings.HasPrefix(ref, tempImageHost) {
+			continue // Angry Duck's own temporary name, gone in moments
+		}
 		if _, ok := seenImage[ref]; !ok {
 			seenImage[ref] = struct{}{}
 			images = append(images, ref)

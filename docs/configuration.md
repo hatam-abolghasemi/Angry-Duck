@@ -165,3 +165,19 @@ unused images per repo go last. See [Image cleanup](image-cleanup.md).
 | `GC_BATCH` | `5` | Images removed per batch. |
 | `GC_SETTLE_S` | `10` | Wait after a batch before re-measuring the disk. |
 | `GC_PROTECT_SUBSTRINGS` | `pause` | Never remove images whose name contains one of these. |
+
+## Image repair
+
+Each worker looks for images that are registered but can't be unpacked: the
+top layer isn't unpacked, and some layer has neither its snapshot nor its
+blob on the node. kubelet treats such an image as present and never pulls it
+again, and every container create fails with `failed to get reader from
+content store ... not found`. An image still broken one interval later,
+checked again against fresh listings, is removed (every name of it), so the
+next container start pulls it. Images being pulled or received are left
+alone. See [Operations](operations.md#an-image-is-present-but-containers-cant-be-created).
+
+| Variable | Default | Description |
+|---|---|---|
+| `IMAGE_REPAIR_ENABLED` | `true` | Find and remove images that can't be unpacked. |
+| `IMAGE_REPAIR_INTERVAL_S` | `120` | How often images are checked; a broken one is removed on the first check at least this long after it was found. |

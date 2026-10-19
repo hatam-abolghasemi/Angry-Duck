@@ -1,8 +1,58 @@
 # Changelog
 
-## Unreleased
+## 1.8.12
+
+Fixes images left registered on a node but impossible to unpack, and repairs
+the ones already there.
+
+### Fixed
+
+- **A failed spread finalize or rescue no longer leaves a broken image
+  behind.** The controller finalizes a spread from a layer inventory up to a
+  scan old, and a layer it counted as on the node could be gone by then:
+  kubelet or the cleanup removed the image it came with, and containerd's
+  garbage collector freed it. containerd's import registered the image name
+  first and the unpack failed after, so the name stayed, pointing at an image
+  that can't be unpacked. kubelet then reported the image `already present on
+  machine`, never pulled it again, and every container create failed with
+  `failed to get reader from content store ... not found`; the controller
+  counted the node as holding it, so nothing sent it either. Seen as
+  `spread: registering image=... failed: unpacking ...` in the worker log.
+  - **Imports are atomic.** The archive's names are swapped for temporary
+    ones (`angryduck.local/import/...`) on the way into containerd, the image
+    is unpacked under those, and only then does the real name point at it. A
+    failed import leaves every real name as it was, including a tag that
+    already pointed at a working image.
+  - **"Already here" is held.** A spread fetch answered `present` now puts
+    the blob under the job's lease, and a finalize holds every layer it
+    counts on (the highest unpacked snapshot and the blobs above it) before
+    importing. A layer that is gone fails the finalize up front, naming it,
+    and the worker reports its inventory right away so the controller fetches
+    it instead of finalizing again.
+  - **A rescue no longer answers `already present` for an image that can't
+    be unpacked**: it receives it again, and the import repoints the name.
+
+### Added
+
+- **Image repair** (`IMAGE_REPAIR_ENABLED`, on by default). Every
+  `IMAGE_REPAIR_INTERVAL_S` (120) the worker looks for images whose top layer
+  isn't unpacked and some layer has neither its snapshot nor its blob. One
+  still broken an interval later, checked again against fresh listings and
+  not being pulled or received, is removed with all its names; kubelet pulls
+  it on the next container start, and the controller learns the node no
+  longer has it. This also clears images broken by earlier versions. It also
+  removes temporary import names a killed worker left behind. New metrics:
+  `angryduck_worker_broken_images`,
+  `angryduck_worker_broken_images_removed_total`,
+  `angryduck_worker_temp_images_removed_total`; suggested alert
+  `AngryDuckBrokenImage`. See
+  [Operations](docs/operations.md#an-image-is-present-but-containers-cant-be-created).
 
 ### Changed
+
+- **Angry Duck's own temporary images (`angryduck.local/...`) are no longer
+  reported to the controller**, and the cleanup never removes any of them
+  (before, only rescue base images were protected).
 
 - **Helm chart moved to `helm/angryduck` and now renders exactly `k8s/`**:
   the same objects, names, labels, settings and defaults, apart from the
