@@ -29,7 +29,8 @@ type Reporter struct {
 	inventory     *Inventory
 	httpClient    *http.Client
 	kick          chan struct{}
-	layers        *LayerTracker // nil: no layer inventory (no containerd, or turned off)
+	layers        *LayerTracker          // nil: no layer inventory (no containerd, or turned off)
+	exclude       func() map[string]bool // names to leave out of reports (broken images)
 
 	// ackedInv is the inventory hash the controller last confirmed it
 	// holds. While it matches, reports leave the lists out. Only the Run
@@ -39,6 +40,12 @@ type Reporter struct {
 
 // SetLayerTracker makes reports carry this node's layer inventory.
 func (rp *Reporter) SetLayerTracker(t *LayerTracker) { rp.layers = t }
+
+// SetExclude makes reports leave out the image names fn returns: images
+// registered here that can't start a container. The controller must not
+// count this node as holding them, as a target already served or as a
+// source for others.
+func (rp *Reporter) SetExclude(fn func() map[string]bool) { rp.exclude = fn }
 
 // NewReporter builds a reporter. rt is used to list local images each
 // report tick so the controller can rank preheat targets by image
@@ -207,6 +214,10 @@ func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []st
 		return nil, nil, false
 	}
 
+	var skip map[string]bool
+	if rp.exclude != nil {
+		skip = rp.exclude()
+	}
 	seenRepo := make(map[string]struct{}, len(refs))
 	seenImage := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
@@ -215,6 +226,9 @@ func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []st
 		}
 		if strings.HasPrefix(ref, tempImageHost) {
 			continue // Angry Duck's own temporary name, gone in moments
+		}
+		if skip[ref] {
+			continue // registered but broken: not an image this node has
 		}
 		if _, ok := seenImage[ref]; !ok {
 			seenImage[ref] = struct{}{}

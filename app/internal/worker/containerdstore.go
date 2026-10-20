@@ -689,6 +689,37 @@ func (s *ContainerdStore) DeleteImages(ctx context.Context, names ...string) err
 	return errors.Join(errs...)
 }
 
+// DeleteContent removes one blob from the content store, whatever
+// references it, file included. Only for a blob that is here but
+// unusable: containerd keeps an existing blob when the same digest is
+// written again, so a corrupted copy has to go before a good one can land.
+//
+// Deleting only drops this namespace's record of the blob; the file stays
+// until containerd's garbage collector runs, and a write of the same
+// digest meanwhile would adopt the corrupted file. So the collector is run
+// right away (deleting an empty lease synchronously does that). Rare, and
+// the same work containerd does after every image removal.
+func (s *ContainerdStore) DeleteContent(ctx context.Context, dgst string) error {
+	d, err := digest.Parse(dgst)
+	if err != nil {
+		return err
+	}
+	defer s.invalidate()
+	ctx = s.ns(ctx)
+	if err := s.client.ContentStore().Delete(ctx, d); err != nil && !errdefs.IsNotFound(err) {
+		return err
+	}
+	lm := s.client.LeasesService()
+	l, err := lm.Create(ctx, leases.WithRandomID(), leases.WithExpiration(time.Minute))
+	if err != nil {
+		return fmt.Errorf("running garbage collection: %w", err)
+	}
+	if err := lm.Delete(ctx, l, leases.SynchronousDelete); err != nil {
+		return fmt.Errorf("running garbage collection: %w", err)
+	}
+	return nil
+}
+
 // --- snapshots ---
 //
 // Snapshot shipping moves a layer between nodes when no node has its

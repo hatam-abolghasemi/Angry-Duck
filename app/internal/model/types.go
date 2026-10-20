@@ -179,6 +179,17 @@ type RescueOrder struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// RepairOrder is what the controller sends to the /repair endpoint of the
+// worker on a node where a container failed to start on an image that is
+// registered there but can't be unpacked. The worker repairs it in place
+// in the background; /repair answers at once.
+type RepairOrder struct {
+	Image string `json:"image"`
+	// Reason is the container's error as kubelet reported it. It may name
+	// a layer that failed to unpack, whose blob is then replaced.
+	Reason string `json:"reason,omitempty"`
+}
+
 // RescueResult is the target worker's answer to a RescueOrder. /rescue is
 // synchronous: it returns once the image is imported, or every source has
 // failed.

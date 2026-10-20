@@ -9,8 +9,10 @@
 //     from this node or a peer before the registry;
 //   - cleans up images nothing has run here for a while, when the disk is
 //     getting full.
-//   - repairs images registered here that can't be unpacked (kubelet
-//     would call them present and never pull them again).
+//   - repairs, in place, images registered here that can't start a
+//     container (kubelet would call them present and never pull them
+//     again): only the missing pieces, from peers first, then the
+//     registry.
 //
 // It talks to containerd over its socket only (containerd's own API plus
 // CRI): no node binaries, no chroot, no host PID namespace.
@@ -209,9 +211,17 @@ func main() {
 	if store != nil && config.Bool("IMAGE_REPAIR_ENABLED", true) {
 		platform := config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH)
 		interval := config.Duration("IMAGE_REPAIR_INTERVAL_S", 120)
-		go worker.NewImageRepair(store, platform, nodeID, interval, busy, reporter.Kick).Run(ctx)
+		repair := worker.NewImageRepair(store, registryclient.New(creds, 30*time.Second, 0), platform, nodeID, interval, busy, reporter.Kick)
+		if tokenErr == nil {
+			// Peers and the controller's wakes need the shared token.
+			repair.UsePeers(token, controllerURL)
+			extra = append(extra, repair.Register)
+		}
+		reporter.SetExclude(repair.Broken)
+		log.Printf("angryduck-worker[%s]: image repair enabled: interval=%s, from peers=%t then the registry", nodeID, interval, tokenErr == nil)
+		go repair.Run(ctx)
 	} else if store != nil {
-		log.Printf("angryduck-worker[%s]: image repair disabled (IMAGE_REPAIR_ENABLED=false): an image that can't be unpacked stays until removed by hand", nodeID)
+		log.Printf("angryduck-worker[%s]: image repair disabled (IMAGE_REPAIR_ENABLED=false): an image that can't start containers stays until removed by hand", nodeID)
 	}
 
 	if store != nil && config.Bool("GC_ENABLED", true) {

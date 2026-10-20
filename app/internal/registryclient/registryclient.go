@@ -308,6 +308,21 @@ func (c *Client) OpenBlob(ctx context.Context, image, digest string) (body io.Re
 	return resp.Body, resp.ContentLength, nil
 }
 
+// OpenManifest starts streaming one manifest or index of image's
+// repository by digest. Registries serve these under /manifests/, not
+// /blobs/.
+func (c *Client) OpenManifest(ctx context.Context, image, digest string) (body io.ReadCloser, size int64, err error) {
+	ref, err := ParseRef(image)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.do(ctx, c.http, http.MethodGet, ref, "manifests/"+digest, acceptManifests)
+	if err != nil {
+		return nil, 0, err
+	}
+	return resp.Body, resp.ContentLength, nil
+}
+
 // CheckManifest asks image's registry, with a HEAD request and the same
 // credentials pulls use, whether it still serves the image's manifest.
 // Nothing is downloaded and nothing is cached. Availability classifies

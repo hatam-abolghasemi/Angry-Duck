@@ -7,8 +7,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -20,6 +24,8 @@ import (
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"angryduck/internal/blobship"
 	"angryduck/internal/model"
@@ -205,10 +211,60 @@ func TestContainerd_SpreadFinalizeWithALayerGone(t *testing.T) {
 	}
 }
 
+// builtRegistry serves a built image's blobs and manifests by digest.
+type builtRegistry struct{ blobs map[string][]byte }
+
+func (b builtRegistry) open(d string) (io.ReadCloser, int64, error) {
+	data, ok := b.blobs[d]
+	if !ok {
+		return nil, 0, errors.New("404")
+	}
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
+}
+func (b builtRegistry) OpenBlob(_ context.Context, _, d string) (io.ReadCloser, int64, error) {
+	return b.open(d)
+}
+func (b builtRegistry) OpenManifest(_ context.Context, _, d string) (io.ReadCloser, int64, error) {
+	return b.open(d)
+}
+
+// collect runs containerd's garbage collector, by removing and re-adding a
+// throwaway image synchronously.
+func collect(t *testing.T, c *containerd.Client, nctx context.Context) {
+	t.Helper()
+	img := images.Image{Name: "angryduck.local/gc-trigger:1", Target: ocispec.Descriptor{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: digest.Digest("sha256:" + strings.Repeat("0", 64)), Size: 1}}
+	if _, err := c.ImageService().Create(nctx, img); err != nil && !errdefs.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	if err := c.ImageService().Delete(nctx, img.Name, images.SynchronousDelete()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stillRunnable checks image is unpacked and stays so after the image it
+// shared a layer with is removed and the garbage collector runs: the
+// repair left the image's content referenced by the image itself.
+func stillRunnable(t *testing.T, c *containerd.Client, s *ContainerdStore, image, other string) {
+	t.Helper()
+	ctx := context.Background()
+	nctx := s.ns(ctx)
+	if other != "" {
+		if err := c.ImageService().Delete(nctx, other, images.SynchronousDelete()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	collect(t, c, nctx)
+	s.Invalidate()
+	h, err := blobship.Check(ctx, s, image, "linux/amd64")
+	if err != nil || h.Broken() || !h.Unpacked {
+		t.Fatalf("%s after the repair and a GC: %+v (%v)", image, h, err)
+	}
+}
+
 // Images a pre-1.8.12 import left broken (registered by containerd's own
-// import, never unpacked, a layer gone) are removed by the repair; healthy
-// ones stay.
-func TestContainerd_RepairRemovesAnImageThatCantBeUnpacked(t *testing.T) {
+// import, never unpacked, a layer gone) are repaired in place: the one
+// missing blob is fetched, the name stays, healthy images stay.
+func TestContainerd_RepairFetchesOnlyTheMissingLayer(t *testing.T) {
 	c := testClient(t)
 	ctx := context.Background()
 	s := NewContainerdStore(c, testNS(t, "repair"), "overlayfs")
@@ -227,22 +283,113 @@ func TestContainerd_RepairRemovesAnImageThatCantBeUnpacked(t *testing.T) {
 	if err != nil || !h.Broken() || len(h.Missing) != 1 || h.Missing[0].Blob.Digest != app.layers[1] {
 		t.Fatalf("Check = %+v %v, want broken on the app layer", h, err)
 	}
-	// A rescue of it is no longer answered "already present".
 	if _, broken := brokenImage(ctx, s, testImage, "linux/amd64"); !broken {
 		t.Fatal("brokenImage says fine")
 	}
 
-	r := NewImageRepair(s, "linux/amd64", "n1", time.Minute, nil, nil)
-	now := time.Now()
-	r.Pass(ctx, now)
-	if _, _, err := s.Resolve(ctx, testImage); err != nil {
-		t.Fatal("removed on the first look")
+	reg := &countingRegistry{builtRegistry: builtRegistry{app.blobs}}
+	NewImageRepair(s, reg, "linux/amd64", "n1", time.Minute, nil, nil).Pass(ctx)
+	if _, d, err := s.Resolve(ctx, testImage); err != nil || d != app.manifest {
+		t.Fatalf("name now points at %s (%v), want %s", d, err, app.manifest)
 	}
-	r.Pass(ctx, now.Add(2*time.Minute))
-	if _, _, err := s.Resolve(ctx, testImage); err == nil {
-		t.Fatal("broken image still registered after the second look")
+	if len(reg.got) != 1 || reg.got[0] != app.layers[1] {
+		t.Fatalf("fetched %v, want only the app layer %s", reg.got, app.layers[1])
 	}
-	if _, _, err := s.Resolve(ctx, base.name); err != nil {
-		t.Fatalf("healthy image removed: %v", err)
+	stillRunnable(t, c, s, testImage, base.name)
+}
+
+// The image's manifest is gone: fetched by digest, and the image's
+// content is referenced again (a GC keeps it).
+func TestContainerd_RepairFetchesMissingMetadata(t *testing.T) {
+	c := testClient(t)
+	ctx := context.Background()
+	s := NewContainerdStore(c, testNS(t, "repairmeta"), "overlayfs")
+	app := buildImage(t, testImage, baseLayer, appLayer)
+	if err := s.Import(ctx, bytes.NewReader(app.archive), "linux/amd64"); err != nil {
+		t.Fatal(err)
 	}
+	if err := s.DeleteContent(ctx, app.manifest); err != nil {
+		t.Fatal(err)
+	}
+	h, err := blobship.Check(ctx, s, testImage, "linux/amd64")
+	if err != nil || !h.Broken() || h.Meta == nil || h.Meta.Blob.Digest != app.manifest {
+		t.Fatalf("Check = %+v %v, want broken on the manifest", h, err)
+	}
+	// With the manifest gone, nothing referenced the config and layers any
+	// more, and the garbage collector freed them: the repair fetches each
+	// of them back, manifest first.
+	reg := &countingRegistry{builtRegistry: builtRegistry{app.blobs}}
+	NewImageRepair(s, reg, "linux/amd64", "n1", time.Minute, nil, nil).Pass(ctx)
+	if len(reg.got) == 0 || reg.got[0] != app.manifest {
+		t.Fatalf("fetched %v, want the manifest first", reg.got)
+	}
+	stillRunnable(t, c, s, testImage, "")
+}
+
+// A layer blob that is here but corrupted on disk: unpacking it fails, the
+// controller's wake carries that error, and the repair replaces just that
+// blob.
+func TestContainerd_RepairReplacesALayerThatFailedToUnpack(t *testing.T) {
+	root := os.Getenv("ANGRYDUCK_CONTAINERD_ROOT")
+	if root == "" {
+		t.Skip("ANGRYDUCK_CONTAINERD_ROOT not set: the test corrupts a blob file directly")
+	}
+	c := testClient(t)
+	ctx := context.Background()
+	s := NewContainerdStore(c, testNS(t, "repaircorrupt"), "overlayfs")
+	nctx := s.ns(ctx)
+	// A layer no other test uses: containerd shares a blob file between
+	// namespaces, and a corrupted shared file stays while any uses it.
+	app := buildImage(t, testImage, baseLayer, []fileEntry{
+		{name: "etc/", typ: tar.TypeDir, mode: 0o755},
+		{name: "etc/only-here", typ: tar.TypeReg, mode: 0o644, body: "corruption test\n"},
+	})
+	// Registered, all blobs here, not unpacked (containerd's own import).
+	if _, err := c.Import(nctx, bytes.NewReader(app.archive), containerd.WithAllPlatforms(false)); err != nil {
+		t.Fatal(err)
+	}
+	// Whatever happens, take the corrupted file away with this namespace's
+	// references, so it can't leak into a later run.
+	t.Cleanup(func() {
+		_ = s.DeleteImages(ctx, testImage)
+		_ = s.DeleteContent(ctx, app.layers[1])
+	})
+	f := filepath.Join(root, "io.containerd.content.v1.content", "blobs", "sha256", strings.TrimPrefix(app.layers[1], "sha256:"))
+	if err := os.WriteFile(f, make([]byte, len(app.blobs[app.layers[1]])), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	img, err := c.GetImage(nctx, testImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpackErr := img.Unpack(nctx, "overlayfs")
+	if unpackErr == nil {
+		t.Fatal("unpacking a zeroed layer worked")
+	}
+	t.Logf("containerd: %v", unpackErr)
+	if len(corruptLayers(unpackErr.Error())) != 1 {
+		t.Fatalf("corruptLayers doesn't recognize %q", unpackErr)
+	}
+	reg := &countingRegistry{builtRegistry: builtRegistry{app.blobs}}
+	r := NewImageRepair(s, reg, "linux/amd64", "n1", time.Minute, nil, nil)
+	r.Wake(testImage, "failed to create containerd container: error unpacking image: "+unpackErr.Error())
+	r.handleWakes(ctx)
+	if len(reg.got) != 1 || reg.got[0] != app.layers[1] {
+		t.Fatalf("fetched %v, want only the corrupted layer", reg.got)
+	}
+	stillRunnable(t, c, s, testImage, "")
+}
+
+type countingRegistry struct {
+	builtRegistry
+	got []string
+}
+
+func (c *countingRegistry) OpenBlob(ctx context.Context, image, d string) (io.ReadCloser, int64, error) {
+	c.got = append(c.got, d)
+	return c.builtRegistry.OpenBlob(ctx, image, d)
+}
+func (c *countingRegistry) OpenManifest(ctx context.Context, image, d string) (io.ReadCloser, int64, error) {
+	c.got = append(c.got, d)
+	return c.builtRegistry.OpenManifest(ctx, image, d)
 }

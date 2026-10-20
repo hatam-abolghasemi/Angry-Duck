@@ -155,6 +155,16 @@ func (g *GaugeVec) Reset() {
 	g.mu.Unlock()
 }
 
+// Delete drops one label combination, so a series that only means
+// something while a state lasts (an image being broken, a node being
+// busy) disappears when it ends instead of lingering at its last value.
+func (g *GaugeVec) Delete(labelValues ...string) {
+	key := strings.Join(labelValues, labelSep)
+	g.mu.Lock()
+	delete(g.values, key)
+	g.mu.Unlock()
+}
+
 func (g *GaugeVec) write(w io.Writer) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
