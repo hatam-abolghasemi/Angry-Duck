@@ -40,7 +40,7 @@ shared token as `Authorization: Bearer <token>`.
 | `POST /blobs/export` | token | peer | Body `{"image", "platform", "digests"}`. Streams a partial OCI archive with only those blobs. |
 | `POST /snapshots/export` | token | peer | Body `{"image", "platform", "chain_id", "format"}`. Streams one layer as a gzip-compressed tar: containerd's OCI layer diff with a SHA-256 trailer for `"format": "oci-layer"`, the overlayfs directory format for pre-1.8.6 receivers. |
 | `GET /mirror/content/<digest>` | token | peer mirror | Content for other nodes' mirrors. |
-| `POST /spread/fetch` | token | controller | Body `{"job", "image", "digest", "size", "path": "registry" \| "peer", "peer"}`. Starts fetching one blob into a free slot (`202`), answers `200` with `present` if it's already here, `409` if that path's slot is busy. A `/spread/done` to the controller follows. |
+| `POST /spread/fetch` | token | controller | Body `{"job", "image", "digest", "size", "path": "registry" \| "peer", "peer"}`. Starts fetching one blob (`202`); any number of different blobs run at once. Answers `200` with `present` if it's already here, `409` if this blob is already coming over that path. A `/spread/done` to the controller follows. |
 | `POST /spread/finalize` | token | controller | Body `{"job", "image", "top_type", "top_digest", "top_size", "metadata"}`. Registers the image from its metadata blobs, each checked against its digest, once every layer is here. |
 | `POST /spread/drop` | token | controller | Body `{"job"}`. Cancels the job's transfers here and releases the blobs held for it. |
 | `GET /spread/content/<digest>` | token | peer | One committed blob, for a peer's spread fetch. |

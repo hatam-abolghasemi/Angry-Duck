@@ -68,11 +68,11 @@ How pushed images reach every node blob by blob. See
 | Variable | Default | Description |
 |---|---|---|
 | `SPREAD_ENABLED` | `true` | Spread blob by blob. Needs `RANK_BY_LAYERS=true` and the shared token; otherwise, and for images whose manifest can't be read, pushes are seeded and propagated whole. Read by the controller and the worker. |
-| `SPREAD_MAX_REGISTRY_PULLS` | `RANK_TOP_N` | Blob pulls from the registry in flight cluster-wide. |
+| `SPREAD_MAX_REGISTRY_PULLS` | `RANK_TOP_N` | Blob pulls from the registry in flight cluster-wide. A node may run several. |
 | `SPREAD_RACE_PER_BLOB` | `2` | Registry pulls of one blob at once: an idle node may race a slow one. |
 | `SPREAD_RETRY_AFTER_S` | `15` | Backoff after a node fails a transfer; doubles per failure. |
 | `SPREAD_BACKOFF_MAX_S` | `600` | Cap for that doubling. |
-| `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller frees a slot nobody reported on a minute after. |
+| `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller forgets a transfer nobody reported on a minute after. |
 
 Spread also uses `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
 `PROPAGATE_PER_SOURCE`, `PROPAGATE_MAX_UTILIZATION` and
@@ -89,8 +89,8 @@ The whole-image fallback, and the limits spread shares.
 | `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. A finished transfer also advances them, after about a second. |
 | `PROPAGATE_WINDOW_S` | `0` | How long to keep spreading a push. `0` means until done or superseded. |
 | `PROPAGATE_MAX_CONCURRENT` | `8` | Whole-image transfers in flight cluster-wide. Spread has no cluster-wide cap. |
-| `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node, spread included. |
-| `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this receive nothing new until cleanup makes room. Keep it at or below `GC_HIGH_UTILIZATION`. |
+| `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node, spread included. For spread it is the only limit on peer transfers: a receiver takes any number of different blobs at once. |
+| `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this receive nothing new until cleanup makes room. A spread counts as complete without them and stays open for them. Keep it at or below `GC_HIGH_UTILIZATION`. |
 | `PROPAGATE_SEED_TIMEOUT_MIN_S` | `120` | A seed still pulling after `max(MIN, FACTOR × the first seed's pull time)` is cancelled, and peers serve it instead. |
 | `PROPAGATE_SEED_TIMEOUT_MAX_S` | `600` | The timeout while no seed has finished yet. |
 | `PROPAGATE_SEED_TIMEOUT_FACTOR` | `3` | See `PROPAGATE_SEED_TIMEOUT_MIN_S`. |

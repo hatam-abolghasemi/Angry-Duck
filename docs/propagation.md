@@ -12,19 +12,22 @@ few KB, the same read [preheat](preheat.md) ranking uses), then keeps a
 board of every layer: which nodes hold its blob, which are pulling it from
 the registry, and which are receiving it from a peer.
 
-Each node has **two slots**: one blob from the registry (north-south) and
-one blob from a peer (east-west), at a time. Whenever a transfer ends, the
-controller fills free slots, about a second later:
+The **blob is the unit**: a node receives any number of different blobs at
+once, each at most once from the registry (north-south) and once from a
+peer (east-west). Whenever a transfer ends, the controller hands out new
+ones, about a second later, one new transfer per node per round until
+nothing more fits, so the first node in line doesn't take every free
+source:
 
 - **East-west first.** A node lacking a layer that some node holds fetches
   it from that node. The rarest layer goes first (fewest holders), so new
   sources appear where they are scarcest. A source serves
-  `PROPAGATE_PER_SOURCE` transfers at a time. There is no cluster-wide cap:
-  these per-node slots are the only limit, so every holder's link is used
-  and the transfers in flight grow with the holders.
+  `PROPAGATE_PER_SOURCE` transfers at a time. There is no cluster-wide cap
+  and no per-receiver cap: that per-source limit is the only one, so every
+  holder's link is used and the transfers in flight grow with the holders.
 - **The registry only for what nobody has.** A registry pull is ordered
-  only for a layer no node holds yet, by at most
-  `SPREAD_MAX_REGISTRY_PULLS` nodes at once (default: `RANK_TOP_N`). Nobody
+  only for a layer no node holds yet, at most `SPREAD_MAX_REGISTRY_PULLS`
+  pulls at once cluster-wide (default: `RANK_TOP_N`). Nobody
   pulling a layer comes first, the largest first.
 - **No waiting on promises.** When every layer nobody holds is already
   being pulled, an idle node races the pull that has run longest, at most
@@ -39,6 +42,9 @@ controller fills free slots, about a second later:
   its unpacked snapshot), the controller sends it the image's metadata it
   read from the registry, checked against its digests on arrival, and the
   node registers and unpacks the image. Kubelet then finds it locally.
+  Different images register side by side on a node; the same image one
+  finalize at a time. How fast unpacking goes is up to the CPU and IO
+  containerd gets.
 
 Receivers are served in this order: nodes where a pod is already waiting
 for the image, then the nodes that lack the fewest bytes.
@@ -57,7 +63,7 @@ sequenceDiagram
     B-->>C: done L1
     C->>A: fetch L1 from B
     A->>B: GET /spread/content/L1
-    Note over A: two slots: L2 from the registry, L1 from B
+    Note over A: both at once: L2 from the registry, L1 from B
     C->>B: fetch L2 from registry (race: A is slow)
     B-->>C: done L2
     C->>A: fetch L2 from B
@@ -97,18 +103,21 @@ pulls those layers locally.
 - Nodes matching `PROPAGATE_EXCLUDE_NODE_SUBSTRINGS` never receive, but do
   serve what they hold.
 - Nodes above `PROPAGATE_MAX_UTILIZATION` get nothing new until
-  [image cleanup](image-cleanup.md) brings them down; the spread waits for
-  them unless `PROPAGATE_WINDOW_S` is set.
+  [image cleanup](image-cleanup.md) brings them down. The controller logs
+  each such node once per spread, with its disk. The spread counts as
+  **complete** once every node with room has the image; it then stays open
+  quietly, so a full node still receives it once cleanup makes room, until
+  a newer tag supersedes it or `PROPAGATE_WINDOW_S` runs out.
 - A node that fails backs off `SPREAD_RETRY_AFTER_S`, doubling up to
   `SPREAD_BACKOFF_MAX_S`.
 - A transfer runs at most `SPREAD_TRANSFER_TIMEOUT_S`. A worker that never
-  reports back has its slot freed a minute later.
+  reports back has that transfer forgotten a minute later.
 - A newer tag of the same repo supersedes the spread.
 
 ## Watching it
 
 ```bash
-curl -s localhost:8080/status | jq '.spreads[] | {image, done: (.done|length), nodes: [.nodes[] | {node, missing_layers, registry, peer, peer_from}]}'
+curl -s localhost:8080/status | jq '.spreads[] | {image, complete, done: (.done|length), skipped, nodes: [.nodes[] | {node, missing_layers, transfers}]}'
 ```
 
 The dashboard's **Delivery** tab shows every running spread, what each node
