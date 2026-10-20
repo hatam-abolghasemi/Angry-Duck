@@ -89,10 +89,14 @@ type ContainerStatus struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
 	State struct {
-		Waiting *struct {
-			Reason string `json:"reason"`
-		} `json:"waiting"`
+		Waiting *Waiting `json:"waiting"`
 	} `json:"state"`
+}
+
+// Waiting is why a container isn't running yet, as kubelet put it.
+type Waiting struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 type podList struct {

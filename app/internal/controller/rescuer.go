@@ -49,6 +49,11 @@ var (
 		"angryduck_controller_rescues_in_flight",
 		"Rescues currently running.",
 	)
+	repairOrdersTotal = metrics.NewCounterVec(
+		"angryduck_controller_repair_orders_total",
+		"Repair orders sent to a node's worker because a container failed to start there on an image that is registered but can't be unpacked (CreateContainerError), by result: sent, failed (the worker didn't take it), no_worker (no fresh worker on that node).",
+		"node", "result",
+	)
 )
 
 // PodLister is the Kubernetes API call the rescuer needs.
@@ -105,6 +110,8 @@ type Rescuer struct {
 	// don't wait for the next RESCUE_INTERVAL_S.
 	backlog bool
 	wakeup  waker
+
+	repairs map[string]time.Time // node|image -> earliest next repair order
 }
 
 // SetLayerResolver orders rescue sources that hold the image's blobs
@@ -154,6 +161,9 @@ func NewRescuer(registry *Registry, pods PodLister, token string, cfg RescuerCon
 		for _, r := range []string{"success", "failure", "no_source", "no_target", "pull_policy_always"} {
 			rescuesTotal.Add(0, node, r)
 		}
+		for _, r := range []string{"sent", "failed", "no_worker"} {
+			repairOrdersTotal.Add(0, node, r)
+		}
 	})
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 1
@@ -172,6 +182,7 @@ func NewRescuer(registry *Registry, pods PodLister, token string, cfg RescuerCon
 		client:   &http.Client{Timeout: cfg.Timeout},
 		sem:      make(chan struct{}, cfg.MaxConcurrent),
 		pairs:    make(map[string]*pairState),
+		repairs:  make(map[string]time.Time),
 		wakeup:   newWaker(),
 	}
 }
@@ -206,6 +217,142 @@ type stuckImage struct {
 }
 
 func (s stuckImage) key() string { return s.Node + "|" + s.Image }
+
+// brokenImage is one image a node has registered but can't start a
+// container from, and the pods failing on it.
+type brokenImage struct {
+	Node, Image, Reason string
+	Pods                []string
+}
+
+func (b brokenImage) key() string { return b.Node + "|" + b.Image }
+
+// brokenImageSignatures are what containerd says, through kubelet's
+// CreateContainerError, when an image's name is there but its content
+// isn't usable. Anything else (a bad command, a missing secret) is not an
+// image problem.
+var brokenImageSignatures = []string{
+	"error unpacking image",
+	"failed to extract layer",
+	"failed to get reader from content store",
+	"content digest",
+}
+
+// findBroken extracts (node, image) pairs whose containers fail to start
+// on the image's content, merging pods. Sorted for stable ordering.
+func findBroken(pods []kube.Pod) []brokenImage {
+	byKey := map[string]*brokenImage{}
+	for _, p := range pods {
+		node := p.Spec.NodeName
+		if node == "" {
+			continue
+		}
+		specs := map[string]kube.Container{}
+		for _, c := range append(append([]kube.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
+			specs[c.Name] = c
+		}
+		for _, cs := range append(append([]kube.ContainerStatus{}, p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...) {
+			wt := cs.State.Waiting
+			if wt == nil || wt.Reason != "CreateContainerError" || !matchesAny(wt.Message, brokenImageSignatures) {
+				continue
+			}
+			image := specs[cs.Name].Image
+			if image == "" {
+				image = cs.Image
+			}
+			if image == "" {
+				continue
+			}
+			b := brokenImage{Node: node, Image: imageref.Normalize(image)}
+			if prev, ok := byKey[b.key()]; ok {
+				prev.Pods = appendUnique(prev.Pods, p.Metadata.Namespace+"/"+p.Metadata.Name)
+				continue
+			}
+			b.Reason = wt.Message
+			b.Pods = []string{p.Metadata.Namespace + "/" + p.Metadata.Name}
+			byKey[b.key()] = &b
+		}
+	}
+	out := make([]brokenImage, 0, len(byKey))
+	for _, b := range byKey {
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
+	return out
+}
+
+func matchesAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// orderRepairs tells each node's worker to repair the images its pods
+// can't start on, at most once per RetryAfter per pair: the worker repairs
+// in the background and reports, and a pair still failing after that gets
+// another order.
+func (rs *Rescuer) orderRepairs(ctx context.Context, broken []brokenImage, byNode map[string]*workerEntry, now time.Time) {
+	rs.mu.Lock()
+	current := make(map[string]bool, len(broken))
+	var due []brokenImage
+	for _, b := range broken {
+		current[b.key()] = true
+		if next, ok := rs.repairs[b.key()]; ok && now.Before(next) {
+			continue
+		}
+		rs.repairs[b.key()] = now.Add(rs.cfg.RetryAfter)
+		due = append(due, b)
+	}
+	for k := range rs.repairs {
+		if !current[k] {
+			delete(rs.repairs, k)
+		}
+	}
+	rs.mu.Unlock()
+	for _, b := range due {
+		target := byNode[b.Node]
+		if target == nil {
+			repairOrdersTotal.Inc(b.Node, "no_worker")
+			continue
+		}
+		logging.Infof("angryduck-controller: rescuer: containers of %s can't start on image=%s on node=%s (%s); ordering the node to repair it",
+			strings.Join(b.Pods, ","), b.Image, b.Node, b.Reason)
+		if err := sendRepairOrder(ctx, rs.client, rs.token, target.Address, model.RepairOrder{Image: b.Image, Reason: b.Reason}); err != nil {
+			repairOrdersTotal.Inc(b.Node, "failed")
+			logging.Warnf("angryduck-controller: rescuer: repair order for image=%s to node=%s failed: %v", b.Image, b.Node, err)
+			continue
+		}
+		repairOrdersTotal.Inc(b.Node, "sent")
+	}
+}
+
+// sendRepairOrder posts a repair order; the worker answers at once.
+func sendRepairOrder(ctx context.Context, client *http.Client, token, addr string, order model.RepairOrder) error {
+	body, err := json.Marshal(order)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/repair", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	sharedtoken.Set(req, token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
 
 // backoff is the wait after the given number of consecutive failures.
 func (rs *Rescuer) backoff(failures int) time.Duration {
@@ -255,8 +402,10 @@ func (rs *Rescuer) tick(ctx context.Context) {
 		}
 	}
 	rs.publishMetricsLocked()
+	pendingRepairs := len(rs.repairs)
 	rs.mu.Unlock()
-	if len(stuck) == 0 {
+	broken := findBroken(pods)
+	if len(stuck) == 0 && len(broken) == 0 && pendingRepairs == 0 {
 		return
 	}
 
@@ -264,6 +413,10 @@ func (rs *Rescuer) tick(ctx context.Context) {
 	byNode := make(map[string]*workerEntry, len(fresh))
 	for _, w := range fresh {
 		byNode[w.NodeID] = w
+	}
+	rs.orderRepairs(ctx, broken, byNode, now)
+	if len(stuck) == 0 {
+		return
 	}
 
 	for _, s := range stuck {

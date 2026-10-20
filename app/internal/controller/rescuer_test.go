@@ -26,9 +26,7 @@ func stuckPod(ns, name, node, image, reason, policy string) kube.Pod {
 	p.Spec.NodeName = node
 	p.Spec.Containers = []kube.Container{{Name: "app", Image: image, ImagePullPolicy: policy}}
 	cs := kube.ContainerStatus{Name: "app", Image: image}
-	cs.State.Waiting = &struct {
-		Reason string `json:"reason"`
-	}{Reason: reason}
+	cs.State.Waiting = &kube.Waiting{Reason: reason}
 	p.Status.ContainerStatuses = []kube.ContainerStatus{cs}
 	return p
 }
