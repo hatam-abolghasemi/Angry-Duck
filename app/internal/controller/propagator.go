@@ -116,6 +116,8 @@ type propagation struct {
 	next          map[string]time.Time
 	done          map[string]bool // received it through us (reports may lag)
 	cancelled     map[string]bool // seeds whose pull we cancelled
+	recorded      map[string]bool // deliveries in the image history
+	looked        bool            // a tick has seen the job
 }
 
 // NewPropagator builds a propagator.
@@ -175,13 +177,15 @@ func (p *Propagator) Start(image string) {
 	defer p.mu.Unlock()
 	if job, ok := p.jobs[image]; ok {
 		job.started = time.Now()
+		recordSpreadStart(image, job.started)
 		return
 	}
 	repo := imageref.Repo(image)
-	for other := range p.jobs {
+	for other, job := range p.jobs {
 		if other != image && repo != "" && imageref.Repo(other) == repo {
 			logging.Infof("angryduck-controller: propagator: image=%s superseded by image=%s", other, image)
 			propagationsTotal.Inc("superseded")
+			recordSpreadEnd(other, "superseded", time.Since(job.started))
 			delete(p.jobs, other)
 		}
 	}
@@ -189,7 +193,9 @@ func (p *Propagator) Start(image string) {
 		image: image, started: time.Now(),
 		inFlight: map[string]bool{}, failures: map[string]int{},
 		next: map[string]time.Time{}, done: map[string]bool{}, cancelled: map[string]bool{},
+		recorded: map[string]bool{},
 	}
+	recordSpreadStart(image, p.jobs[image].started)
 	if p.cfg.Window > 0 {
 		logging.Infof("angryduck-controller: propagator: will spread image=%s to every eligible node for %s", image, p.cfg.Window)
 	} else {
@@ -372,11 +378,26 @@ func (p *Propagator) tick(ctx context.Context) {
 		}
 		v := p.viewLocked(job, fresh, seeds[img], now)
 		inFlight := len(job.inFlight)
+		for _, node := range v.have {
+			if job.recorded[node] || job.done[node] {
+				continue
+			}
+			via := "kubelet"
+			if _, isSeed := seeds[img][node]; isSeed {
+				via = "seed"
+			} else if !job.looked {
+				via = "present"
+			}
+			recordDelivery(img, node, via, job.started, now)
+			job.recorded[node] = true
+		}
+		job.looked = true
 
 		if len(v.missing) == 0 && inFlight == 0 && len(v.seeding) == 0 && len(v.have) > 0 && len(v.skipped) == len(v.skippedExcluded(p)) {
 			logging.Infof("angryduck-controller: propagator: image=%s is on every eligible node (%d), done in %s (excluded: %v)",
 				img, len(v.have), now.Sub(job.started).Round(time.Second), v.skipped)
 			propagationsTotal.Inc("complete")
+			recordSpreadEnd(img, "complete", now.Sub(job.started))
 			delete(p.jobs, img)
 			continue
 		}
@@ -385,9 +406,11 @@ func (p *Propagator) tick(ctx context.Context) {
 			logging.Warnf("angryduck-controller: propagator: window for image=%s ran out with %d node(s) still missing it: %v",
 				img, len(v.missing), nodeIDs(v.missing))
 			propagationsTotal.Inc("expired")
+			recordSpreadEnd(img, "expired", now.Sub(job.started))
 			delete(p.jobs, img)
 			continue
 		}
+		imageSpreadSeconds.Hold(now.Sub(job.started).Seconds(), img, "running")
 		propagationNodes.Set(float64(len(v.have)), img, "have")
 		propagationNodes.Set(float64(len(v.missing)), img, "missing")
 		propagationNodes.Set(float64(inFlight), img, "in_flight")
@@ -502,7 +525,11 @@ func (p *Propagator) send(ctx context.Context, job *propagation, target *workerE
 	}
 	job.done[target.NodeID] = true
 	delete(job.failures, target.NodeID)
+	since := job.started
+	job.recorded[target.NodeID] = true
 	p.mu.Unlock()
+	recordTransfer(job.image, target.NodeID, "propagate", res.Bytes, time.Since(start).Seconds())
+	recordDelivery(job.image, target.NodeID, "propagate", since, time.Now())
 	logging.Infof("angryduck-controller: propagator: node=%s got image=%s from %s (%d blob(s), %d snapshot(s), %d bytes, %s)",
 		target.NodeID, job.image, orDash(res.Source), res.Blobs, res.Snapshots, res.Bytes, time.Since(start).Round(time.Millisecond))
 	propagationTransfersTotal.Inc(target.NodeID, "success")

@@ -90,6 +90,9 @@ func TestRescuer_OrdersStuckNodeWithSourcesByUtilization(t *testing.T) {
 	if sink.auth[0] != "Bearer "+rescueToken {
 		t.Fatalf("order sent without the token: %q", sink.auth[0])
 	}
+	if out := scrape(t); !strings.Contains(out, `angryduck_controller_image_delivery_seconds{image="`+img+`",node="master1",via="rescue"}`) {
+		t.Fatalf("rescue not in the image history:\n%s", out)
+	}
 
 	// Same pair again within RetryAfter: no second order.
 	rs.tick(context.Background())

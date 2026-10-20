@@ -269,10 +269,13 @@ func TestSpreader_FinalizesWhenEveryLayerIsThereThenCompletes(t *testing.T) {
 			break
 		}
 		for _, r := range recs {
-			s.done(model.SpreadDone{Node: r.node, Job: job.id, Digest: r.Digest, Path: r.Path, Result: model.SpreadResultOK})
+			s.done(model.SpreadDone{Node: r.node, Job: job.id, Digest: r.Digest, Path: r.Path, Result: model.SpreadResultOK, Bytes: 100, Seconds: 2})
 		}
 		s.tick(context.Background())
 		s.wg.Wait()
+	}
+	if out := scrape(t); !strings.Contains(out, `angryduck_controller_image_spread_seconds{image="`+img+`",result="running"}`) {
+		t.Fatalf("running spread not in the image history:\n%s", out)
 	}
 	f.mu.Lock()
 	finals := len(f.finalizes)
@@ -301,6 +304,33 @@ func TestSpreader_FinalizesWhenEveryLayerIsThereThenCompletes(t *testing.T) {
 	}
 	if !strings.Contains(out, `angryduck_controller_spreads_total{result="complete"}`) {
 		t.Fatal("completion not counted")
+	}
+	history := []string{
+		`angryduck_controller_image_spread_seconds{image="` + img + `",result="complete"}`,
+		`angryduck_controller_image_spread_started_timestamp_seconds{image="` + img + `"}`,
+		`angryduck_controller_image_delivery_seconds{image="` + img + `",node="full",via="kubelet"}`,
+		`angryduck_controller_image_delivered_timestamp_seconds{image="` + img + `",node="w1",via="`,
+		`angryduck_controller_image_received_bytes{image="` + img + `",node="w1",path="`,
+		`angryduck_controller_image_transfer_seconds{image="` + img + `",node="w1",path="`,
+	}
+	for _, want := range history {
+		if !strings.Contains(out, want) {
+			t.Fatalf("image history lacks %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `angryduck_controller_image_spread_seconds{image="`+img+`",result="running"}`) {
+		t.Fatal("finished spread still shown running")
+	}
+	for _, n := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
+		found := false
+		for _, via := range []string{"peer", "registry", "peer+registry"} {
+			if strings.Contains(out, `angryduck_controller_image_delivery_seconds{image="`+img+`",node="`+n+`",via="`+via+`"}`) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("delivery to %s not recorded by its paths:\n%s", n, out)
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

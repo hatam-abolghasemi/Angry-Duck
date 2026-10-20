@@ -128,6 +128,16 @@ func TestPropagator_FansOutLikeATreeWithoutDuplicates(t *testing.T) {
 	if len(p.Status()) != 0 {
 		t.Fatal("finished propagation still active")
 	}
+	out := scrape(t)
+	for _, want := range []string{
+		`angryduck_controller_image_delivery_seconds{image="` + img + `",node="seed",via="present"}`,
+		`angryduck_controller_image_delivery_seconds{image="` + img + `",node="w1",via="propagate"}`,
+		`angryduck_controller_image_spread_seconds{image="` + img + `",result="complete"}`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("image history lacks %s:\n%s", want, out)
+		}
+	}
 }
 
 func TestPropagator_OneAtATimePerSourceDoubles(t *testing.T) {

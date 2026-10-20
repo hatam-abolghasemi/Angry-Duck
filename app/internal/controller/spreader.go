@@ -159,7 +159,10 @@ type snode struct {
 	reg, peer  *sxfer
 	finalizing bool
 	done       bool
-	touched    bool // was ordered something: has blobs to release if the job ends early
+	touched    bool            // was ordered something: has blobs to release if the job ends early
+	recorded   bool            // its delivery is in the image history
+	paths      map[string]bool // paths its blobs came over (registry, peer)
+	received   pathTotals      // bytes and time received per path, for the history
 	fails      int
 	next       time.Time // no new orders before this
 }
@@ -233,6 +236,7 @@ func (s *Spreader) Start(ctx context.Context, image string) ([]string, error) {
 	s.mu.Lock()
 	if job, ok := s.jobs[image]; ok {
 		job.started = time.Now()
+		recordSpreadStart(image, job.started)
 		s.mu.Unlock()
 		return nil, nil
 	}
@@ -241,6 +245,7 @@ func (s *Spreader) Start(ctx context.Context, image string) ([]string, error) {
 		if repo != "" && imageref.Repo(other) == repo {
 			logging.Infof("angryduck-controller: spread: image=%s superseded by image=%s", other, image)
 			spreadsTotal.Inc("superseded")
+			recordSpreadEnd(job.image, "superseded", time.Since(job.started))
 			drops = append(drops, s.endLocked(job)...)
 		}
 	}
@@ -254,6 +259,7 @@ func (s *Spreader) Start(ctx context.Context, image string) ([]string, error) {
 		job.total += l.Size
 	}
 	s.jobs[image], s.byID[job.id] = job, job
+	recordSpreadStart(image, job.started)
 	s.mu.Unlock()
 	s.sendDrops(drops)
 	logging.Infof("angryduck-controller: spread: image=%s job=%s: %d layer(s), %d bytes, blob by blob to every eligible node",
@@ -438,12 +444,22 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			continue
 		}
 		n := j.nodes[w.NodeID]
-		if n == nil {
+		isNew := n == nil
+		if isNew {
 			n = &snode{have: make([]bool, nl)}
 			j.nodes[w.NodeID] = n
 		}
 		s.expireLocked(j, w.NodeID, n, now)
 		if n.done || w.HasImage(j.image) {
+			if !n.recorded {
+				via := "kubelet"
+				if isNew {
+					via = "present"
+				}
+				recordDelivery(j.image, w.NodeID, via, j.started, now)
+				n.received.record(j.image, w.NodeID)
+				n.recorded = true
+			}
 			n.done = true
 			done++
 			continue
@@ -485,11 +501,13 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 		logging.Infof("angryduck-controller: spread: image=%s is on every eligible node (%d) after %s", j.image, done, took.Round(time.Second))
 		spreadsTotal.Inc("complete")
 		spreadLastSeconds.Set(took.Seconds())
+		recordSpreadEnd(j.image, "complete", took)
 		return nil, s.endLocked(j)
 	}
 	if expired && !busy {
 		logging.Warnf("angryduck-controller: spread: window for image=%s ran out with %d node(s) still missing it", j.image, len(needs)+skipped)
 		spreadsTotal.Inc("expired")
+		recordSpreadEnd(j.image, "expired", now.Sub(j.started))
 		return nil, s.endLocked(j)
 	}
 
@@ -630,6 +648,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 	}
 
 	// Gauges for this job.
+	imageSpreadSeconds.Hold(now.Sub(j.started).Seconds(), j.image, "running")
 	spreadNodes.Set(float64(done), j.image, "done")
 	spreadNodes.Set(float64(finalizing), j.image, "finalizing")
 	spreadNodes.Set(float64(transferring), j.image, "transferring")
@@ -741,6 +760,9 @@ func (s *Spreader) endLocked(j *sjob) []dropOrder {
 	delete(s.byID, j.id)
 	var drops []dropOrder
 	for node, n := range j.nodes {
+		if !n.recorded {
+			n.received.record(j.image, node)
+		}
 		if n.touched && !n.done {
 			if w := s.registry.worker(node); w != nil {
 				drops = append(drops, dropOrder{addr: w.Address, job: j.id})
@@ -869,11 +891,17 @@ func (s *Spreader) sendFinalize(ctx context.Context, o order) {
 		return
 	}
 	n.done, n.fails = true, 0
+	if !n.recorded {
+		recordDelivery(j.image, o.node, viaPaths(n.paths), j.started, time.Now())
+		n.received.record(j.image, o.node)
+		n.recorded = true
+	}
 	spreadFinalizesTotal.Inc("success")
 	logging.Infof("angryduck-controller: spread: node=%s registered image=%s", o.node, j.image)
 }
 
 func (s *Spreader) sendImage(ctx context.Context, o order) {
+	start := time.Now()
 	tctx, cancel := context.WithTimeout(ctx, s.cfg.TransferTimeout)
 	res, err := sendRescueOrder(tctx, s.finals, s.token, o.addr, model.RescueOrder{Image: o.job.image, Sources: o.image, Reason: "propagate"})
 	cancel()
@@ -894,6 +922,12 @@ func (s *Spreader) sendImage(ctx context.Context, o order) {
 	n.done, n.fails = true, 0
 	spreadTransfersTotal.Inc("image", "ok")
 	spreadBytesTotal.Add(res.Bytes, "image")
+	n.received = n.received.add("image", res.Bytes, time.Since(start).Seconds())
+	if !n.recorded {
+		recordDelivery(o.job.image, o.node, "image", o.job.started, time.Now())
+		n.received.record(o.job.image, o.node)
+		n.recorded = true
+	}
 }
 
 // slotOwnerLocked returns the node state o was for, if its job is still
@@ -985,6 +1019,9 @@ func (s *Spreader) done(d model.SpreadDone) {
 	if !ok || n == nil {
 		return
 	}
+	if d.Bytes > 0 || d.Seconds > 0 {
+		n.received = n.received.add(path, d.Bytes, d.Seconds)
+	}
 	slot := &n.reg
 	if path == model.SpreadPathPeer {
 		slot = &n.peer
@@ -996,6 +1033,10 @@ func (s *Spreader) done(d model.SpreadDone) {
 	case model.SpreadResultOK:
 		n.have[i] = true
 		j.addGot(i, d.Node)
+		if n.paths == nil {
+			n.paths = map[string]bool{}
+		}
+		n.paths[path] = true
 		if n.fails > 0 {
 			n.fails = 0
 		}

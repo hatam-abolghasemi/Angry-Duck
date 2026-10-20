@@ -35,6 +35,7 @@ func main() {
 	}
 	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
 	memlimit.Apply("controller")
+	metrics.SetEventTTL(config.Duration("METRICS_EVENT_TTL_S", 15))
 
 	listenAddr := config.String("CONTROLLER_LISTEN_ADDR", ":8080")
 	staleAfter := config.Duration("WORKER_STALE_AFTER_S", 30)

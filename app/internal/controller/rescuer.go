@@ -531,7 +531,10 @@ func (rs *Rescuer) send(ctx context.Context, st *pairState, s stuckImage, target
 	st.failures = 0
 	st.lastResult, st.lastError = "success", ""
 	st.next = time.Now().Add(rs.cfg.RetryAfter)
+	since := st.since
 	rs.mu.Unlock()
+	recordTransfer(s.Image, s.Node, "rescue", result.Bytes, time.Since(start).Seconds())
+	recordDelivery(s.Image, s.Node, "rescue", since, time.Now())
 	logging.Infof("angryduck-controller: rescuer: node=%s now has image=%s (from %s: %d blob(s), %d snapshot(s), %d bytes, %s); kubelet picks it up on its next retry",
 		s.Node, s.Image, orDash(result.Source), result.Blobs, result.Snapshots, result.Bytes, time.Since(start).Round(time.Millisecond))
 	rescuesTotal.Inc(s.Node, "success")
