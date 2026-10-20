@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.8.15
+
+The blob is the unit everywhere: a node now receives any number of
+different blobs at once and registers different images side by side,
+instead of one blob per path and one image at a time. A node too full to
+receive no longer keeps a spread from counting as complete.
+
+### Changed
+
+- **Transfers per blob, not per path.** A node fetched one blob from the
+  registry and one from a peer at a time, for all images together. Now it
+  fetches any number of different blobs at once; the same blob still comes
+  at most once per path, so the registry-versus-peer race is unchanged. The
+  controller hands out new transfers in rounds, one per node per round, so
+  the first node in line doesn't take every free source. Peer traffic is
+  bounded only by `PROPAGATE_PER_SOURCE` per sender, registry traffic by
+  `SPREAD_MAX_REGISTRY_PULLS` cluster-wide. A worker answers `409` only for
+  a blob it is already fetching over that path, so far fewer orders come
+  back `rejected`.
+- **Images register side by side.** Registering (importing and unpacking)
+  ran one image at a time per node, so a small image waited behind large
+  unpacks of other images: on staging a 0.7 s registration waited about
+  12 s, leaving a pod 7 s from pulling the image itself. Now only finalizes
+  of the same image wait for each other. There is no cap across images:
+  unpacking is bounded by the CPU and IO containerd gets.
+- **Full nodes don't hold a spread open as unfinished.** A spread counts as
+  complete, logged and recorded, once every node with room has the image.
+  It then stays open quietly, publishing nothing, so a node above
+  `PROPAGATE_MAX_UTILIZATION` still receives the image once cleanup makes
+  room, until a newer tag supersedes it. Before, one node whose disk was
+  filled by something else kept every spread "running" until the next tag,
+  and its duration was never recorded. A spread already complete isn't
+  counted again as superseded or expired.
+- **Skips are logged.** The controller logs once per spread each node it
+  skips for a full disk, with its utilization, and lists them when the
+  spread completes. Skipped nodes no longer appear in "bytes still missing".
+
+### Added
+
+- `angryduck_worker_spread_finalizing`: images being registered on a node
+  right now. `angryduck_worker_spread_active` now counts transfers per path
+  instead of being 0 or 1.
+- `/status`: `complete` and `skipped` per spread, and `transfers` per node
+  (every blob coming in, its path and source). `registry`, `peer` and
+  `peer_from` still name the first of each.
+- The worker's log line names any wait for another finalize of the same
+  image: `registered in 716ms (waited 1.2s for another finalize of it)`.
+
+### Known limits
+
+- Two spreads needing the same blob on the same node at once: the second
+  order gets `409` and that node waits 5 s for that spread, as before.
+
 ## 1.8.14
 
 Angry Duck now reports what happened to each image: when its spread started
