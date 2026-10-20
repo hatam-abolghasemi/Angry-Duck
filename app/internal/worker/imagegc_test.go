@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -191,7 +192,7 @@ func TestGCReportsImagesThatComeBackAndForgetsThem(t *testing.T) {
 	if len(g.removed) != 0 || len(g.returned) != 0 {
 		t.Fatalf("churn state kept: removed=%d returned=%d", len(g.removed), len(g.returned))
 	}
-	if strings.Contains(scrapeMetrics(t), `image="r.io/loop:1"`) {
+	if strings.Contains(scrapeMetrics(t), `angryduck_worker_gc_image_returns{node="n1",image="r.io/loop:1"}`) {
 		t.Fatal("stale return still published")
 	}
 }
@@ -256,5 +257,31 @@ func TestGCStopsWhenRemovingFreesNothingAndResumesWhenTheDiskGrows(t *testing.T)
 	g.Tick(context.Background())
 	if len(f.deleted) <= first+2 {
 		t.Fatal("cleanup didn't resume after the disk grew")
+	}
+}
+
+func TestGCPublishesWhatItRemovedAndWhatComesNext(t *testing.T) {
+	u := 0.40
+	g, f := gcFixture(t, &u, nil)
+	g.cfg.Settle, g.cfg.RollbackKeep = 0, 0
+	addImage(g, f, "r.io/gone:1", "sha256:g1", 7*time.Hour)
+	addImage(g, f, "r.io/next:1", "sha256:n1", time.Hour)
+	g.Tick(context.Background())
+	out := scrapeMetrics(t)
+	if !strings.Contains(out, `angryduck_worker_gc_image_removed_timestamp_seconds{node="n1",image="r.io/gone:1",tier="old"}`) {
+		t.Fatalf("removal not in the history:\n%s", out)
+	}
+	if strings.Contains(out, `angryduck_worker_gc_image_removal_seconds{node="n1",image="r.io/gone:1"`) {
+		t.Fatalf("a removed image is still listed as coming up:\n%s", out)
+	}
+	prefix := `angryduck_worker_gc_image_removal_seconds{node="n1",image="r.io/next:1",tier="pressure"} `
+	i := strings.Index(out, prefix)
+	if i < 0 {
+		t.Fatalf("next removal not listed:\n%s", out)
+	}
+	var left float64
+	fmt.Sscan(out[i+len(prefix):], &left)
+	if left < 5*3600-60 || left > 5*3600 {
+		t.Fatalf("removal in %.0fs, want about 5h", left)
 	}
 }

@@ -25,6 +25,12 @@ var pullsTotal = metrics.NewCounterVec(
 // carried image and spegel labels, and needed a reset loop): average pull
 // time is rate(pull_seconds_total) / rate(pulls_total), with bounded
 // cardinality and no goroutine.
+var imagePullSeconds = metrics.NewRecentGaugeVec(
+	"angryduck_worker_image_pull_seconds",
+	"How long a seed pull of the image from its registry took, by result: success, failure, cancelled (a peer delivered first). An event, shown for METRICS_EVENT_TTL_S.",
+	"node", "image", "result",
+)
+
 var pullSecondsTotal = metrics.NewCounterVec(
 	"angryduck_worker_pull_seconds_total",
 	"Seconds spent in seed pulls from the registry, by result. Divide by angryduck_worker_pulls_total for the average.",
@@ -140,6 +146,7 @@ func (p *Puller) pull(ctx context.Context, image string) {
 	}
 	pullsTotal.Inc(p.nodeID, result, registry)
 	pullSecondsTotal.Add(int64(elapsed.Seconds()+0.5), p.nodeID, result, registry)
+	imagePullSeconds.Set(elapsed.Seconds(), p.nodeID, image, result)
 	if err == nil && p.onSuccess != nil {
 		p.onSuccess()
 	}

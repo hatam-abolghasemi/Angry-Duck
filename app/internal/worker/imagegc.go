@@ -36,6 +36,16 @@ var (
 		"1 while this node's disk-pressure cleanup has stopped because removing images didn't free space (the disk is filled by something else: running images, volumes, logs). The 6h rule still runs; pressure and rollback removals resume after an hour, or once the disk grows by 1%.",
 		"node",
 	)
+	gcImageRemoved = metrics.NewRecentGaugeVec(
+		"angryduck_worker_gc_image_removed_timestamp_seconds",
+		"When this node's cleanup removed the image, as Unix time, by tier. An event, shown for METRICS_EVENT_TTL_S. image is the tag, else repo@digest, else the image ID.",
+		"node", "image", "tier",
+	)
+	gcImageRemoval = metrics.NewGaugeVec(
+		"angryduck_worker_gc_image_removal_seconds",
+		"Images unused on this node that the age rule will remove, and in how many seconds (0: at the next check). Disk pressure removes them sooner, oldest first. Images kept for rollback are not listed. tier: old or pressure.",
+		"node", "image", "tier",
+	)
 	gcCandidates = metrics.NewGaugeVec(
 		"angryduck_worker_gc_candidates",
 		"Images the cleanup could remove, by tier (old, pressure, rollback). old goes on its own; pressure and rollback only while cleaning.",
@@ -290,6 +300,14 @@ func (g *ImageGC) Tick(ctx context.Context) {
 			old = append(old, c)
 		}
 	}
+	gcImageRemoval.Reset()
+	for _, c := range unused {
+		left := (g.cfg.UnusedFor - c.age).Seconds()
+		if left < 0 {
+			left = 0
+		}
+		gcImageRemoval.Set(left, g.nodeID, displayName(c.names), c.tier)
+	}
 	gcCandidates.Set(float64(len(old)), g.nodeID, "old")
 	gcCandidates.Set(float64(len(unused)-len(old)), g.nodeID, "pressure")
 	gcCandidates.Set(float64(len(rollback)), g.nodeID, "rollback")
@@ -371,6 +389,8 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 		g.mu.Unlock()
 		for _, c := range batch {
 			imagesDeletedTotal.Add(1, g.nodeID, c.tier)
+			gcImageRemoved.Set(float64(now.Unix()), g.nodeID, displayName(c.names), c.tier)
+			gcImageRemoval.Delete(g.nodeID, displayName(c.names), c.tier)
 			logging.Infof("angryduck-worker[%s]: image cleanup: removed %s (%s tier, unused for %s)", g.nodeID, strings.Join(c.names, " "), c.tier, c.age.Round(time.Minute))
 		}
 		if u == nil && len(list) == 0 {

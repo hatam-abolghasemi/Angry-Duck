@@ -36,6 +36,21 @@ var (
 		"Repairs of broken images, by result: repaired (the image can start containers again, nothing was removed), failed (some missing piece came from no peer and not from the registry either; retried at the next check).",
 		"node", "result",
 	)
+	imageRepairSeconds = metrics.NewRecentGaugeVec(
+		"angryduck_worker_image_repair_seconds",
+		"How long a repair of the image took, by result: repaired, failed. An event, shown for METRICS_EVENT_TTL_S.",
+		"node", "image", "result",
+	)
+	imageRepairedAt = metrics.NewRecentGaugeVec(
+		"angryduck_worker_image_repair_timestamp_seconds",
+		"When a repair of the image ended, as Unix time, by result. An event, shown for METRICS_EVENT_TTL_S.",
+		"node", "image", "result",
+	)
+	imageRepairBytes = metrics.NewRecentGaugeVec(
+		"angryduck_worker_image_repair_bytes",
+		"Bytes a repair of the image fetched, by source: peer, registry. An event, shown for METRICS_EVENT_TTL_S.",
+		"node", "image", "source",
+	)
 	repairBytesTotal = metrics.NewCounterVec(
 		"angryduck_worker_repair_bytes_total",
 		"Bytes the repair fetched, by source: peer (another node) or registry.",
@@ -463,6 +478,18 @@ func (r *ImageRepair) repair(ctx context.Context, digest string, names []string,
 		if h, cerr := blobship.Check(ctx, r.store, name, r.platform); cerr == nil && h.Broken() {
 			err = fmt.Errorf("still broken after the repair: %s", h)
 		}
+	}
+	result := "repaired"
+	if err != nil {
+		result = "failed"
+	}
+	imageRepairSeconds.Set(time.Since(start).Seconds(), r.nodeID, name, result)
+	imageRepairedAt.Set(float64(time.Now().Unix()), r.nodeID, name, result)
+	if res.peerB > 0 {
+		imageRepairBytes.Set(float64(res.peerB), r.nodeID, name, "peer")
+	}
+	if res.registry > 0 {
+		imageRepairBytes.Set(float64(res.registry), r.nodeID, name, "registry")
 	}
 	if err != nil {
 		imageRepairsTotal.Inc(r.nodeID, "failed")

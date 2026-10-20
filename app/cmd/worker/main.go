@@ -55,6 +55,7 @@ func main() {
 	}
 	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
 	memlimit.Apply("worker")
+	metrics.SetEventTTL(config.Duration("METRICS_EVENT_TTL_S", 15))
 
 	nodeID := config.String("NODE_ID", "")
 	if nodeID == "" {
