@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.8.14
+
+Angry Duck now reports what happened to each image: when its spread started
+and ended, how and how fast each node got it, its seed pulls and repairs, and
+which nodes removed it or will remove it next. The dashboard reads this history
+back from Prometheus over the selected time range.
+
+### Added
+
+- **Per-image spread and delivery events (controller).** For every spread and
+  whole-image fallback: start time, duration and result (`running`,
+  `complete`, `superseded`, `expired`). For every node: when it got the image,
+  how long it took and how (`present`, `peer`, `registry`, `peer+registry`,
+  `local`, `image`, `seed`, `propagate`, `rescue`, or `kubelet` when it got the
+  image without Angry Duck). Bytes received and transfer time per path are
+  counted inside the spread and published once per node: when it gets the
+  image, or when the spread ends without it.
+- **Per-image seed pull, repair and cleanup events (worker).** Each seed pull
+  with its duration and result. Each repair with its duration, result, and
+  bytes from peers versus the registry. Each image cleanup removed, with its
+  tier. A live gauge of what cleanup removes next and in how many seconds
+  (rollback-kept images aren't listed).
+- **`METRICS_EVENT_TTL_S`** (default `15`, `0` turns events off). Events stay on
+  `/metrics` for this long, then disappear; Prometheus keeps the history. A
+  spread that is still running keeps its live duration until it ends. Each
+  metric is capped at 5,000 series. A TTL shorter than one scrape interval can
+  miss events. See [configuration](docs/configuration.md).
+
+### Changed
+
+- **Dashboard.** History tables read events with `last_over_time` over the
+  dashboard's time range, so they reach back as far as Prometheus retention.
+  What comes up for removal next and running spreads stay live. The spread
+  annotation is off by default. The "Deliveries by Method" chart is gone,
+  because 15-second events would only show up as spikes. See
+  [observability](docs/observability.md).
+- **Docs** no longer point to panels and tabs that don't exist ("Snapshot share
+  of shipped layers", the "Spread" tab).
+
+### Known limits
+
+- Pulls kubelet makes without Angry Duck show up only as `kubelet`, with no
+  bytes.
+
 ## 1.8.13
 
 Broken images are repaired in place, piece by piece, instead of removed; the
