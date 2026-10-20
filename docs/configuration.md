@@ -168,16 +168,28 @@ unused images per repo go last. See [Image cleanup](image-cleanup.md).
 
 ## Image repair
 
-Each worker looks for images that are registered but can't be unpacked: the
-top layer isn't unpacked, and some layer has neither its snapshot nor its
-blob on the node. kubelet treats such an image as present and never pulls it
-again, and every container create fails with `failed to get reader from
-content store ... not found`. An image still broken one interval later,
-checked again against fresh listings, is removed (every name of it), so the
-next container start pulls it. Images being pulled or received are left
-alone. See [Operations](operations.md#an-image-is-present-but-containers-cant-be-created).
+Each worker looks for images that are registered but can't start a
+container: a metadata blob (index, manifest, config) is gone or doesn't parse,
+or the top layer isn't unpacked and some layer has neither its snapshot nor
+its blob on the node. kubelet treats such an image as present and never pulls
+it again, so every container create fails.
+
+The worker repairs such an image in place, without removing it. It fetches only
+the pieces that are gone, by digest: first from peers that hold them, then
+from the image's registry. The image keeps its name throughout. Anything
+still here is held under a lease during the repair, so the garbage collector
+can't take it meanwhile. If no peer and not the registry has a piece, the
+image stays as it is, reported in `angryduck_worker_broken_image`, and the
+next check tries again. Images being pulled or received are left alone.
+
+Nothing is hashed to find corruption. A layer blob counts as corrupted only
+when a container create failed unpacking it: the controller sees the pod's
+`CreateContainerError` and sends the node a repair order carrying kubelet's
+error, which names the layer. That one blob is replaced. Peers serve repairs
+through their spread endpoint, so a node with `SPREAD_ENABLED=false` serves
+none. See [Operations](operations.md#an-image-is-present-but-containers-cant-be-created).
 
 | Variable | Default | Description |
 |---|---|---|
-| `IMAGE_REPAIR_ENABLED` | `true` | Find and remove images that can't be unpacked. |
-| `IMAGE_REPAIR_INTERVAL_S` | `120` | How often images are checked; a broken one is removed on the first check at least this long after it was found. |
+| `IMAGE_REPAIR_ENABLED` | `true` | Find and repair images that can't start a container. |
+| `IMAGE_REPAIR_INTERVAL_S` | `120` | How often every image is checked. An image's metadata is read once per digest (it never changes); later checks use the worker's shared listings only, with no containerd call of their own. A container failing on a broken image triggers a repair right away instead (sent by the controller), so this only bounds how long a broken image nothing uses goes unnoticed. |

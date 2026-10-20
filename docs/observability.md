@@ -6,50 +6,56 @@ ServiceMonitors for the Prometheus Operator that scrape every 15 seconds.
 ## Grafana dashboard
 
 [`grafana/angryduck-dashboard.json`](../grafana/angryduck-dashboard.json)
-covers every metric, in these tabs:
+answers a few questions, one tab each:
 
 | Tab | Answers |
 |---|---|
-| **Overview** | Workers reporting, stuck images, images unpullable from their registry, images spreading, mirror hit ratio, registry bytes avoided, nodes cleaning and disk-stalled; a per-node overview table; running containers from preheated repos. |
-| **Registry Health** | What the registries answered for the images the nodes hold (see [Origin check](#origin-check)): totals per status, every image a registry no longer serves with the copies left, each registry's answers, and how the copies of unserved images dwindle over time. |
-| **Preheat** | Registry pulls by result and node, blobs (spread) and whole images (fallback) side by side, their average duration, pulls in flight, registry download per node, whole-image seed ranking and registries, layer index size. |
-| **Spread** | Every image being spread now (nodes per state, layers held versus still only coming from the registry), what each node still lacks in layers and bytes, every blob moving right now (receiver, path, source, size), transfers by path and result, bytes and throughput per path, finished spreads, how long the last one took. |
-| **Rescue** | Stuck images per node, rescue decisions, failing node/image pairs, rescues in flight, peer fetches by reason and result, stuck pods per node and image with whether a rescue is running. |
-| **Transfers** | Node-to-node throughput and top senders (spread blobs and whole-image transfers), layers by delivery method, snapshot share, pinned snapshots and leftover cleanups. |
-| **Mirror** | Requests by result, hit ratio, bytes, misses per node. |
-| **Cleanup** | Disk-pressure cleanup per node (idle, cleaning or stalled), images removed by tier, candidates by tier, removals per node, images coming back after cleanup. |
-| **Whole-Image Fallback** | Propagation of images that can't be spread blob by blob: per-image progress, nodes per state, finished propagations, transfers by result and receiving node. Empty while every push spreads. |
+| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up, images stuck pulling, broken images, registry traffic avoided, nodes cleaning disk, the running version; a table with one row per node; bytes kept off the registry over time. |
+| **Delivery** | How images reach nodes: every spread running (nodes per state), what each node still lacks, how long the last spread took, registry versus peer download, seed pulls, finished spreads. |
+| **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image, broken images, the pods waiting on them and kubelet's reason, the components (Deployment, StatefulSet, DaemonSet, CronJob) using them, rescues and repairs over time. |
+| **Mirror & Registry** | The mirror's hit ratio and requests; what each registry answered for the images nodes hold; images their registry no longer serves, the copies left and the components using them. |
+| **Disk Cleanup** | Cleanup per node (idle, cleaning, stalled), images removed by tier, images coming back after removal. |
 
-The file uses Grafana's dashboard schema v2, for the tabs and per-tab
-variables. It needs Grafana 13, or Grafana 12 with the `dashboardNewLayouts`
-(dynamic dashboards) and `kubernetesDashboards` feature toggles. To import it,
-go to **Dashboards → New → Import**, upload the file and pick your Prometheus
-data source in the **Data source** variable.
+Every panel has a one-line description (hover its title).
 
-Variables:
+The file uses Grafana's dashboard schema v2, for the tabs. It needs Grafana
+13, or Grafana 12 with the `dashboardNewLayouts` (dynamic dashboards) and
+`kubernetesDashboards` feature toggles. To import it, go to **Dashboards → New
+→ Import**, upload the file and pick your Prometheus data source in the
+**Data source** variable.
 
-- **Data source**: any Prometheus data source.
+Variables, from broad to narrow:
+
+- **Data source**: a Prometheus or Mimir data source.
 - **Cluster**: values of the `k8s_source_cluster` label, for setups that
-  aggregate several clusters into one Prometheus. If your series have no such
-  label, leave it on *All*. If your cluster label has another name, replace
-  `k8s_source_cluster` in the JSON before importing.
-- **Node**: one or more nodes. Applies to every per-node metric, including
-  controller metrics labeled with the target node. Clicking a node name in a
-  table sets it.
+  aggregate several clusters. Without that label, leave it on *All*. If your
+  cluster label has another name, replace `k8s_source_cluster` in the JSON.
+- **Node**: applies to every per-node metric. Clicking a node in a table sets
+  it.
+- **Registry**: narrows images, and components by the images they run.
+- **Kind**, **Namespace**, **Component**: Deployments, StatefulSets,
+  DaemonSets and CronJobs, from kube-state-metrics.
+- **Image**: the images Angry Duck is busy with right now (spreading, stuck,
+  broken, unavailable at their registry, coming back after cleanup), narrowed
+  by registry and component. Images no pod uses yet, like a spread ahead of
+  its rollout, always show. It applies to the panels about now; counters over
+  time carry no image label, by design, to keep the number of series bounded.
 
-No data is drawn as zero: a quiet hour is a flat line, not a gap. Per-node
-charts list the nodes that did something in the time range, and keep them at
-zero the rest of the time. Some queries use the `@ end()` modifier, which
-Prometheus 2.33+ and Mimir support.
+The component views need kube-state-metrics in the same data source
+(`kube_pod_container_info`, `kube_pod_owner`, `kube_replicaset_owner`,
+`kube_job_owner`, `kube_pod_container_status_waiting_reason`). A pod is tied
+to its component through its owner: a Deployment through its ReplicaSet, a
+CronJob through its Job. Images are matched on the image as written in the
+pod spec (`image_spec`), which equals Angry Duck's `image` label for
+references with a registry host and a tag (`registry.example.com/team/app:v1`).
+Docker Hub short names (`nginx`) don't match.
 
-Event counts are computed scrape by scrape, so the hidden `scrape_interval`
-constant must match your scrape interval. It is `15s`, as in the included
-ServiceMonitors; change it in the JSON if you scrape at another interval.
-
-Annotations, toggled from the dashboard controls: disk cleanup started and
-rescue failures (on by default), and finished propagations (off by default).
-The **Reset filters** link clears every filter except data source, cluster,
-time range and the current tab.
+Annotations, toggled from the dashboard controls: Angry Duck version rolling
+out, spreads started and ended, rescue failures, images repaired and repairs
+that failed, disk cleanup starting and stopping, a registry becoming
+unreachable and reachable again (all on), and process restarts (off). The
+**Reset filters** link keeps data source, cluster and time range and clears
+the rest.
 
 ## Metrics
 
@@ -77,6 +83,7 @@ the first event too.
 | `angryduck_controller_rescue_consecutive_failures` | gauge | `node`, `image` | Failed attempts in a row, for pairs with at least one failure. |
 | `angryduck_controller_rescues_in_flight` | gauge | | Rescues running now. |
 | `angryduck_controller_rescue_stuck_pods` | gauge | `node`, `image`, `in_flight` | Pods stuck per node and image; `in_flight` 1 while a rescue runs for it. Only pairs stuck now. |
+| `angryduck_controller_repair_orders_total` | counter | `node`, `result` | Repair orders sent because a container failed to start on a broken image (`CreateContainerError`): `sent`, `failed`, `no_worker`. |
 
 <a id="spread"></a>Spread. Series labeled `image` or `node` exist only while
 that image is being spread and drop when it ends, so their number follows
@@ -122,8 +129,9 @@ what is moving, not history:
 | `angryduck_worker_gc_image_returns` | gauge | `node`, `image` | Images that came back within an hour of cleanup removing them, and how many times. Only images that came back in the last hour, so the series count stays small. |
 | `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`, `rollback`. |
 | `angryduck_worker_gc_cleaning` | gauge | `node` | 1 while the disk is above high and not yet back to low. |
-| `angryduck_worker_broken_images` | gauge | `node` | Images registered on the node that can't be unpacked (every container create fails). The image repair removes them on its next check. |
-| `angryduck_worker_broken_images_removed_total` | counter | `node` | Images the repair removed because they couldn't be unpacked. |
+| `angryduck_worker_broken_image` | gauge | `node`, `image` | 1 while that image is registered on the node but can't start a container. Removed once it is repaired or no longer registered. |
+| `angryduck_worker_image_repairs_total` | counter | `node`, `result` | Broken images repaired in place (`repaired`), or not (`failed`: some piece came from no peer and not from the registry; retried at the next check). |
+| `angryduck_worker_repair_bytes_total` | counter | `node`, `source` | Bytes repairs fetched, from a `peer` or the `registry`. |
 | `angryduck_worker_temp_images_removed_total` | counter | `node` | Temporary import names a killed worker left behind, removed by the repair. |
 | `angryduck_worker_preheated_containers_running` | gauge | `node`, `repo` | Running containers from repos recently preheated on the node. |
 
@@ -135,6 +143,7 @@ The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
+| `angryduck_build_info` | gauge | `component`, `version`, `node` | One series per process: its version, and as the value the Unix time it started. |
 | `angryduck_process_memory_bytes` | gauge | `component`, `kind` | Refreshed every 15s. `rss_anon`: memory the process really holds. `rss_file`: its own code, shared and reclaimable by the kernel. `heap_live`: what the Go heap needs right now. `heap_retained`: freed heap kept for reuse. `heap_released`: already returned to the OS. `stacks`: goroutine stacks. |
 
 `rss_anon` is the number to size against; container memory usage
@@ -228,10 +237,10 @@ groups:
           summary: "{{ $labels.registry }} refuses Angry Duck's credentials; was its pull secret rotated?"
 
       - alert: AngryDuckBrokenImage
-        expr: angryduck_worker_broken_images > 0
+        expr: angryduck_worker_broken_image > 0
         for: 15m
         annotations:
-          summary: "{{ $labels.node }} has an image that can't be unpacked and the repair hasn't removed it (disabled, or it keeps coming back)"
+          summary: "{{ $labels.image }} on {{ $labels.node }} can't start containers and the repair can't get its missing pieces (no peer has them, and the registry doesn't serve them)"
 
       - alert: AngryDuckDiskFullNotFromImages
         expr: angryduck_worker_gc_stalled == 1

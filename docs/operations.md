@@ -53,7 +53,7 @@ utilization math.
 | Mirror requests are all `miss` | containerd's `config_path` doesn't point at `MIRROR_CONTAINERD_CONFIG_DIR`, or peers have no blobs. |
 | `image cleanup: ... nothing is removable` | Every image on the node is running, protected or being pulled. The disk needs attention beyond images. |
 | Pod still pending after a successful rescue | kubelet waits for its backoff, up to 5 minutes. Delete the pod to retry now. |
-| `CreateContainerError`: `failed to get reader from content store ... not found`, with `already present on machine` | The image is registered but can't be unpacked. The image repair removes it within two `IMAGE_REPAIR_INTERVAL_S`. See below. |
+| `CreateContainerError`: `failed to get reader from content store ... not found` or `failed to extract layer`, with `already present on machine` | The image is registered but can't start a container. The controller orders the node to repair it in place right away. See below. |
 
 ### An image is present but containers can't be created
 
@@ -72,11 +72,25 @@ it. The worker logged `spread: registering image=... failed: unpacking ...`.
 Imports now publish a name only once the image is unpacked, and every layer
 counted as present is held under the transfer's lease.
 
-From 1.8.12 the worker repairs it on its own: the image repair logs
-`image repair: image=... can't be unpacked`, then `removed image=...` one
-interval later, and `angryduck_worker_broken_images_removed_total` goes up. A
-rescue of such an image no longer answers `already present`. To fix it by hand
-right away, on the node:
+From 1.8.13 the worker repairs it in place: only the missing or corrupted
+pieces are fetched, from peers first, then the registry, and the image keeps
+its name. The worker logs `image repair: image=... can't start containers
+(...): repairing it in place`, then `repaired in ...: N metadata blob(s) and M
+layer blob(s) fetched, X bytes from peers, Y from the registry`, and
+`angryduck_worker_image_repairs_total{result="repaired"}` goes up. The
+controller sends a repair order as soon as a pod's container fails to start
+on it (`angryduck_controller_repair_orders_total`), and the periodic check
+catches the rest within `IMAGE_REPAIR_INTERVAL_S`. While the image is broken,
+the node leaves it out of its reports, so the controller neither counts the
+node as having it nor offers it as a source.
+
+When the repair can't get a piece (`not repaired: ... fetching ...`), no
+peer holds it and the registry didn't serve it: the image stays, and the next
+check tries again. `layer ... still fails to unpack after its blob was
+replaced` means another containerd namespace on the node shares the corrupted
+file: remove the image there (`sudo ctr -n <namespace> images rm <image>`).
+
+To fix it by hand right away, on the node:
 
 ```bash
 sudo crictl rmi <image>
