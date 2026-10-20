@@ -111,7 +111,7 @@ pulls those layers locally.
 curl -s localhost:8080/status | jq '.spreads[] | {image, done: (.done|length), nodes: [.nodes[] | {node, missing_layers, registry, peer, peer_from}]}'
 ```
 
-The dashboard's **Spread** tab shows every running spread, what each node
+The dashboard's **Delivery** tab shows every running spread, what each node
 still lacks, and every transfer moving right now. See
 [Observability](observability.md#grafana-dashboard) for the metrics.
 

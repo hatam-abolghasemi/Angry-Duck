@@ -87,8 +87,8 @@ is only the CRC, the token-authenticated peer and TCP.
 
 > **Recommendation:** keep `discard_unpacked_layers = false` in containerd.
 > Verified blobs, about a third of the size of snapshots, can then be used
-> whenever possible. The dashboard's *Snapshot share of shipped layers* panel
-> shows how often snapshots are needed.
+> whenever possible. The dashboard's *Layers by Delivery Method* panel shows
+> how often snapshots are needed.
 
 ## Interruptions
 

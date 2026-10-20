@@ -45,7 +45,8 @@ Where they live:
 
 Some managed distributions set `discard_unpacked_layers = true`. Check with
 `containerd config dump | grep discard_unpacked_layers` on a node. The
-dashboard's *Snapshot share of shipped layers* panel shows the effect.
+dashboard's *Layers by Delivery Method* panel (Rescue & Repair tab) shows the
+effect.
 
 ## kubelet
 

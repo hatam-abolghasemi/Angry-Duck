@@ -5,56 +5,58 @@ ServiceMonitors for the Prometheus Operator that scrape every 15 seconds.
 
 ## Grafana dashboard
 
-[`grafana/angryduck-dashboard.json`](../grafana/angryduck-dashboard.json)
-answers a few questions, one tab each:
+[`grafana/angryduck-dashboard.json`](../grafana/angryduck-dashboard.json) has
+one tab per concern. Each opens with a summary row: six numbers, then a status
+table with one row per node, image, registry or process, then charts in pairs.
+Detail rows follow, the rarely needed ones collapsed.
 
 | Tab | Answers |
 |---|---|
-| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up, images stuck pulling, broken images, registry traffic avoided, nodes cleaning disk, the running version; a table with one row per node; bytes kept off the registry over time. |
-| **Delivery** | How images reach nodes: every spread running (nodes per state), what each node still lacks, how long the last spread took, registry versus peer download, seed pulls, finished spreads. |
-| **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image, broken images, the pods waiting on them and kubelet's reason, the components (Deployment, StatefulSet, DaemonSet, CronJob) using them, rescues and repairs over time. |
-| **Mirror & Registry** | The mirror's hit ratio and requests; what each registry answered for the images nodes hold; images their registry no longer serves, the copies left and the components using them. |
-| **Disk Cleanup** | Cleanup per node (idle, cleaning, stalled), images removed by tier, images coming back after removal. |
+| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up, images stuck and broken, spreads running, mirror hit ratio, registry traffic avoided; a node table (version, uptime, containerd event watch, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); peer versus registry traffic; which nodes follow containerd's events. |
+| **Image** | Everything about one image (pick it in **Image**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side; the components and pods using it, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the same tables list every recent image. |
+| **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, seed pulls; preheat and propagation in collapsed rows. |
+| **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
+| **Mirror & Registry** | The mirror's hit ratio, requests and bytes; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
+| **Disk Cleanup** | Cleanup state per node over time, images removable per tier, images removed, failed removals, images coming back after removal; image by image, what was removed from which node and what comes up next, and when. |
+| **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method, inventory events, the controller's layer index and work in flight. |
 
-Every panel has a one-line description (hover its title).
+Every panel has a one-line description (hover its title). Click a node or an
+image anywhere, in a table or a chart, to focus the whole dashboard on it.
 
-The file uses Grafana's dashboard schema v2, for the tabs. It needs Grafana
-13, or Grafana 12 with the `dashboardNewLayouts` (dynamic dashboards) and
-`kubernetesDashboards` feature toggles. To import it, go to **Dashboards → New
+The file uses Grafana's dashboard schema v2 (`dashboard.grafana.app/v2`), for
+the tabs, and was built with Grafana 13. To import it, go to **Dashboards → New
 → Import**, upload the file and pick your Prometheus data source in the
 **Data source** variable.
 
-Variables, from broad to narrow:
+Variables:
 
 - **Data source**: a Prometheus or Mimir data source.
 - **Cluster**: values of the `k8s_source_cluster` label, for setups that
   aggregate several clusters. Without that label, leave it on *All*. If your
   cluster label has another name, replace `k8s_source_cluster` in the JSON.
-- **Node**: applies to every per-node metric. Clicking a node in a table sets
-  it.
-- **Registry**: narrows images, and components by the images they run.
-- **Kind**, **Namespace**, **Component**: Deployments, StatefulSets,
-  DaemonSets and CronJobs, from kube-state-metrics.
-- **Image**: the images Angry Duck is busy with right now (spreading, stuck,
-  broken, unavailable at their registry, coming back after cleanup), narrowed
-  by registry and component. Images no pod uses yet, like a spread ahead of
-  its rollout, always show. It applies to the panels about now; counters over
-  time carry no image label, by design, to keep the number of series bounded.
+- **Node**: applies to every per-node metric.
+- **Image**: the images Angry Duck is busy with, or has [history](#image-history)
+  for in the time range: spreading, delivered, stuck, broken, repaired, pulled, removed or coming
+  up for removal, gone from their registry. Counters over time carry no image
+  label, by design, to keep the number of series bounded.
 
-The component views need kube-state-metrics in the same data source
-(`kube_pod_container_info`, `kube_pod_owner`, `kube_replicaset_owner`,
-`kube_job_owner`, `kube_pod_container_status_waiting_reason`). A pod is tied
-to its component through its owner: a Deployment through its ReplicaSet, a
-CronJob through its Job. Images are matched on the image as written in the
-pod spec (`image_spec`), which equals Angry Duck's `image` label for
-references with a registry host and a tag (`registry.example.com/team/app:v1`).
-Docker Hub short names (`nginx`) don't match.
+The pod and component views use kube-state-metrics in the same data source
+(`kube_pod_container_info`, `kube_pod_info`, `kube_pod_owner`,
+`kube_replicaset_owner`, `kube_job_owner`, `kube_pod_start_time` and the
+`kube_pod_container_status_*` series). A pod is tied to its component through
+its owner: a Deployment through its ReplicaSet, a CronJob through its Job.
+Images are matched on the image as written in the pod spec
+(`image_spec`). That equals Angry Duck's `image` label for references with a
+registry host and a tag (`registry.example.com/team/app:v1`); Docker Hub short
+names (`nginx`) don't match. CPU comes from cAdvisor
+(`container_cpu_usage_seconds_total`, containers `worker` and `controller`).
+Without them, those panels stay empty and everything else works.
 
-Annotations, toggled from the dashboard controls: Angry Duck version rolling
-out, spreads started and ended, rescue failures, images repaired and repairs
-that failed, disk cleanup starting and stopping, a registry becoming
-unreachable and reachable again (all on), and process restarts (off). The
-**Reset filters** link keeps data source, cluster and time range and clears
+Annotations, toggled from the dashboard controls: Angry Duck versions rolling
+out, process restarts, rescue failures, repair failures, disk cleanup stalling
+and a registry becoming unreachable (all on), and spreads starting (off: with
+hundreds of spreads a day they would cover every chart). The **Reset filters**
+link keeps data source, cluster, time range and the current tab, and clears
 the rest.
 
 ## Metrics
@@ -160,6 +162,55 @@ sum by (node) (rate(angryduck_worker_containerd_calls_total[5m])) * 60
 # memory each worker really holds
 angryduck_process_memory_bytes{component="worker", kind="rss_anon"}
 ```
+
+<a id="image-history"></a>
+### Image history
+
+Spreads, deliveries, pulls, repairs and removals are events, and the counters
+above carry no image label. So both components also publish each event, per
+image, as a gauge that stays on `/metrics` for `METRICS_EVENT_TTL_S` (15
+seconds) after it happened: long enough for Prometheus to scrape it once.
+Prometheus keeps the history; the dashboard reads it back over its time range
+with `last_over_time`. Neither process holds more than the last few seconds of
+events, and each metric is capped at 5000 series. The one exception is a spread
+still running: its `running` duration stays until it ends.
+`METRICS_EVENT_TTL_S=0` turns them off.
+
+Match the TTL to your scrape interval. An event that leaves `/metrics` before
+a scrape (a scrape that failed, ran late, or a Prometheus restart) is lost.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `angryduck_controller_image_spread_started_timestamp_seconds` | `image` | When a spread (or whole-image propagation) of it started. |
+| `angryduck_controller_image_spread_seconds` | `image`, `result` | How long it took: `complete`, `superseded`, `expired`; `running` (so far) while it runs. |
+| `angryduck_controller_image_delivered_timestamp_seconds` | `image`, `node`, `via` | When a node got the image. |
+| `angryduck_controller_image_delivery_seconds` | `image`, `node`, `via` | How long after the preheat it got it (for a rescue, after its pull got stuck). |
+| `angryduck_controller_image_received_bytes` | `image`, `node`, `path` | Bytes the node received for it: `registry`, `peer`, `image`, `propagate`, `rescue`. Set when the node got it, or when its spread ended without it. |
+| `angryduck_controller_image_transfer_seconds` | `image`, `node`, `path` | Seconds spent receiving it, summed over transfers. |
+| `angryduck_worker_image_pull_seconds` | `node`, `image`, `result` | A seed pull of it from the registry. |
+| `angryduck_worker_image_repair_seconds` | `node`, `image`, `result` | A repair of it: `repaired`, `failed`. |
+| `angryduck_worker_image_repair_timestamp_seconds` | `node`, `image`, `result` | When that repair ended. |
+| `angryduck_worker_image_repair_bytes` | `node`, `image`, `source` | Bytes that repair fetched, from a `peer` or the `registry`. |
+| `angryduck_worker_gc_image_removed_timestamp_seconds` | `node`, `image`, `tier` | When the cleanup removed it. |
+
+`via` says how the node got the image:
+
+| `via` | Meaning |
+|---|---|
+| `present` | It had the image when the spread started. |
+| `peer`, `registry`, `peer+registry` | Spread blob by blob, over these paths. |
+| `local` | Spread with every layer already on the node; only the metadata came. |
+| `image` | The whole image from a peer, the spread's last resort. |
+| `seed` | Pulled whole from the registry, in a whole-image propagation. |
+| `propagate` | The whole image from a peer, in a whole-image propagation. |
+| `rescue` | Fetched from a peer after its pull got stuck. |
+| `kubelet` | It got the image without Angry Duck, during the spread. |
+
+One more gauge is about the future rather than the past:
+`angryduck_worker_gc_image_removal_seconds{node, image, tier}` lists the unused
+images the age rule will remove, and in how many seconds (`0`: at the next
+check). Disk pressure removes them sooner, oldest first. Images kept for
+rollback are not listed.
 
 <a id="origin-check"></a>
 ## Origin check

@@ -177,7 +177,7 @@ Some distributions set containerd's `discard_unpacked_layers = true`. Angry
 Duck still works: layers then travel as snapshots, which are slower, larger
 and not digest-verified, and the mirror can't serve them. If you can, switch it
 off; see [Node settings](node-settings.md#containerd). The dashboard's
-*Snapshot share of shipped layers* panel shows how often snapshots are needed.
+*Layers by Delivery Method* panel shows how often snapshots are needed.
 
 ## Adding the shared token to a running install
 
