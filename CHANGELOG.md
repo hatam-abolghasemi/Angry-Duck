@@ -1,5 +1,90 @@
 # Changelog
 
+## 1.8.13
+
+Broken images are repaired in place, piece by piece, instead of removed; the
+remaining "already here but not held" race is closed; and the dashboard is
+rebuilt around a few questions.
+
+### Changed
+
+- **The image repair fixes images in place; it never removes them.** It
+  fetches only the pieces that are gone, by digest: first from peers that hold
+  them (the controller's layer index says which; they serve them through
+  their spread endpoint), then from the image's registry. Everything still
+  here is held under a lease of the repair meanwhile: the highest unpacked
+  snapshot and the blob of every layer above it. The image's metadata is then
+  re-imported under its own name, which unpacks it and republishes the name
+  pointing where it already did. containerd checks every digest as it writes,
+  so a bad copy fails and the next source is tried. When no peer and not the
+  registry has a piece, the image stays as it is, reported broken, and the
+  next check tries again. In 1.8.12 the image was removed one interval after
+  being found, every layer was then pulled again from the registry, and
+  shared layers could be collected meanwhile.
+- **Metadata is repaired too.** A missing or unusable index, manifest or
+  config (one that doesn't parse, or isn't the size its parent names) made the
+  check give up and call the image fine. Now it counts as broken and is
+  fetched like any other piece. An unusable blob is removed first, and
+  containerd's garbage collector is run right away so the corrupted file is
+  really gone before the good copy is written (containerd adopts the file it
+  already has for a digest).
+- **Corruption is found by real failures only, never by hashing.** When a
+  pod's container fails to start on an image with `CreateContainerError`
+  (`failed to extract layer`, `failed to get reader from content store`), the
+  controller now sends that node's worker a repair order (`POST /repair`)
+  carrying kubelet's error. The worker repairs the image right away. A layer
+  whose blob is here but failed to extract (not "not found", not a full disk)
+  has just that blob replaced. Before, the controller only reacted to
+  ImagePullBackOff, and the repair waited for its next check.
+- **No second look before acting.** The repair only adds pieces, so it acts on
+  the first verdict confirmed against fresh listings. `IMAGE_REPAIR_INTERVAL_S`
+  (120) is now only how often every image is checked, and a check is cheaper:
+  an image's metadata is read and parsed once per digest (it never changes),
+  and later checks use the worker's shared content and snapshot listings
+  only. 1.8.12 read and parsed every image's index, manifest and config on
+  every check.
+- **A node no longer reports an image it can't run.** While an image is
+  broken, its names are left out of the worker's reports, so the controller
+  neither skips the node as already served nor picks it as a rescue or
+  propagation source.
+- **Dashboard rebuilt**: 5 tabs (Overview, Delivery, Rescue & Repair, Mirror &
+  Registry, Disk Cleanup) and 28 panels instead of 9 tabs and 69, each with a
+  plain-language title and a one-line description. New variables: registry,
+  kind, namespace, component and image. The component views come from
+  kube-state-metrics: which Deployments, StatefulSets, DaemonSets and CronJobs
+  use a stuck, broken or no-longer-served image, and which pods wait on it.
+  Annotations for releases rolling out, spreads starting and ending, rescue
+  failures, repairs, disk cleanup and registry reachability. Every query was
+  run against Prometheus with synthetic data.
+
+### Fixed
+
+- **A rescue holds the layers it counts as already here.** It planned from
+  listings that could be a moment old and held nothing until the import, the
+  same race 1.8.12 closed for spreads. Since 1.8.12 such a rescue failed
+  cleanly, wasting its transfer. Now the highest unpacked snapshot and the
+  blobs above it are held under the rescue's lease first; one that turns out
+  gone is listed again and shipped.
+- **`angryduck_controller_seed_missing_bytes` only shows the latest seeded
+  image.** It kept values from older images for nodes not seeded since.
+
+### Added
+
+- `angryduck_worker_broken_image{node,image}` (1 while broken, removed after),
+  `angryduck_worker_image_repairs_total{node,result}`,
+  `angryduck_worker_repair_bytes_total{node,source}`,
+  `angryduck_controller_repair_orders_total{node,result}`, and
+  `angryduck_build_info{component,version,node}` (value: start time). The
+  controller gets `NODE_NAME` from the downward API for the last one.
+
+### Removed
+
+- `angryduck_worker_broken_images` (use `count by (node)
+  (angryduck_worker_broken_image)`) and
+  `angryduck_worker_broken_images_removed_total` (nothing is removed any more;
+  see `angryduck_worker_image_repairs_total`). The suggested
+  `AngryDuckBrokenImage` alert uses the new gauge.
+
 ## 1.8.12
 
 Fixes images left registered on a node but impossible to unpack, and repairs
