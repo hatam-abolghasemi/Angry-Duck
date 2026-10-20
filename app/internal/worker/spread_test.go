@@ -312,10 +312,10 @@ func TestSpreadPeerWinsTheRaceAndCancelsTheSlowRegistryPull(t *testing.T) {
 	if reg.StatusCode != http.StatusAccepted {
 		t.Fatalf("registry fetch: status %d", reg.StatusCode)
 	}
-	// One registry pull at a time: a second one is refused.
+	// The same blob over the same path once at a time: a second one is refused.
 	busy := postSpread(t, srv, "/spread/fetch", model.SpreadFetch{Job: "s1", Image: "r.io/app:1", Digest: d, Size: int64(len(blob)), Path: model.SpreadPathRegistry})
 	if busy.StatusCode != http.StatusConflict {
-		t.Fatalf("second registry fetch: status %d, want 409", busy.StatusCode)
+		t.Fatalf("second registry fetch of the same blob: status %d, want 409", busy.StatusCode)
 	}
 	peer := postSpread(t, srv, "/spread/fetch", model.SpreadFetch{Job: "s1", Digest: d, Size: int64(len(blob)), Path: model.SpreadPathPeer,
 		Peer: &model.Holder{NodeID: "src", Address: strings.TrimPrefix(srcSrv.URL, "http://")}})
@@ -338,8 +338,8 @@ func TestSpreadPeerWinsTheRaceAndCancelsTheSlowRegistryPull(t *testing.T) {
 	}
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	if sp.slot[0] != nil || sp.slot[1] != nil {
-		t.Fatal("slots not freed")
+	if len(sp.xfers) != 0 {
+		t.Fatalf("transfers not forgotten: %v", sp.xfers)
 	}
 }
 

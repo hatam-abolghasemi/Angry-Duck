@@ -43,8 +43,13 @@ var (
 	)
 	spreadActive = metrics.NewGaugeVec(
 		"angryduck_worker_spread_active",
-		"1 while this node is fetching a blob on that path (one at a time per path).",
+		"Blobs this node is fetching right now, by path. Any number of different blobs at once; one blob at most once per path.",
 		"node", "path",
+	)
+	spreadFinalizing = metrics.NewGaugeVec(
+		"angryduck_worker_spread_finalizing",
+		"Images this node is registering (importing and unpacking) right now. Different images run side by side; one image one at a time.",
+		"node",
 	)
 	spreadFinalizesTotal = metrics.NewCounterVec(
 		"angryduck_worker_spread_finalizes_total",
@@ -95,18 +100,19 @@ type BlobOpener interface {
 
 // Spread is this node's part of spreading an image blob by blob.
 //
-// The controller assigns each node at most one blob from the registry and
-// one from a peer at a time; the two slots run independently, so a slow
-// registry or a slow peer never holds up the other path. Both may be
-// fetching the same blob, a race the controller starts on purpose: when
+// The blob is the unit: the node fetches any number of different blobs at
+// once, each at most once per path (registry, peer). The same blob may be
+// coming over both paths, a race the controller starts on purpose: when
 // one commits it, the other is cancelled right here, from the goroutine
 // that committed, without waiting on anyone. Every transfer ends with a
-// SpreadDone to the controller.
+// SpreadDone to the controller. How many run at once is the controller's
+// call (registry and per-source limits), not this node's.
 //
 // Blobs land in containerd's content store under the job's lease (see
 // spreadLeaseTTL) and are served to peers by digest at /spread/content.
 // When the node holds every layer, /spread/finalize registers the image
-// from the metadata the controller sends.
+// from the metadata the controller sends. Different images register side
+// by side; the same image one finalize at a time.
 //
 // No goroutine runs while nothing is being transferred.
 type Spread struct {
@@ -121,11 +127,12 @@ type Spread struct {
 	peers         *http.Client
 	ctl           *http.Client
 
-	mu   sync.Mutex
-	jobs map[string]*spreadJob
-	slot [2]*spreadXfer // by pathIndex
+	mu    sync.Mutex
+	jobs  map[string]*spreadJob
+	xfers map[xferKey]*spreadXfer // running transfers
 
-	finalizing chan struct{} // one finalize at a time
+	finalizing *keyedLock // by image: one finalize per image at a time
+	running    int        // finalizes running now, under mu
 	onFinalize func()
 	onStale    func()         // the controller's view of this node's layers is off
 	wg         sync.WaitGroup // transfers, for tests
@@ -145,11 +152,25 @@ type spreadXfer struct {
 	cancelled         atomic.Bool // cancelled on purpose: race lost or job dropped
 }
 
-func pathIndex(path string) int {
+// xferKey names a running transfer: one blob over one path.
+type xferKey struct{ digest, path string }
+
+func otherPath(path string) string {
 	if path == model.SpreadPathPeer {
-		return 1
+		return model.SpreadPathRegistry
 	}
-	return 0
+	return model.SpreadPathPeer
+}
+
+// activeLocked publishes how many transfers run on path. Caller holds s.mu.
+func (s *Spread) activeLocked(path string) {
+	n := 0
+	for k := range s.xfers {
+		if k.path == path {
+			n++
+		}
+	}
+	spreadActive.Set(float64(n), s.nodeID, path)
 }
 
 // NewSpread builds the worker's spread handlers.
@@ -166,6 +187,7 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 	}
 	spreadFinalizesTotal.Add(0, nodeID, "success")
 	spreadFinalizesTotal.Add(0, nodeID, "failure")
+	spreadFinalizing.Set(0, nodeID)
 	return &Spread{
 		store: store, registry: registry, token: token, nodeID: nodeID, platform: platform,
 		controllerURL: strings.TrimRight(controllerURL, "/"), timeout: timeout, epoch: randomSuffix()[:8],
@@ -177,7 +199,8 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 		}},
 		ctl:        &http.Client{Timeout: 5 * time.Second},
 		jobs:       map[string]*spreadJob{},
-		finalizing: make(chan struct{}, 1),
+		xfers:      map[xferKey]*spreadXfer{},
+		finalizing: newKeyedLock(),
 	}
 }
 
@@ -245,17 +268,18 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, model.SpreadFetchAck{Present: true})
 		return
 	}
-	i := pathIndex(o.Path)
+	key := xferKey{o.Digest, o.Path}
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	x := &spreadXfer{job: o.Job, digest: o.Digest, path: o.Path, cancel: cancel}
 	s.mu.Lock()
-	if cur := s.slot[i]; cur != nil {
+	if _, running := s.xfers[key]; running {
 		s.mu.Unlock()
 		cancel()
-		writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Reason: "busy with " + cur.digest})
+		writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Reason: "already fetching " + o.Digest + " from " + o.Path})
 		return
 	}
-	s.slot[i] = x
+	s.xfers[key] = x
+	s.activeLocked(o.Path)
 	s.pruneJobsLocked(time.Now())
 	s.mu.Unlock()
 
@@ -294,8 +318,8 @@ func (s *Spread) pruneJobsLocked(now time.Time) {
 }
 
 func (s *Spread) busyLocked(job string) bool {
-	for _, x := range s.slot {
-		if x != nil && x.job == job {
+	for _, x := range s.xfers {
+		if x.job == job {
 			return true
 		}
 	}
@@ -334,11 +358,10 @@ func (s *Spread) lease(ctx context.Context, job string) (string, error) {
 	return j.lease, nil
 }
 
-// run does one transfer, then frees its slot and reports.
+// run does one transfer, then forgets it and reports.
 func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	defer s.wg.Done()
 	start := time.Now()
-	spreadActive.Set(1, s.nodeID, o.Path)
 	n, err := s.fetch(ctx, x, o)
 	x.cancel()
 	took := time.Since(start)
@@ -348,7 +371,7 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	case err == nil:
 		// Won: stop the other path if it is fetching this same blob.
 		s.mu.Lock()
-		if other := s.slot[1-pathIndex(o.Path)]; other != nil && other.digest == o.Digest {
+		if other := s.xfers[xferKey{o.Digest, otherPath(o.Path)}]; other != nil {
 			other.cancelled.Store(true)
 			other.cancel()
 		}
@@ -360,11 +383,11 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	}
 
 	s.mu.Lock()
-	if s.slot[pathIndex(o.Path)] == x {
-		s.slot[pathIndex(o.Path)] = nil
+	if key := (xferKey{o.Digest, o.Path}); s.xfers[key] == x {
+		delete(s.xfers, key)
 	}
+	s.activeLocked(o.Path)
 	s.mu.Unlock()
-	spreadActive.Set(0, s.nodeID, o.Path)
 	spreadTransfersTotal.Inc(s.nodeID, o.Path, result)
 	spreadBytesTotal.Add(n, s.nodeID, o.Path)
 	spreadMillisTotal.Add(took.Milliseconds(), s.nodeID, o.Path)
@@ -500,8 +523,8 @@ func (s *Spread) HandleDrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	for _, x := range s.slot {
-		if x != nil && x.job == d.Job {
+	for _, x := range s.xfers {
+		if x.job == d.Job {
 			x.cancelled.Store(true)
 			x.cancel()
 		}
@@ -550,19 +573,25 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	select {
-	case s.finalizing <- struct{}{}:
-		defer func() { <-s.finalizing }()
-	case <-r.Context().Done():
+	// One finalize per image at a time (a retry while the first still
+	// runs waits for it); different images don't wait on each other.
+	// Unpacking is bounded by the CPU and IO given to containerd, not here.
+	image := imageref.Normalize(f.Image)
+	queued := time.Now()
+	unlock, err := s.finalizing.lock(r.Context(), image)
+	if err != nil {
 		return
 	}
+	defer unlock()
+	waited := time.Since(queued)
+	s.finalizingAdd(1)
+	defer s.finalizingAdd(-1)
 	// Not cut short by the controller giving up: an unpack halfway is
 	// wasted work, and the next report shows the controller the image.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
 	defer cancel()
 	start := time.Now()
-	image := imageref.Normalize(f.Image)
-	err := s.finalize(ctx, f, image)
+	err = s.finalize(ctx, f, image)
 	if err != nil {
 		spreadFinalizesTotal.Inc(s.nodeID, "failure")
 		logging.Warnf("angryduck-worker[%s]: spread: registering image=%s failed: %v", s.nodeID, image, err)
@@ -580,11 +609,24 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 	}
 	s.release(ctx, f.Job) // the image references its blobs now
 	spreadFinalizesTotal.Inc(s.nodeID, "success")
-	logging.Infof("angryduck-worker[%s]: spread: image=%s registered in %s", s.nodeID, image, time.Since(start).Round(time.Millisecond))
+	if waited >= 100*time.Millisecond {
+		logging.Infof("angryduck-worker[%s]: spread: image=%s registered in %s (waited %s for another finalize of it)", s.nodeID, image, time.Since(start).Round(time.Millisecond), waited.Round(time.Millisecond))
+	} else {
+		logging.Infof("angryduck-worker[%s]: spread: image=%s registered in %s", s.nodeID, image, time.Since(start).Round(time.Millisecond))
+	}
 	if s.onFinalize != nil {
 		s.onFinalize()
 	}
 	writeJSON(w, http.StatusOK, model.SpreadFinalizeResult{OK: true})
+}
+
+// finalizingAdd moves the count of finalizes running here.
+func (s *Spread) finalizingAdd(d int) {
+	s.mu.Lock()
+	s.running += d
+	n := s.running
+	s.mu.Unlock()
+	spreadFinalizing.Set(float64(n), s.nodeID)
 }
 
 // checkFinalize validates a finalize order: every metadata blob must match
