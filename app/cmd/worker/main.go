@@ -44,6 +44,7 @@ import (
 	"angryduck/internal/registryauth"
 	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
+	"angryduck/internal/version"
 	"angryduck/internal/worker"
 )
 
@@ -170,6 +171,7 @@ func main() {
 		log.Printf("angryduck-worker[%s]: inventory follows containerd events (namespace=%s): resync=%s, scans every %s while the stream is down", nodeID, namespace, resync, scan)
 		go worker.NewInventoryWatch(client, namespace, nodeID, reporter.Kick, live).Run(ctx)
 	}
+	metrics.PublishBuildInfo("worker", version.Version, nodeID)
 	go metrics.TrackProcessMemory(ctx, "worker")
 	go memlimit.ReleaseWhenIdle(ctx, time.Minute, 1<<20)
 	go reporter.Run(ctx)

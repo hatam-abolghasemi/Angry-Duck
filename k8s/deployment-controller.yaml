@@ -31,6 +31,11 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+          env:
+            - name: NODE_NAME # labels angryduck_build_info
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           envFrom:
             - configMapRef:
                 name: angryduck-config

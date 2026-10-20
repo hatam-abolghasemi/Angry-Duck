@@ -25,6 +25,7 @@ import (
 	"angryduck/internal/registryauth"
 	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
+	"angryduck/internal/version"
 )
 
 func main() {
@@ -148,6 +149,7 @@ func main() {
 		log.Println("angryduck-controller: origin check disabled (ORIGIN_CHECK_INTERVAL_S=0)")
 	}
 
+	metrics.PublishBuildInfo("controller", version.Version, config.String("NODE_NAME", ""))
 	go metrics.TrackProcessMemory(ctx, "controller")
 	go memlimit.ReleaseWhenIdle(ctx, time.Minute, 1<<20)
 	// Started after SetToken so pull orders never race the token.

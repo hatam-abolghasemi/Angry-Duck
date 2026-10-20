@@ -78,3 +78,14 @@ func rss() (anon, file float64, ok bool) {
 	}
 	return anon, file, ok
 }
+
+var buildInfo = NewGaugeVec(
+	"angryduck_build_info",
+	"One series per running Angry Duck process: its version, and as the value the Unix time it started. A new version shows up when a release rolls out; a new value means the process restarted.",
+	"component", "version", "node")
+
+// PublishBuildInfo sets angryduck_build_info for this process. node is
+// the node it runs on ("" when unknown).
+func PublishBuildInfo(component, version, node string) {
+	buildInfo.Set(float64(time.Now().Unix()), component, version, node)
+}
