@@ -741,11 +741,24 @@ func TestContainerd_InventoryFollowsEvents(t *testing.T) {
 	w.settle = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
-	time.Sleep(200 * time.Millisecond) // subscribed
 	nctx := namespaces.WithNamespace(context.Background(), ns)
 	img := images.Image{Name: "example.com/events:1", Target: ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageManifest, Digest: digest.FromString("events"), Size: 6}}
+	_ = client.ImageService().Delete(nctx, img.Name) // a failed earlier run's
+	go w.Run(ctx)
+	// Subscribing is asynchronous: poke until events demonstrably flow,
+	// then start counting from zero.
+	probe := images.Image{Name: "example.com/events:probe", Target: img.Target}
+	for start := time.Now(); changed.Load() == 0; {
+		if time.Since(start) > 10*time.Second {
+			t.Fatal("no event ever reached the watch")
+		}
+		_, _ = client.ImageService().Create(nctx, probe)
+		_ = client.ImageService().Delete(nctx, probe.Name)
+		time.Sleep(100 * time.Millisecond)
+	}
+	time.Sleep(4 * w.settle) // let the probes' report settle
+	changed.Store(0)
 	if _, err := client.ImageService().Create(nctx, img); err != nil {
 		t.Fatal(err)
 	}
