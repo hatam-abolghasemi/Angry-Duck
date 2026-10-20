@@ -206,8 +206,8 @@ func (rs *Rescue) receive(ctx context.Context, order model.RescueOrder) model.Re
 			rescuesTotal.Inc(rs.nodeID, order.Reason, "already_present")
 			return model.RescueResult{OK: true}
 		}
-		logging.Warnf("angryduck-worker[%s]: rescue image=%s: registered here but can't be unpacked (%d layer(s) gone, first %s): receiving it again",
-			rs.nodeID, order.Image, len(h.Missing), h.Missing[0].Blob.Digest)
+		logging.Warnf("angryduck-worker[%s]: rescue image=%s: registered here but can't start containers (%s): receiving it again",
+			rs.nodeID, order.Image, h)
 	}
 	if len(order.Sources) == 0 {
 		rescuesTotal.Inc(rs.nodeID, order.Reason, "failure")
@@ -258,14 +258,37 @@ func (rs *Rescue) receive(ctx context.Context, order model.RescueOrder) model.Re
 // last resort: only for a layer no source has the blob of.
 func (rs *Rescue) receiveFrom(ctx context.Context, order model.RescueOrder, primary int, plans []blobship.Plan, getPlan func(int) error) (model.RescueResult, error) {
 	plan := plans[primary]
-	haveBlobs, err := rs.store.Digests(ctx)
+	// Layers counted as already here are held under a lease of this
+	// rescue until the import references them: the listings may be a
+	// moment old, and kubelet or the cleanup may remove the image they
+	// came with meanwhile. One that turns out gone is shipped instead.
+	holds, err := rs.newHolds(ctx)
 	if err != nil {
-		return model.RescueResult{}, fmt.Errorf("listing local content: %w", err)
+		return model.RescueResult{}, err
 	}
-	haveSnaps := map[string]bool{}
-	if len(plan.Layers) > 0 {
-		if haveSnaps, err = rs.store.Snapshots(ctx); err != nil {
-			return model.RescueResult{}, fmt.Errorf("listing local snapshots: %w", err)
+	defer holds.release()
+	var haveBlobs, haveSnaps map[string]bool
+	for attempt := 0; ; attempt++ {
+		if haveBlobs, err = rs.store.Digests(ctx); err != nil {
+			return model.RescueResult{}, fmt.Errorf("listing local content: %w", err)
+		}
+		haveSnaps = map[string]bool{}
+		if len(plan.Layers) > 0 {
+			if haveSnaps, err = rs.store.Snapshots(ctx); err != nil {
+				return model.RescueResult{}, fmt.Errorf("listing local snapshots: %w", err)
+			}
+		}
+		var gone bool
+		haveBlobs, haveSnaps, gone, err = holds.hold(ctx, plan, haveBlobs, haveSnaps)
+		if err != nil {
+			return model.RescueResult{}, err
+		}
+		if !gone || attempt == 1 {
+			break
+		}
+		// Something listed is gone: list again, fresh, and plan from that.
+		if inv, ok := rs.store.(interface{ Invalidate() }); ok {
+			inv.Invalidate()
 		}
 	}
 	asm, err := blobship.Assemble(plans, primary, haveBlobs, haveSnaps)
@@ -363,6 +386,94 @@ func (rs *Rescue) receiveFrom(ctx context.Context, order model.RescueOrder, prim
 		}
 	}
 	return model.RescueResult{OK: true, Source: strings.Join(names, ","), Blobs: asm.BlobCount(), Snapshots: asm.SnapshotCount(), Bytes: received}, nil
+}
+
+// rescueHolder is what holding needs from the store. ContainerdStore has
+// it; a store without it (tests) holds nothing.
+type rescueHolder interface {
+	CreateLease(ctx context.Context, id string, ttl time.Duration) error
+	DeleteLease(ctx context.Context, id string) error
+	HoldContent(ctx context.Context, lease, dgst string) (bool, error)
+	HoldSnapshot(ctx context.Context, lease, key string) (bool, error)
+}
+
+// rescueHolds is one rescue's lease over the layers it counts on.
+type rescueHolds struct {
+	store rescueHolder // nil: nothing to hold with
+	lease string
+}
+
+func (rs *Rescue) newHolds(ctx context.Context) (*rescueHolds, error) {
+	h, ok := rs.store.(rescueHolder)
+	if !ok {
+		return &rescueHolds{}, nil
+	}
+	lease := "angryduck-rescue-" + randomSuffix()
+	if err := h.CreateLease(ctx, lease, time.Hour); err != nil {
+		return nil, fmt.Errorf("creating lease: %w", err)
+	}
+	return &rescueHolds{store: h, lease: lease}, nil
+}
+
+// hold puts what the listings say is here, and the rescue counts on, under
+// the lease: the highest unpacked layer's snapshot (it keeps those below)
+// and the blob of every layer above it. When one of them is gone after
+// all, it returns the listings without it (copies: the store's are
+// shared) and gone=true; the caller then lists again.
+func (h *rescueHolds) hold(ctx context.Context, plan blobship.Plan, haveBlobs, haveSnaps map[string]bool) (blobs, snaps map[string]bool, gone bool, err error) {
+	blobs, snaps = haveBlobs, haveSnaps
+	if h.store == nil {
+		return blobs, snaps, false, nil
+	}
+	drop := func(m map[string]bool, k string) map[string]bool {
+		c := make(map[string]bool, len(m))
+		for key, v := range m {
+			if key != k {
+				c[key] = v
+			}
+		}
+		return c
+	}
+	top := -1
+	for i := len(plan.Layers) - 1; i >= 0; i-- {
+		if snaps[plan.Layers[i].ChainID] {
+			top = i
+			break
+		}
+	}
+	if top >= 0 {
+		chain := plan.Layers[top].ChainID
+		ok, err := h.store.HoldSnapshot(ctx, h.lease, chain)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("holding snapshot %s: %w", chain, err)
+		}
+		if !ok {
+			snaps, gone = drop(snaps, chain), true
+		}
+	}
+	for _, l := range plan.Layers[top+1:] {
+		if !blobs[l.Blob.Digest] {
+			continue
+		}
+		ok, err := h.store.HoldContent(ctx, h.lease, l.Blob.Digest)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("holding blob %s: %w", l.Blob.Digest, err)
+		}
+		if !ok {
+			blobs, gone = drop(blobs, l.Blob.Digest), true
+		}
+	}
+	return blobs, snaps, gone, nil
+}
+
+// release drops the lease: on success the image references what it held.
+func (h *rescueHolds) release() {
+	if h.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = h.store.DeleteLease(ctx, h.lease) // expires on its own otherwise
 }
 
 // brokenImage reports whether image is registered here but can't be
