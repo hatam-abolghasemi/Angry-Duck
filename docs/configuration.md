@@ -22,6 +22,7 @@ Looking for a starting point rather than a reference? See
 |---|---|---|
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `METRICS_LABEL_REGISTRY` | `false` | Add a `registry` label to pull metrics. The set of registries is unbounded, so it is off by default. |
+| `METRICS_EVENT_TTL_S` | `15` | How long an event metric (a spread ending, a node getting an image, a pull, a repair, a removal) stays on `/metrics` after it happened, for Prometheus to scrape it; Prometheus keeps the history (see [Observability](observability.md#image-history)). Match it to your scrape interval: an event that lives less than a scrape apart can be missed. `0` turns them off. |
 | `RESCUE_TOKEN_PATH` | `/etc/angryduck/rescue-token/token` | Shared bearer token file, 32+ characters. Needed by rescue, propagation and the mirror. Read once at startup. With a token, `/report`, `/pull` and `/pull/cancel` also require it. |
 | `WEBHOOK_TOKEN_PATH` | `/etc/angryduck/webhook-token/token` | Controller only. CI's bearer token for `/webhook/preheat`, 32+ characters. If the file is missing, the webhook is unauthenticated; if it exists but is unusable, the controller exits. |
 | `AUTH_MODE` | `enforce` | `enforce` rejects control requests without the token; `warn` allows and logs them. Use `warn` only while upgrading controller and workers, then remove it. |
