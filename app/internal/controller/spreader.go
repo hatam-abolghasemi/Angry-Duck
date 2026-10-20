@@ -37,12 +37,12 @@ var (
 	)
 	spreadNodeMissingBytes = metrics.NewGaugeVec(
 		"angryduck_controller_spread_node_missing_bytes",
-		"Bytes of the image each node still lacks. Only nodes not done, only while the spread runs.",
+		"Bytes of the image each node still lacks. Only nodes not done and not too full, only while the spread runs.",
 		"image", "node",
 	)
 	spreadNodeMissingLayers = metrics.NewGaugeVec(
 		"angryduck_controller_spread_node_missing_layers",
-		"Layers of the image each node still lacks. Only nodes not done, only while the spread runs.",
+		"Layers of the image each node still lacks. Only nodes not done and not too full, only while the spread runs.",
 		"image", "node",
 	)
 	spreadTransfer = metrics.NewGaugeVec(
@@ -99,17 +99,22 @@ type SpreaderConfig struct {
 
 // Spreader spreads a pushed image to every eligible node blob by blob.
 //
-// Each node has two slots: one blob from the registry and one from a peer,
-// at a time, and serves PerSource peers at once. These per-node slots are
-// the only limit on east-west traffic: there is no cluster-wide cap, so
-// every holder's link is used. As soon as any node holds a blob, every
-// node lacking it can fetch it from that node; the registry is only used
-// for blobs no node has yet, by at most MaxRegistry nodes at once, so it
-// serves each blob about once. No node waits on another's pull: a node whose registry pull
-// is slow can be raced by an idle one (RacePerBlob), and a node pulling a
-// blob from the registry still gets it pushed from a peer as soon as a
-// peer has it. Whichever path finishes first wins; the worker cancels the
-// other on the spot.
+// The blob is the unit. A node receives any number of different blobs at
+// once, each at most once per path (registry, peer), and serves PerSource
+// peers at once. That per-source limit is the only limit on east-west
+// traffic: there is no cluster-wide cap and no per-receiver cap, so every
+// holder's link is used. As soon as any node holds a blob, every node
+// lacking it can fetch it from that node; the registry is only used for
+// blobs no node has yet, by at most MaxRegistry transfers at once, so it
+// serves each blob about once. No node waits on another's pull: a slow
+// registry pull of a blob can be raced by another node (RacePerBlob), and
+// a node pulling a blob from the registry still gets it pushed from a peer
+// as soon as a peer has it. Whichever path finishes first wins; the worker
+// cancels the other on the spot.
+//
+// Orders go out in rounds, one new transfer per node per round, so the
+// first node in line doesn't take every free source before the others get
+// one.
 //
 // Peer transfers go to the rarest layer first (fewest holders), so new
 // sources appear where they are scarcest. Nodes with a pod waiting for the
@@ -117,7 +122,11 @@ type SpreaderConfig struct {
 //
 // When a node holds every layer (its blob or its unpacked snapshot), it
 // gets the image's metadata, a few KB read from the registry once, and
-// registers the image. A layer the registry keeps failing to serve, held
+// registers the image.
+//
+// Nodes fuller than MaxUtilization get nothing new. The spread counts as
+// complete once every node with room has the image; it then stays open,
+// quietly, for the full ones, which receive it once cleanup makes room. A layer the registry keeps failing to serve, held
 // elsewhere only as a snapshot, falls back to the image transfer rescue
 // uses, from a node that has the whole image.
 type Spreader struct {
@@ -145,6 +154,7 @@ type sjob struct {
 	id, image string
 	res       registryclient.Resolved
 	started   time.Time
+	completed bool // every node with room has it; open only for full ones
 	total     int64
 	idx       map[string]int // layer digest -> index
 	nodes     map[string]*snode
@@ -156,8 +166,10 @@ type snode struct {
 	have       []bool // per layer: reported received through us
 	missLayers int    // as of the last tick, for /status
 	missBytes  int64
-	reg, peer  *sxfer
+	xfers      []*sxfer // running: at most one per layer and path
 	finalizing bool
+	skipped    bool // too full, as of the last tick
+	skipLogged bool // the skip was logged (once per spread)
 	done       bool
 	touched    bool            // was ordered something: has blobs to release if the job ends early
 	recorded   bool            // its delivery is in the image history
@@ -172,6 +184,39 @@ type sxfer struct {
 	path  string
 	from  string // registry, or the sending node
 	at    time.Time
+}
+
+func (n *snode) busy() bool { return len(n.xfers) > 0 }
+
+// running reports whether layer is coming over path.
+func (n *snode) running(layer int, path string) bool {
+	for _, x := range n.xfers {
+		if x.layer == layer && x.path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func (n *snode) countPath(path string) int {
+	c := 0
+	for _, x := range n.xfers {
+		if x.path == path {
+			c++
+		}
+	}
+	return c
+}
+
+// remove forgets x, if it is still running.
+func (n *snode) remove(x *sxfer) bool {
+	for i, y := range n.xfers {
+		if y == x {
+			n.xfers = append(n.xfers[:i], n.xfers[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // NewSpreader builds a spreader.
@@ -235,7 +280,7 @@ func (s *Spreader) Start(ctx context.Context, image string) ([]string, error) {
 	var drops []dropOrder
 	s.mu.Lock()
 	if job, ok := s.jobs[image]; ok {
-		job.started = time.Now()
+		job.started, job.completed = time.Now(), false
 		recordSpreadStart(image, job.started)
 		s.mu.Unlock()
 		return nil, nil
@@ -243,9 +288,11 @@ func (s *Spreader) Start(ctx context.Context, image string) ([]string, error) {
 	repo := imageref.Repo(image)
 	for other, job := range s.jobs {
 		if repo != "" && imageref.Repo(other) == repo {
-			logging.Infof("angryduck-controller: spread: image=%s superseded by image=%s", other, image)
-			spreadsTotal.Inc("superseded")
-			recordSpreadEnd(job.image, "superseded", time.Since(job.started))
+			if !job.completed { // a complete one was already counted
+				logging.Infof("angryduck-controller: spread: image=%s superseded by image=%s", other, image)
+				spreadsTotal.Inc("superseded")
+				recordSpreadEnd(job.image, "superseded", time.Since(job.started))
+			}
 			drops = append(drops, s.endLocked(job)...)
 		}
 	}
@@ -270,7 +317,7 @@ func (s *Spreader) Start(ctx context.Context, image string) ([]string, error) {
 	defer s.mu.Unlock()
 	var ordered []string
 	for node, n := range job.nodes {
-		if n.reg != nil {
+		if n.countPath(model.SpreadPathRegistry) > 0 {
 			ordered = append(ordered, node)
 		}
 	}
@@ -383,11 +430,12 @@ func (s *Spreader) tick(ctx context.Context) {
 	serving := map[string]int{}
 	for _, j := range jobs {
 		for _, n := range j.nodes {
-			if n.reg != nil {
-				regBusy++
-			}
-			if n.peer != nil && n.peer.from != "" {
-				serving[n.peer.from]++
+			for _, x := range n.xfers {
+				if x.path == model.SpreadPathRegistry {
+					regBusy++
+				} else if x.from != "" {
+					serving[x.from]++
+				}
 			}
 		}
 	}
@@ -438,6 +486,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 	}
 	var needs []need
 	var done, skipped, excluded, finalizing int
+	var skippedNodes []string
 	for _, w := range fresh {
 		if s.excluded(w.NodeID) {
 			excluded++
@@ -450,6 +499,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			j.nodes[w.NodeID] = n
 		}
 		s.expireLocked(j, w.NodeID, n, now)
+		n.skipped = false
 		if n.done || w.HasImage(j.image) {
 			if !n.recorded {
 				via := "kubelet"
@@ -475,39 +525,58 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			bytes += layers[i].Size
 		}
 		n.missLayers, n.missBytes = len(missing), bytes
-		spreadNodeMissingBytes.Set(float64(bytes), j.image, w.NodeID)
-		spreadNodeMissingLayers.Set(float64(len(missing)), j.image, w.NodeID)
 		if n.finalizing {
 			finalizing++
 			continue
 		}
-		if w.Utilization > s.cfg.MaxUtilization && n.reg == nil && n.peer == nil {
+		if w.Utilization > s.cfg.MaxUtilization && !n.busy() {
+			n.skipped = true
 			skipped++
+			skippedNodes = append(skippedNodes, w.NodeID)
+			if !n.skipLogged {
+				n.skipLogged = true
+				logging.Infof("angryduck-controller: spread: node=%s gets nothing of image=%s for now: disk at %.1f%%, above %.0f%% (PROPAGATE_MAX_UTILIZATION); it receives the image once cleanup makes room",
+					w.NodeID, j.image, w.Utilization*100, s.cfg.MaxUtilization*100)
+			}
 			continue
 		}
 		needs = append(needs, need{w: w, n: n, missing: missing, bytes: bytes})
 	}
 
-	// Finished?
+	// Finished? Complete once every node with room has it; the job stays
+	// open, quietly, while full nodes may still receive it.
 	expired := s.cfg.Window > 0 && now.Sub(j.started) > s.cfg.Window
 	busy := false
 	for _, n := range j.nodes {
-		if n.reg != nil || n.peer != nil || n.finalizing {
+		if n.busy() || n.finalizing {
 			busy = true
 		}
 	}
-	if len(needs) == 0 && finalizing == 0 && skipped == 0 && !busy && done > 0 {
-		took := now.Sub(j.started)
-		logging.Infof("angryduck-controller: spread: image=%s is on every eligible node (%d) after %s", j.image, done, took.Round(time.Second))
-		spreadsTotal.Inc("complete")
-		spreadLastSeconds.Set(took.Seconds())
-		recordSpreadEnd(j.image, "complete", took)
-		return nil, s.endLocked(j)
+	if len(needs) == 0 && finalizing == 0 && !busy && done > 0 {
+		if !j.completed {
+			j.completed = true
+			took := now.Sub(j.started)
+			if skipped == 0 {
+				logging.Infof("angryduck-controller: spread: image=%s is on every eligible node (%d) after %s", j.image, done, took.Round(time.Second))
+			} else {
+				sort.Strings(skippedNodes)
+				logging.Infof("angryduck-controller: spread: image=%s is on every node with room (%d) after %s; %d node(s) too full get it once cleanup makes room: %s",
+					j.image, done, took.Round(time.Second), skipped, strings.Join(skippedNodes, ", "))
+			}
+			spreadsTotal.Inc("complete")
+			spreadLastSeconds.Set(took.Seconds())
+			recordSpreadEnd(j.image, "complete", took)
+		}
+		if skipped == 0 {
+			return nil, s.endLocked(j)
+		}
 	}
 	if expired && !busy {
-		logging.Warnf("angryduck-controller: spread: window for image=%s ran out with %d node(s) still missing it", j.image, len(needs)+skipped)
-		spreadsTotal.Inc("expired")
-		recordSpreadEnd(j.image, "expired", now.Sub(j.started))
+		if !j.completed {
+			logging.Warnf("angryduck-controller: spread: window for image=%s ran out with %d node(s) still missing it", j.image, len(needs)+skipped)
+			spreadsTotal.Inc("expired")
+			recordSpreadEnd(j.image, "expired", now.Sub(j.started))
+		}
 		return nil, s.endLocked(j)
 	}
 
@@ -534,121 +603,168 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 	regPulls := make([]int, nl)
 	regSince := make([]time.Time, nl)
 	for _, n := range j.nodes {
-		if n.reg != nil && n.reg.layer >= 0 {
-			i := n.reg.layer
+		for _, x := range n.xfers {
+			if x.path != model.SpreadPathRegistry || x.layer < 0 {
+				continue
+			}
+			i := x.layer
 			regPulls[i]++
-			if regSince[i].IsZero() || n.reg.at.Before(regSince[i]) {
-				regSince[i] = n.reg.at
+			if regSince[i].IsZero() || x.at.Before(regSince[i]) {
+				regSince[i] = x.at
 			}
 		}
 	}
 
 	var orders []order
-	transferring, waitingNodes := 0, 0
+	var active []need // nodes that may get new transfers this tick
 	for _, nd := range needs {
 		n, w := nd.n, nd.w
 		if now.Before(n.next) || expired {
-			if n.reg != nil || n.peer != nil {
-				transferring++
-			} else {
-				waitingNodes++
-			}
 			continue
 		}
 		if len(nd.missing) == 0 {
-			if n.reg == nil && n.peer == nil {
+			if !n.busy() {
 				n.finalizing = true
 				orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, final: true})
 				finalizing++
-			} else {
-				transferring++ // the slower path of a race, about to be cancelled
 			}
+			// else: the slower path of a race, about to be cancelled
 			continue
 		}
-		// East-west: rarest layer first, then largest.
-		if n.peer == nil {
-			best, src := -1, ""
-			for _, i := range nd.missing {
-				h := pickSource(holders[i], w.NodeID, serving, s.cfg.PerSource)
-				if h == "" {
-					continue
-				}
-				if best < 0 || len(holders[i]) < len(holders[best]) ||
-					len(holders[i]) == len(holders[best]) && layers[i].Size > layers[best].Size {
-					best, src = i, h
-				}
+		active = append(active, nd)
+	}
+
+	// East-west: rarest layer first, then largest, from the least busy
+	// holder. One new transfer per node per round, until nothing more fits.
+	peerOrder := func(nd need) bool {
+		n, w := nd.n, nd.w
+		best, src := -1, ""
+		for _, i := range nd.missing {
+			if n.running(i, model.SpreadPathPeer) {
+				continue
 			}
-			if best >= 0 {
-				x := &sxfer{layer: best, path: model.SpreadPathPeer, from: src, at: now}
-				n.peer, n.touched = x, true
-				serving[src]++
-				orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
-					fetch: &model.SpreadFetch{Job: j.id, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathPeer,
-						Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}}})
+			h := pickSource(holders[i], w.NodeID, serving, s.cfg.PerSource)
+			if h == "" {
+				continue
 			}
-		}
-		// North-south: only blobs no node holds. Unstarted ones first,
-		// largest first; otherwise race the pull that has run longest.
-		if n.reg == nil && *regBusy < s.cfg.MaxRegistry {
-			best := -1
-			for _, i := range nd.missing {
-				if len(holders[i]) > 0 || (fullHolder && j.regFails[i] >= 3) || regPulls[i] >= s.cfg.RacePerBlob {
-					continue
-				}
-				if best < 0 || betterPull(i, best, regPulls, regSince, layers) {
-					best = i
-				}
-			}
-			if best >= 0 {
-				x := &sxfer{layer: best, path: model.SpreadPathRegistry, from: model.SpreadPathRegistry, at: now}
-				n.reg, n.touched = x, true
-				*regBusy++
-				regPulls[best]++
-				if regSince[best].IsZero() {
-					regSince[best] = now
-				}
-				orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
-					fetch: &model.SpreadFetch{Job: j.id, Image: j.image, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathRegistry}})
+			if best < 0 || len(holders[i]) < len(holders[best]) ||
+				len(holders[i]) == len(holders[best]) && layers[i].Size > layers[best].Size {
+				best, src = i, h
 			}
 		}
-		// Last resort: a layer nobody has the blob of and the registry
-		// keeps failing on. Get the whole image from a node that has it
-		// (blobs or snapshots, as rescue does).
-		if fullHolder && n.peer == nil && n.reg == nil {
-			stuck := false
-			for _, i := range nd.missing {
-				if len(holders[i]) == 0 && j.regFails[i] >= 3 {
-					stuck = true
+		if best < 0 {
+			return false
+		}
+		x := &sxfer{layer: best, path: model.SpreadPathPeer, from: src, at: now}
+		n.xfers, n.touched = append(n.xfers, x), true
+		serving[src]++
+		orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
+			fetch: &model.SpreadFetch{Job: j.id, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathPeer,
+				Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}}})
+		return true
+	}
+	// North-south: only blobs no node holds. Unstarted ones first, largest
+	// first; otherwise race the pull that has run longest.
+	regOrder := func(nd need) bool {
+		n, w := nd.n, nd.w
+		if *regBusy >= s.cfg.MaxRegistry {
+			return false
+		}
+		best := -1
+		for _, i := range nd.missing {
+			if len(holders[i]) > 0 || (fullHolder && j.regFails[i] >= 3) || regPulls[i] >= s.cfg.RacePerBlob ||
+				n.running(i, model.SpreadPathRegistry) {
+				continue
+			}
+			if best < 0 || betterPull(i, best, regPulls, regSince, layers) {
+				best = i
+			}
+		}
+		if best < 0 {
+			return false
+		}
+		x := &sxfer{layer: best, path: model.SpreadPathRegistry, from: model.SpreadPathRegistry, at: now}
+		n.xfers, n.touched = append(n.xfers, x), true
+		*regBusy++
+		regPulls[best]++
+		if regSince[best].IsZero() {
+			regSince[best] = now
+		}
+		orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
+			fetch: &model.SpreadFetch{Job: j.id, Image: j.image, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathRegistry}})
+		return true
+	}
+	for more := true; more; {
+		more = false
+		for _, nd := range active {
+			if peerOrder(nd) {
+				more = true
+			}
+			if regOrder(nd) {
+				more = true
+			}
+		}
+	}
+
+	// Last resort: a layer nobody has the blob of and the registry keeps
+	// failing on. Get the whole image from a node that has it (blobs or
+	// snapshots, as rescue does).
+	for _, nd := range active {
+		n, w := nd.n, nd.w
+		if !fullHolder || n.busy() {
+			continue
+		}
+		stuck := false
+		for _, i := range nd.missing {
+			if len(holders[i]) == 0 && j.regFails[i] >= 3 {
+				stuck = true
+				break
+			}
+		}
+		if !stuck {
+			continue
+		}
+		var sources []model.RescueSource
+		for _, h := range fresh {
+			if h.NodeID != w.NodeID && h.HasImage(j.image) && serving[h.NodeID] < s.cfg.PerSource {
+				sources = append(sources, model.RescueSource{NodeID: h.NodeID, Address: h.Address})
+				if len(sources) == 3 {
 					break
 				}
 			}
-			if stuck {
-				var sources []model.RescueSource
-				for _, h := range fresh {
-					if h.NodeID != w.NodeID && h.HasImage(j.image) && serving[h.NodeID] < s.cfg.PerSource {
-						sources = append(sources, model.RescueSource{NodeID: h.NodeID, Address: h.Address})
-						if len(sources) == 3 {
-							break
-						}
-					}
-				}
-				if len(sources) > 0 {
-					x := &sxfer{layer: -1, path: "image", from: sources[0].NodeID, at: now}
-					n.peer, n.touched = x, true
-					serving[sources[0].NodeID]++
-					orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: -1, image: sources})
-				}
-			}
 		}
-		if n.reg != nil || n.peer != nil {
+		if len(sources) > 0 {
+			x := &sxfer{layer: -1, path: "image", from: sources[0].NodeID, at: now}
+			n.xfers, n.touched = append(n.xfers, x), true
+			serving[sources[0].NodeID]++
+			orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: -1, image: sources})
+		}
+	}
+
+	transferring, waitingNodes := 0, 0
+	for _, nd := range needs {
+		if nd.n.finalizing {
+			continue // counted above
+		}
+		if nd.n.busy() {
 			transferring++
 		} else {
 			waitingNodes++
 		}
 	}
 
-	// Gauges for this job.
-	imageSpreadSeconds.Hold(now.Sub(j.started).Seconds(), j.image, "running")
+	// Gauges for this job. A complete job waiting only on full nodes shows
+	// nothing until one of them gets room and starts receiving.
+	if j.completed && len(orders) == 0 && transferring == 0 && finalizing == 0 {
+		return orders, nil
+	}
+	if !j.completed {
+		imageSpreadSeconds.Hold(now.Sub(j.started).Seconds(), j.image, "running")
+	}
+	for _, nd := range needs {
+		spreadNodeMissingBytes.Set(float64(nd.bytes), j.image, nd.w.NodeID)
+		spreadNodeMissingLayers.Set(float64(len(nd.missing)), j.image, nd.w.NodeID)
+	}
 	spreadNodes.Set(float64(done), j.image, "done")
 	spreadNodes.Set(float64(finalizing), j.image, "finalizing")
 	spreadNodes.Set(float64(transferring), j.image, "transferring")
@@ -669,10 +785,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 	spreadLayers.Set(float64(pulling), j.image, "pulling")
 	spreadLayers.Set(float64(nobody), j.image, "missing")
 	for node, n := range j.nodes {
-		for _, x := range []*sxfer{n.reg, n.peer} {
-			if x == nil {
-				continue
-			}
+		for _, x := range n.xfers {
 			blob, size := "image", j.total
 			if x.layer >= 0 {
 				blob = shortDigest(layers[x.layer].Digest)
@@ -684,21 +797,19 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 	return orders, nil
 }
 
-// expireLocked frees a slot whose transfer has been silent too long (a
-// lost report, a dead worker), or whose blob the node's inventory already
-// shows (its report was lost).
+// expireLocked frees a transfer that has been silent too long (a lost
+// report, a dead worker).
 func (s *Spreader) expireLocked(j *sjob, node string, n *snode, now time.Time) {
-	for _, slot := range []**sxfer{&n.reg, &n.peer} {
-		x := *slot
-		if x == nil {
+	kept := n.xfers[:0]
+	for _, x := range n.xfers {
+		if now.Sub(x.at) > s.cfg.TransferTimeout {
+			logging.Warnf("angryduck-controller: spread: no word from node=%s on %s transfer of image=%s for %s; forgetting it",
+				node, x.path, j.image, now.Sub(x.at).Round(time.Second))
 			continue
 		}
-		if now.Sub(x.at) > s.cfg.TransferTimeout {
-			logging.Warnf("angryduck-controller: spread: no word from node=%s on %s transfer of image=%s for %s; freeing the slot",
-				node, x.path, j.image, now.Sub(x.at).Round(time.Second))
-			*slot = nil
-		}
+		kept = append(kept, x)
 	}
+	n.xfers = kept
 	if n.finalizing && n.done {
 		n.finalizing = false
 	}
@@ -836,16 +947,16 @@ func (s *Spreader) sendFetch(ctx context.Context, o order) {
 	if n == nil {
 		return
 	}
-	s.clearLocked(n, o.xfer)
+	n.remove(o.xfer)
 	switch {
 	case err == nil && ack.Present:
 		n.have[o.layer] = true
 		o.job.addGot(o.layer, o.node)
 		spreadTransfersTotal.Inc(o.fetch.Path, "present")
 	case err == nil && status == http.StatusConflict:
-		// The worker is busy with a transfer we don't know about (a
-		// controller restart, a cancelled job winding down). Look again
-		// shortly.
+		// The worker is already fetching this blob over this path, a
+		// transfer we don't know about (a controller restart, a cancelled
+		// job winding down). Look again shortly.
 		n.next = time.Now().Add(5 * time.Second)
 		spreadTransfersTotal.Inc(o.fetch.Path, "rejected")
 	default:
@@ -912,7 +1023,7 @@ func (s *Spreader) sendImage(ctx context.Context, o order) {
 	if n == nil {
 		return
 	}
-	s.clearLocked(n, o.xfer)
+	n.remove(o.xfer)
 	if err != nil {
 		s.backoffLocked(n)
 		spreadTransfersTotal.Inc("image", "failed")
@@ -937,16 +1048,6 @@ func (s *Spreader) slotOwnerLocked(o order) *snode {
 		return nil
 	}
 	return o.job.nodes[o.node]
-}
-
-// clearLocked frees the slot x is in, if it still is.
-func (s *Spreader) clearLocked(n *snode, x *sxfer) {
-	if n.reg == x {
-		n.reg = nil
-	}
-	if n.peer == x {
-		n.peer = nil
-	}
 }
 
 func (s *Spreader) backoffLocked(n *snode) {
@@ -1022,12 +1123,11 @@ func (s *Spreader) done(d model.SpreadDone) {
 	if d.Bytes > 0 || d.Seconds > 0 {
 		n.received = n.received.add(path, d.Bytes, d.Seconds)
 	}
-	slot := &n.reg
-	if path == model.SpreadPathPeer {
-		slot = &n.peer
-	}
-	if x := *slot; x != nil && x.layer == i {
-		*slot = nil
+	for _, x := range n.xfers {
+		if x.layer == i && x.path == path {
+			n.remove(x)
+			break
+		}
 	}
 	switch d.Result {
 	case model.SpreadResultOK:
@@ -1056,28 +1156,34 @@ func (s *Spreader) Status() []model.SpreadStatus {
 	defer s.mu.Unlock()
 	out := make([]model.SpreadStatus, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		st := model.SpreadStatus{Image: j.image, Job: j.id, StartedAt: j.started, Layers: len(j.res.Layers), Bytes: j.total, Done: []string{}}
+		st := model.SpreadStatus{Image: j.image, Job: j.id, StartedAt: j.started, Complete: j.completed, Layers: len(j.res.Layers), Bytes: j.total, Done: []string{}}
 		for node, n := range j.nodes {
 			if n.done {
 				st.Done = append(st.Done, node)
 				continue
 			}
+			if n.skipped {
+				st.Skipped = append(st.Skipped, node)
+			}
 			ns := model.SpreadNodeStatus{Node: node, Finalizing: n.finalizing, Failures: n.fails}
 			ns.MissingLayers, ns.MissingBytes = n.missLayers, n.missBytes
-			if n.reg != nil && n.reg.layer >= 0 {
-				ns.Registry = j.res.Layers[n.reg.layer].Digest
-			}
-			if n.peer != nil {
-				ns.PeerFrom = n.peer.from
-				if n.peer.layer >= 0 {
-					ns.Peer = j.res.Layers[n.peer.layer].Digest
-				} else {
-					ns.Peer = "image"
+			for _, x := range n.xfers {
+				blob := "image"
+				if x.layer >= 0 {
+					blob = j.res.Layers[x.layer].Digest
+				}
+				ns.Transfers = append(ns.Transfers, model.SpreadTransferStatus{Blob: blob, Path: x.path, From: x.from})
+				switch {
+				case x.path == model.SpreadPathRegistry && ns.Registry == "":
+					ns.Registry = blob
+				case x.path != model.SpreadPathRegistry && ns.Peer == "":
+					ns.Peer, ns.PeerFrom = blob, x.from
 				}
 			}
 			st.Nodes = append(st.Nodes, ns)
 		}
 		sort.Strings(st.Done)
+		sort.Strings(st.Skipped)
 		sort.Slice(st.Nodes, func(a, b int) bool { return st.Nodes[a].Node < st.Nodes[b].Node })
 		out = append(out, st)
 	}

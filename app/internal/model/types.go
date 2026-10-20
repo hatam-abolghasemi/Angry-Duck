@@ -319,6 +319,7 @@ type SpreadStatus struct {
 	Image     string             `json:"image"`
 	Job       string             `json:"job"`
 	StartedAt time.Time          `json:"started_at"`
+	Complete  bool               `json:"complete,omitempty"` // every node with room has it; open only for full ones
 	Layers    int                `json:"layers"`
 	Bytes     int64              `json:"bytes"`
 	Done      []string           `json:"done"`
@@ -331,9 +332,18 @@ type SpreadNodeStatus struct {
 	Node          string `json:"node"`
 	MissingLayers int    `json:"missing_layers"`
 	MissingBytes  int64  `json:"missing_bytes"`
-	Registry      string `json:"registry,omitempty"` // blob being pulled from the registry
-	Peer          string `json:"peer,omitempty"`     // blob being received from a peer
+	Registry      string `json:"registry,omitempty"` // a blob being pulled from the registry (first of Transfers)
+	Peer          string `json:"peer,omitempty"`     // a blob being received from a peer (first of Transfers)
 	PeerFrom      string `json:"peer_from,omitempty"`
 	Finalizing    bool   `json:"finalizing,omitempty"`
 	Failures      int    `json:"failures,omitempty"`
+	// Every transfer running to this node: blob (or "image"), path, source.
+	Transfers []SpreadTransferStatus `json:"transfers,omitempty"`
+}
+
+// SpreadTransferStatus is one transfer running to a node.
+type SpreadTransferStatus struct {
+	Blob string `json:"blob"`
+	Path string `json:"path"`
+	From string `json:"from"`
 }

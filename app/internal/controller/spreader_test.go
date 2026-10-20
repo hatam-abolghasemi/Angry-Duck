@@ -238,7 +238,7 @@ func TestSpreader_RacesARegistryPullWithAPeerPushOnTheSameNode(t *testing.T) {
 	}
 	s.mu.Lock()
 	n := job.nodes[slow]
-	both := n.reg != nil && n.peer != nil && n.reg.layer == 2 && n.peer.layer == 2
+	both := n.running(2, model.SpreadPathRegistry) && n.running(2, model.SpreadPathPeer)
 	s.mu.Unlock()
 	if !both {
 		t.Fatal("the slow node must have both paths running for the same blob")
@@ -248,7 +248,7 @@ func TestSpreader_RacesARegistryPullWithAPeerPushOnTheSameNode(t *testing.T) {
 	s.done(model.SpreadDone{Node: slow, Job: job.id, Digest: dL2, Path: model.SpreadPathPeer, Result: model.SpreadResultOK})
 	s.done(model.SpreadDone{Node: slow, Job: job.id, Digest: dL2, Path: model.SpreadPathRegistry, Result: model.SpreadResultCancelled})
 	s.mu.Lock()
-	free := n.reg == nil && n.peer == nil && n.have[2]
+	free := !n.running(2, model.SpreadPathRegistry) && !n.running(2, model.SpreadPathPeer) && n.have[2]
 	s.mu.Unlock()
 	if !free {
 		t.Fatal("after the race both slots must be free and the blob counted")
@@ -378,8 +378,8 @@ func TestSpreader_BusyWorkerFreesTheSlotAndALostReportExpires(t *testing.T) {
 	s.mu.Lock()
 	held := 0
 	for _, n := range job.nodes {
-		if n.reg != nil || n.peer != nil {
-			t.Fatal("a 409 must free the slot")
+		if n.busy() {
+			t.Fatal("a 409 must forget the transfer")
 		}
 		if !n.next.IsZero() {
 			held++
@@ -402,10 +402,16 @@ func TestSpreader_BusyWorkerFreesTheSlotAndALostReportExpires(t *testing.T) {
 	s.wg.Wait()
 	s.mu.Lock()
 	var stuck *snode
+	var lost *sxfer
 	for _, n := range job.nodes {
-		if n.reg != nil {
-			stuck = n
-			n.reg.at = time.Now().Add(-2 * time.Hour)
+		for _, x := range n.xfers {
+			if x.path == model.SpreadPathRegistry {
+				stuck, lost = n, x
+				x.at = time.Now().Add(-2 * time.Hour)
+				break
+			}
+		}
+		if stuck != nil {
 			break
 		}
 	}
@@ -417,8 +423,10 @@ func TestSpreader_BusyWorkerFreesTheSlotAndALostReportExpires(t *testing.T) {
 	s.wg.Wait()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if stuck.reg != nil && time.Since(stuck.reg.at) > time.Hour {
-		t.Fatal("silent transfer not freed")
+	for _, x := range stuck.xfers {
+		if x == lost {
+			t.Fatal("silent transfer not freed")
+		}
 	}
 }
 
