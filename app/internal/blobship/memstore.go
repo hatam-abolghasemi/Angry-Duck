@@ -170,6 +170,14 @@ func (m *MemStore) Put(data []byte) string {
 	return d
 }
 
+// PutRaw stores data under digest without checking it: a corrupted blob,
+// for tests.
+func (m *MemStore) PutRaw(digest string, data []byte) {
+	m.mu.Lock()
+	m.blobs[digest] = append([]byte(nil), data...)
+	m.mu.Unlock()
+}
+
 // Delete removes a blob.
 func (m *MemStore) Delete(digest string) {
 	m.mu.Lock()
