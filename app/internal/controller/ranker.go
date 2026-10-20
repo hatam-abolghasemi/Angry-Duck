@@ -291,6 +291,7 @@ func (rk *Ranker) notYetOrdered(image string, eligible []*workerEntry) ([]*worke
 		rk.orderedForImage = image
 		rk.orderedNodes = make(map[string]bool)
 		rk.slotsUsed = 0
+		seedMissingBytes.Reset() // the previous image's seeds don't count for this one
 	}
 	remaining := rk.topN - rk.slotsUsed
 
