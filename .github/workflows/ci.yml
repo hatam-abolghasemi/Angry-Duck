@@ -94,7 +94,7 @@ jobs:
       - name: Integration tests
         run: |
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
-            ANGRYDUCK_CONTAINERD="$SOCK" \
+            ANGRYDUCK_CONTAINERD="$SOCK" ANGRYDUCK_CONTAINERD_ROOT=/var/lib/angryduck-ci \
             go test -tags integration -count=1 -timeout 15m ./internal/worker/
 
       - name: containerd log
