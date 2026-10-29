@@ -20,6 +20,7 @@ import (
 	"angryduck/internal/blobship"
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 	"angryduck/internal/sharedtoken"
@@ -288,6 +289,7 @@ func (r *ImageRepair) handleWakes(ctx context.Context) {
 func (r *ImageRepair) Pass(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer memlimit.Soon()
 	targets, err := r.store.ImageTargets(ctx)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: image repair: listing images: %v", r.nodeID, err)
@@ -355,18 +357,48 @@ func (r *ImageRepair) Pass(ctx context.Context) {
 
 // knownImage is what an image's metadata walk found: the metadata blobs
 // it needs, and its layers. A zero knownImage knows nothing.
+//
+// It is kept for every image on the node between checks, so it holds only
+// what check needs, as raw digests (see digestKey): a few dozen bytes per
+// layer instead of the walk's decoded descriptors and strings. An image
+// with a digest that isn't plain sha256 keeps the walk's own lists.
 type knownImage struct {
+	meta   []digestKey
+	layers []knownLayer // bottom first
+	valid  bool
+	// other: the walk's lists, when a digest didn't fit a digestKey.
+	other *knownOther
+}
+
+type knownLayer struct{ blob, chain digestKey }
+
+type knownOther struct {
 	meta   []string
 	layers []blobship.Layer
-	valid  bool
 }
 
 func newKnownImage(w blobship.MetaWalk) knownImage {
-	k := knownImage{layers: w.Layers, valid: true}
+	k := knownImage{valid: true, meta: make([]digestKey, 0, len(w.Metadata)), layers: make([]knownLayer, 0, len(w.Layers))}
+	compact := true
 	for d := range w.Metadata {
-		k.meta = append(k.meta, d)
+		dk, ok := parseDigestKey(d)
+		compact = compact && ok
+		k.meta = append(k.meta, dk)
 	}
-	return k
+	for _, l := range w.Layers {
+		b, ok1 := parseDigestKey(l.Blob.Digest)
+		c, ok2 := parseDigestKey(l.ChainID)
+		compact = compact && ok1 && ok2
+		k.layers = append(k.layers, knownLayer{blob: b, chain: c})
+	}
+	if compact {
+		return k
+	}
+	o := &knownOther{layers: w.Layers}
+	for d := range w.Metadata {
+		o.meta = append(o.meta, d)
+	}
+	return knownImage{valid: true, other: o}
 }
 
 // check works out the image's health from the listings alone. ok is false
@@ -375,12 +407,43 @@ func (k knownImage) check(blobs, snaps map[string]bool) (blobship.Health, bool) 
 	if !k.valid {
 		return blobship.Health{}, false
 	}
+	if o := k.other; o != nil {
+		for _, d := range o.meta {
+			if !blobs[d] {
+				return blobship.Health{}, false
+			}
+		}
+		return blobship.CheckLayers(o.layers, snaps, blobs), true
+	}
 	for _, d := range k.meta {
-		if !blobs[d] {
+		if !hasDigest(blobs, d) {
 			return blobship.Health{}, false
 		}
 	}
-	return blobship.CheckLayers(k.layers, snaps, blobs), true
+	// The same rules as blobship.CheckLayers.
+	if len(k.layers) == 0 {
+		return blobship.Health{}, true
+	}
+	h := blobship.Health{Known: true}
+	if hasDigest(snaps, k.layers[len(k.layers)-1].chain) {
+		h.Unpacked = true
+		return h, true
+	}
+	for _, l := range k.layers {
+		if !hasDigest(snaps, l.chain) && !hasDigest(blobs, l.blob) {
+			h.Missing = append(h.Missing, blobship.Layer{Blob: blobship.Descriptor{Digest: keyString(l.blob)}, ChainID: keyString(l.chain)})
+		}
+	}
+	return h, true
+}
+
+// hasDigest looks k up in a listing keyed by digest string, without
+// building the string on the heap.
+func hasDigest(m map[string]bool, k digestKey) bool {
+	var b [7 + 64]byte
+	copy(b[:], "sha256:")
+	hex.Encode(b[7:], k[:])
+	return m[string(b[:])]
 }
 
 // groupByTarget maps each target digest to its names, sorted, without

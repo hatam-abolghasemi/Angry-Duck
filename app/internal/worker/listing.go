@@ -71,7 +71,17 @@ func (l *listing) get(ctx context.Context, fetch func(context.Context) (map[stri
 				l.inflight = nil
 			}
 			if c.err == nil && l.gen == gen {
-				l.keys, l.at = c.keys, time.Now()
+				at := time.Now()
+				l.keys, l.at = c.keys, at
+				// Past its TTL nobody may use it: let it go then, rather than
+				// hold a full listing until the next one replaces it.
+				time.AfterFunc(listingTTL, func() {
+					l.mu.Lock()
+					if l.at == at {
+						l.keys = nil
+					}
+					l.mu.Unlock()
+				})
 			}
 			l.mu.Unlock()
 			close(c.done)

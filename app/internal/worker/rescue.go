@@ -21,6 +21,7 @@ import (
 	"angryduck/internal/blobship"
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 	"angryduck/internal/sharedtoken"
@@ -172,6 +173,7 @@ func (rs *Rescue) HandleRescue(w http.ResponseWriter, r *http.Request) {
 			ctx, cancel := context.WithTimeout(context.Background(), receiveTimeout)
 			call.result = rs.receive(ctx, order)
 			cancel()
+			memlimit.Soon()
 			rs.mu.Lock()
 			delete(rs.inflight, order.Image)
 			rs.mu.Unlock()

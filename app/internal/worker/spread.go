@@ -20,6 +20,7 @@ import (
 	"angryduck/internal/blobship"
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 	"angryduck/internal/sharedtoken"
@@ -422,6 +423,7 @@ func (s *Spread) lease(ctx context.Context, job string) (string, error) {
 // run does one transfer, then forgets it and reports.
 func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	defer s.wg.Done()
+	defer memlimit.Soon() // its buffers are garbage now
 	start := time.Now()
 	n, upstream, err := s.fetch(ctx, x, o)
 	x.cancel()

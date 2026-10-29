@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -40,12 +41,13 @@ type LayerTracker struct {
 
 	mu       sync.Mutex
 	lastScan time.Time
-	curBlobs map[string]bool // latest scan; replaced, never mutated
-	curSnaps map[string]bool
+	scanned  bool
+	curBlobs digestSet // latest scan; replaced, never mutated
+	curSnaps digestSet
 
 	ackedSeq   uint64 // 0: the controller holds nothing we know of
-	ackBlobs   map[string]bool
-	ackSnaps   map[string]bool
+	ackBlobs   digestSet
+	ackSnaps   digestSet
 	seq        uint64 // last seq handed out
 	pending    *pendingSync
 	wantFull   bool // send a full sync at the next chance, unthrottled
@@ -54,7 +56,7 @@ type LayerTracker struct {
 
 type pendingSync struct {
 	seq          uint64
-	blobs, snaps map[string]bool
+	blobs, snaps digestSet
 }
 
 // NewLayerTracker builds a tracker; interval is the minimum time between
@@ -79,7 +81,7 @@ func (t *LayerTracker) SetInterval(d time.Duration) {
 
 // scan refreshes the current inventory if it's due. Caller holds mu.
 func (t *LayerTracker) scan(ctx context.Context, force bool) {
-	if !force && t.curBlobs != nil && time.Since(t.lastScan) < t.interval {
+	if !force && t.scanned && time.Since(t.lastScan) < t.interval {
 		return
 	}
 	if force {
@@ -102,15 +104,13 @@ func (t *LayerTracker) scan(ctx context.Context, force bool) {
 		return
 	}
 	// Only committed image snapshots are named by chainID; container
-	// snapshots and our own temporary keys are not layers. The listing is
-	// shared with other callers, so filter into a new map.
-	layers := make(map[string]bool, len(snaps))
-	for k := range snaps {
-		if strings.HasPrefix(k, "sha256:") {
-			layers[k] = true
-		}
-	}
-	t.curBlobs, t.curSnaps, t.lastScan = blobs, layers, time.Now()
+	// snapshots and our own temporary keys are not layers.
+	isLayer := func(k string) bool { return strings.HasPrefix(k, "sha256:") }
+	// Kept compact (see digestSet), and the previous set itself when
+	// nothing changed, so an unchanged inventory is held once, not per scan.
+	t.curBlobs = newDigestSet(blobs, nil).sameOr(t.curBlobs)
+	t.curSnaps = newDigestSet(snaps, isLayer).sameOr(t.curSnaps)
+	t.lastScan, t.scanned = time.Now(), true
 }
 
 // Next returns the sync to put in the next report, or nil when there is
@@ -120,7 +120,7 @@ func (t *LayerTracker) Next(ctx context.Context, force bool) *model.LayerSync {
 	defer t.mu.Unlock()
 	t.scan(ctx, force)
 	t.pending = nil
-	if t.curBlobs == nil {
+	if !t.scanned {
 		return nil // never scanned successfully
 	}
 	if t.ackedSeq == 0 {
@@ -132,7 +132,7 @@ func (t *LayerTracker) Next(ctx context.Context, force bool) *model.LayerSync {
 		t.pending = &pendingSync{seq: t.seq, blobs: t.curBlobs, snaps: t.curSnaps}
 		return &model.LayerSync{
 			Epoch: t.epoch, Seq: t.seq, Full: true,
-			AddBlobs: keys(t.curBlobs), AddSnaps: keys(t.curSnaps),
+			AddBlobs: t.curBlobs.strings(), AddSnaps: t.curSnaps.strings(),
 		}
 	}
 	addB, delB := diff(t.ackBlobs, t.curBlobs)
@@ -167,24 +167,125 @@ func (t *LayerTracker) Ack(ack model.ReportAck, sent *model.LayerSync) {
 	t.pending = nil
 }
 
-func keys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
+// digestSet is a set of digests held compactly: each sha256 digest as its
+// 32 raw bytes in a sorted slice, a third of a map entry keyed by its
+// 71-character string; anything else (another algorithm) as a sorted
+// string. A large node holds thousands of blobs and snapshots, twice
+// (scanned and acknowledged).
+type digestSet struct {
+	sha  []digestKey
+	odd  []string
+	full bool // built from a listing (a zero digestSet is empty)
+}
+
+type digestKey [32]byte
+
+// newDigestSet builds the set of keys of m that keep allows (nil: all).
+func newDigestSet(m map[string]bool, keep func(string) bool) digestSet {
+	s := digestSet{sha: make([]digestKey, 0, len(m)), full: true}
 	for k := range m {
-		out = append(out, k)
+		if keep != nil && !keep(k) {
+			continue
+		}
+		if dk, ok := parseDigestKey(k); ok {
+			s.sha = append(s.sha, dk)
+		} else {
+			s.odd = append(s.odd, k)
+		}
 	}
+	sort.Slice(s.sha, func(i, j int) bool { return lessKey(s.sha[i], s.sha[j]) })
+	sort.Strings(s.odd)
+	if cap(s.sha)-len(s.sha) > len(s.sha)/8 {
+		s.sha = append([]digestKey(nil), s.sha...) // drop the filtered-out room
+	}
+	return s
+}
+
+func parseDigestKey(d string) (digestKey, bool) {
+	var k digestKey
+	h, ok := strings.CutPrefix(d, "sha256:")
+	if !ok || len(h) != 64 {
+		return k, false
+	}
+	for i := 0; i < len(h); i++ {
+		if c := h[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return k, false // only the canonical lowercase form round-trips
+		}
+	}
+	if _, err := hex.Decode(k[:], []byte(h)); err != nil {
+		return k, false
+	}
+	return k, true
+}
+
+func lessKey(a, b digestKey) bool { return bytes.Compare(a[:], b[:]) < 0 }
+
+func keyString(k digestKey) string { return "sha256:" + hex.EncodeToString(k[:]) }
+
+// sameOr returns prev if it holds exactly what s does, else s.
+func (s digestSet) sameOr(prev digestSet) digestSet {
+	if !prev.full || len(prev.sha) != len(s.sha) || len(prev.odd) != len(s.odd) {
+		return s
+	}
+	for i := range s.sha {
+		if s.sha[i] != prev.sha[i] {
+			return s
+		}
+	}
+	for i := range s.odd {
+		if s.odd[i] != prev.odd[i] {
+			return s
+		}
+	}
+	return prev
+}
+
+// strings returns every digest, sorted.
+func (s digestSet) strings() []string {
+	out := make([]string, 0, len(s.sha)+len(s.odd))
+	for _, k := range s.sha {
+		out = append(out, keyString(k))
+	}
+	out = append(out, s.odd...)
 	sort.Strings(out)
 	return out
 }
 
-// diff returns what to add and remove to turn old into cur.
-func diff(old, cur map[string]bool) (add, del []string) {
-	for k := range cur {
-		if !old[k] {
+// diff returns what to add and remove to turn old into cur, sorted.
+func diff(old, cur digestSet) (add, del []string) {
+	i, j := 0, 0
+	for i < len(old.sha) || j < len(cur.sha) {
+		switch {
+		case i == len(old.sha):
+			add = append(add, keyString(cur.sha[j]))
+			j++
+		case j == len(cur.sha):
+			del = append(del, keyString(old.sha[i]))
+			i++
+		case old.sha[i] == cur.sha[j]:
+			i++
+			j++
+		case lessKey(old.sha[i], cur.sha[j]):
+			del = append(del, keyString(old.sha[i]))
+			i++
+		default:
+			add = append(add, keyString(cur.sha[j]))
+			j++
+		}
+	}
+	oldOdd := make(map[string]bool, len(old.odd))
+	for _, k := range old.odd {
+		oldOdd[k] = true
+	}
+	curOdd := make(map[string]bool, len(cur.odd))
+	for _, k := range cur.odd {
+		curOdd[k] = true
+		if !oldOdd[k] {
 			add = append(add, k)
 		}
 	}
-	for k := range old {
-		if !cur[k] {
+	for _, k := range old.odd {
+		if !curOdd[k] {
 			del = append(del, k)
 		}
 	}

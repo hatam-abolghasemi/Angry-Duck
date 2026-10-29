@@ -12,6 +12,7 @@ import (
 
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 )
 
@@ -248,6 +249,7 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 // Tick samples usage, removes images unused for UnusedFor, and, if the
 // disk is too full, removes more, oldest first.
 func (g *ImageGC) Tick(ctx context.Context) {
+	defer memlimit.Soon()
 	now := time.Now()
 	groups, inUse, err := g.sample(ctx, now)
 	if err != nil {
