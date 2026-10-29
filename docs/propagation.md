@@ -25,6 +25,8 @@ source:
   `PROPAGATE_PER_SOURCE` transfers at a time. There is no cluster-wide cap
   and no per-receiver cap: that per-source limit is the only one, so every
   holder's link is used and the transfers in flight grow with the holders.
+  Blobs up to `SPREAD_EXPRESS_MAX_MB` (32) have a budget of their own on
+  each source, so a 30 MB layer isn't stuck behind a 300 MB one.
 - **The registry only for what nobody has.** A registry pull is ordered
   only for a layer no node holds yet, at most `SPREAD_MAX_REGISTRY_PULLS`
   pulls at once cluster-wide (default: `RANK_TOP_N`). Nobody
@@ -48,6 +50,61 @@ source:
 
 Receivers are served in this order: nodes where a pod is already waiting
 for the image, then the nodes that lack the fewest bytes.
+
+## Streaming large blobs
+
+A node still receiving a blob of `SPREAD_STREAM_MIN_MB` (32) or more is a
+source for it too: a peer gets the bytes as they arrive there, instead of
+waiting a whole transfer per hop. A 300 MB layer then reaches the second
+node about when it reaches the first, not one transfer later.
+
+- **The blob is still the unit.** Every receiver writes the whole blob and
+  its containerd checks the digest at commit. The source reads the bytes
+  from containerd's own ingest file, up to what containerd has written, so
+  nothing is buffered or written twice.
+- **Holders first.** A node that holds the blob is always preferred. A
+  stream only goes to a node with no transfer of that blob yet, so the
+  registry-versus-peer race works as before, and never around in a circle.
+- **Chains.** A node streaming a blob streams it on too, so one blob can run
+  down a line of nodes at once, each a fraction of a second behind the
+  one before. `SPREAD_STREAM_MAX_DEPTH` caps the line; `0` (the default)
+  caps it only by the number of nodes.
+- **Joining, not racing.** A large blob whose registry pull is streamed on
+  isn't raced from the registry: other nodes join the stream instead of
+  splitting the registry's bandwidth, unless the pull is late (below).
+  Blobs nobody streams are raced as before.
+- **When the source stops.** If the source's own copy lands over its other
+  path, the stream goes on from that copy. If its transfer fails, the stream
+  is cut and the receiver reports it as the source's failure: the receiver
+  isn't backed off, gets the blob elsewhere right away, and that source
+  streams no more for the spread.
+- **Slow-chain guard.** A chain is only as fast as its slowest node, so
+  the controller watches for late transfers: running more than
+  `SPREAD_SLOW_FACTOR` (2) times their expected time, which is the blob's
+  size at the typical speed of their path, learned from finished
+  transfers (30 s while none has finished yet, never before 5 s). It
+  wakes up exactly when the next transfer would turn late.
+  - *A late registry pull* that is streamed on is raced from the registry
+    after all, by any node, those in its chain included. The pulling node
+    also gets the blob pushed from the winner, and every stream from it
+    moves to whichever of its copies is further ahead: the whole chain
+    speeds up without starting over.
+  - *A late stream* (a slow node somewhere up its chain) is offered a
+    restart from a node that holds the blob, at most every 10 s, never
+    from its own source, using one slot beyond `PROPAGATE_PER_SOURCE`.
+    The receiver decides, because only it knows how far and how fast its
+    stream is going: it restarts only if that should finish at least 25%
+    sooner, judging its own link by its fastest finished transfer, or,
+    without that history, keeping its stream while other transfers are
+    coming in too (its link is then the limit, and a restart would only
+    share it).
+- *A second copy that wouldn't help:* a node already receiving a blob
+  over one path is offered it over the other only if that should finish
+  clearly sooner, judged the same way. A node at its own link's limit
+  declines (asked again after 10 s) instead of splitting its link.
+- **Mixed versions.** Workers say whether they stream in their reports. A
+  worker without containerd's content store mounted, or older than 1.9.0,
+  neither streams nor is streamed to.
 
 ```mermaid
 sequenceDiagram
@@ -128,6 +185,8 @@ still lacks, and every transfer moving right now. See
 
 `SPREAD_ENABLED`, `SPREAD_MAX_REGISTRY_PULLS`, `SPREAD_RACE_PER_BLOB`,
 `SPREAD_RETRY_AFTER_S`, `SPREAD_BACKOFF_MAX_S`, `SPREAD_TRANSFER_TIMEOUT_S`,
+`SPREAD_STREAM_ENABLED`, `SPREAD_STREAM_MIN_MB`, `SPREAD_STREAM_MAX_DEPTH`,
+`SPREAD_EXPRESS_MAX_MB`, `SPREAD_SLOW_FACTOR`,
 and from propagation `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
 `PROPAGATE_PER_SOURCE`,
 `PROPAGATE_MAX_UTILIZATION`, `PROPAGATE_EXCLUDE_NODE_SUBSTRINGS`. The

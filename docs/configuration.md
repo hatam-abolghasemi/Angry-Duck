@@ -69,10 +69,15 @@ How pushed images reach every node blob by blob. See
 |---|---|---|
 | `SPREAD_ENABLED` | `true` | Spread blob by blob. Needs `RANK_BY_LAYERS=true` and the shared token; otherwise, and for images whose manifest can't be read, pushes are seeded and propagated whole. Read by the controller and the worker. |
 | `SPREAD_MAX_REGISTRY_PULLS` | `RANK_TOP_N` | Blob pulls from the registry in flight cluster-wide. A node may run several. |
-| `SPREAD_RACE_PER_BLOB` | `2` | Registry pulls of one blob at once: an idle node may race a slow one. |
+| `SPREAD_RACE_PER_BLOB` | `2` | Registry pulls of one blob at once: an idle node may race a slow one. A blob whose registry pull is streamed on isn't raced. |
 | `SPREAD_RETRY_AFTER_S` | `15` | Backoff after a node fails a transfer; doubles per failure. |
 | `SPREAD_BACKOFF_MAX_S` | `600` | Cap for that doubling. |
 | `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller forgets a transfer nobody reported on a minute after. |
+| `SPREAD_STREAM_ENABLED` | `true` | A node still receiving a large blob serves it on to peers as the bytes arrive ([streaming](propagation.md#streaming-large-blobs)). Read by the controller and the worker; a worker streams only with containerd's content store mounted. |
+| `SPREAD_STREAM_MIN_MB` | `32` | Only blobs at least this large are streamed; smaller ones go node to node whole, as before. |
+| `SPREAD_STREAM_MAX_DEPTH` | `0` | Longest chain of nodes receiving a blob through each other: 1 is the node getting it from the registry or a full copy, 2 a node streaming from it, and so on. `0`: no cap but the number of nodes. `1`: nothing is streamed. |
+| `SPREAD_SLOW_FACTOR` | `2` | Slow-chain guard: a transfer running more than this many times its expected time (its size at the typical speed of its path) is late. A late streamed registry pull is raced; a late stream is offered a restart from a holder, which the receiver takes only if it should finish sooner. `0` turns the guard off. |
+| `SPREAD_EXPRESS_MAX_MB` | `32` | Blobs up to this size have their own `PROPAGATE_PER_SOURCE` slots on each source, so small layers don't wait behind large transfers. `0`: one budget for all. |
 
 Spread also uses `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
 `PROPAGATE_PER_SOURCE`, `PROPAGATE_MAX_UTILIZATION` and

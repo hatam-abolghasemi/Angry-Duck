@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.9.0
+
+Large layers reach every node much sooner: a node still receiving a blob
+serves it on as the bytes arrive, small layers no longer wait behind large
+ones, and the registry serves each blob once. In a 6-node lab (400 Mbit
+links, a 152 MB image with a 120 MB layer, default settings) the image
+reached every node in 10.2 s on average instead of 16.1 s with 1.8.15, with
+the registry serving it once every time and no more worker CPU or memory.
+
+### Added
+
+- **Streaming large blobs.** A node receiving a blob of
+  `SPREAD_STREAM_MIN_MB` (32) or more, from the registry, a full copy or
+  another stream, is a source for it too. The peer gets the bytes as
+  containerd writes them, read from containerd's own ingest file: nothing
+  is buffered or written twice, and every receiver's containerd checks the
+  digest at commit as before. Nodes holding the blob are still preferred, a
+  stream only goes to a node with no transfer of that blob yet, never in a
+  circle. Chains are capped by `SPREAD_STREAM_MAX_DEPTH`, `0` (default):
+  only by the number of nodes.
+- **A broken stream is the source's failure.** If the source's copy lands
+  over its other path, the stream goes on from it. If its transfer fails,
+  the stream is cut, the receiver reports `upstream`, isn't backed off and
+  gets the blob elsewhere right away; that source streams no more for the
+  spread.
+- **Slow-chain guard.** A chain is only as fast as its slowest node, so
+  the controller watches for transfers running more than
+  `SPREAD_SLOW_FACTOR` (2) times their expected time (the blob's size at
+  the typical speed of its path, learned from finished transfers), and
+  wakes exactly when the next one would turn late. A late streamed
+  registry pull is raced from the registry after all, and every stream
+  from the slow node moves to whichever of its copies is further ahead,
+  so the chain speeds up without starting over. A late peer transfer (a
+  stream behind a slow node, or a copy from a slow holder) is offered a
+  restart from another holder; the receiver takes it only if it should
+  finish clearly sooner, judging its own link by its fastest finished
+  transfer, so a node whose own link is the limit keeps what it has. The
+  same judgement applies to the registry-versus-peer race: a node at its
+  own link's limit declines a second copy instead of splitting its link.
+- **Express slots for small blobs.** Blobs up to `SPREAD_EXPRESS_MAX_MB`
+  (32) have their own `PROPAGATE_PER_SOURCE` budget on each source, so a
+  30 MB layer isn't stuck behind a 300 MB one on the only free holder.
+- `SPREAD_STREAM_ENABLED` (`true`), `SPREAD_STREAM_MIN_MB` (`32`),
+  `SPREAD_STREAM_MAX_DEPTH` (`0`), `SPREAD_EXPRESS_MAX_MB` (`32`),
+  `SPREAD_SLOW_FACTOR` (`2`).
+- `angryduck_worker_spread_streamed_bytes_total`,
+  `angryduck_controller_spread_stream_orders_total`,
+  `angryduck_controller_spread_slow_total{action}`, and
+  `result="upstream"` in `angryduck_controller_spread_transfers_total`.
+- `/status`: `stream` on each transfer streamed from a node still
+  receiving it.
+
+### Changed
+
+- **No registry race for a streamed blob, unless it is late.** A large
+  blob whose registry pull is streamed on is no longer raced by a second
+  registry pull: other nodes join the stream instead of splitting the
+  registry's bandwidth. The slow-chain guard races it once it is late.
+  Blobs nobody streams (small ones, or with streaming off) are raced as
+  before. In the lab, 1.8.15 pulled the 120 MB layer twice in 3 of 6 runs.
+
+### Compatibility
+
+- Workers report whether they stream; the controller streams only between
+  workers that do. A worker without containerd's content store mounted, or
+  older than 1.9.0, neither streams nor is streamed to, so a rollout can go
+  in any order. All new wire fields are optional. Spread transfers carry
+  an ID that workers echo in their reports; reports without one are
+  matched by blob and path as before.
+
 ## 1.8.15
 
 The blob is the unit everywhere: a node now receives any number of

@@ -9,7 +9,7 @@ Port `8080`.
 | `POST /webhook/preheat` | webhook token, when configured | Body `{"image": "..."}`. Returns `202` with the seed nodes, or `503` when no worker is fresh. Short names are normalized, so `nginx` becomes `docker.io/library/nginx:latest`. Starts the spread; `ordered_nodes` are the nodes pulling from the registry first. |
 | `POST /report` | token, when configured | Worker reports. |
 | `GET /layers/holders?digest=&exclude=` | token | Nodes holding a blob, for mirrors. |
-| `POST /spread/done` | token | Workers report each spread transfer's end: `{"node", "job", "digest", "path", "result", "bytes", "seconds"}`. |
+| `POST /spread/done` | token | Workers report each spread transfer's end: `{"node", "job", "digest", "path", "result", "bytes", "seconds", "upstream", "id"}`. `upstream` marks a stream that broke because its source's own transfer stopped; `id` is the order's. |
 | `GET /status` | none | Workers, the preheat target, stuck pulls (`rescues`), active `spreads` and whole-image `propagations`. |
 | `GET /metrics` | none | Prometheus metrics. |
 | `GET /healthz` | none | Liveness and readiness. |
@@ -40,10 +40,10 @@ shared token as `Authorization: Bearer <token>`.
 | `POST /blobs/export` | token | peer | Body `{"image", "platform", "digests"}`. Streams a partial OCI archive with only those blobs. |
 | `POST /snapshots/export` | token | peer | Body `{"image", "platform", "chain_id", "format"}`. Streams one layer as a gzip-compressed tar: containerd's OCI layer diff with a SHA-256 trailer for `"format": "oci-layer"`, the overlayfs directory format for pre-1.8.6 receivers. |
 | `GET /mirror/content/<digest>` | token | peer mirror | Content for other nodes' mirrors. |
-| `POST /spread/fetch` | token | controller | Body `{"job", "image", "digest", "size", "path": "registry" \| "peer", "peer"}`. Starts fetching one blob (`202`); any number of different blobs run at once. Answers `200` with `present` if it's already here, `409` if this blob is already coming over that path. A `/spread/done` to the controller follows. |
+| `POST /spread/fetch` | token | controller | Body `{"job", "image", "digest", "size", "path": "registry" \| "peer", "peer", "stream", "id", "replace", "expect_rate"}`; `stream` means the peer is still receiving the blob itself. With `replace`, a transfer of this blob already running over this path is restarted from `peer` only if that should finish clearly sooner at `expect_rate` bytes/s; otherwise `409` with `kept`. Starts fetching one blob (`202`); any number of different blobs run at once. Answers `200` with `present` if it's already here, `409` if this blob is already coming over that path. A `/spread/done` to the controller follows. |
 | `POST /spread/finalize` | token | controller | Body `{"job", "image", "top_type", "top_digest", "top_size", "metadata"}`. Registers the image from its metadata blobs, each checked against its digest, once every layer is here. |
 | `POST /spread/drop` | token | controller | Body `{"job"}`. Cancels the job's transfers here and releases the blobs held for it. |
-| `GET /spread/content/<digest>` | token | peer | One committed blob, for a peer's spread fetch. |
+| `GET /spread/content/<digest>` | token | peer | One blob, for a peer's spread fetch: committed, or still arriving here, then streamed as it arrives with `Angryduck-Stream: 1` (cut short if this node's own transfer fails). |
 | `GET /metrics` | none | Prometheus | Prometheus metrics. |
 | `GET /healthz` | none | kubelet | Liveness and readiness. |
 

@@ -46,7 +46,8 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 - **Spread content is verified, never trusted.** A blob a worker fetches,
   from the registry or a peer, is committed only if its size and SHA-256
   match the digest the controller read from the registry; a mismatch is
-  discarded on the spot. The metadata a finalize carries is checked against
+  discarded on the spot. A blob streamed from a peer still receiving it is
+  checked the same way on the receiver, whatever the source saw. The metadata a finalize carries is checked against
   its digests before anything is imported. Orders are refused unless their
   digest, size and job ID are well formed, and a fetch can't exceed 64 GiB. Traffic is plain HTTP between pod IPs; use a CNI with
   encryption between nodes if the network itself isn't trusted.

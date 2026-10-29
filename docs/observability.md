@@ -98,7 +98,9 @@ what is moving, not history:
 | `angryduck_controller_spread_node_missing_layers` | gauge | `image`, `node` | Layers each node still lacks. Nodes not done and not too full only. |
 | `angryduck_controller_spread_node_missing_bytes` | gauge | `image`, `node` | Bytes each node still lacks. Nodes not done and not too full only. |
 | `angryduck_controller_spread_transfer_bytes` | gauge | `image`, `node`, `path`, `source`, `blob` | One series per transfer running now, its blob's size. At most two per node. |
-| `angryduck_controller_spread_transfers_total` | counter | `path`, `result` | Transfers ended: `ok`, `failed`, `cancelled` (lost a race), `present`, `rejected`. |
+| `angryduck_controller_spread_transfers_total` | counter | `path`, `result` | Transfers ended: `ok`, `failed`, `cancelled` (lost a race), `present`, `rejected`, `upstream` (a stream broke because its source's own transfer stopped). |
+| `angryduck_controller_spread_stream_orders_total` | counter | | Peer transfers ordered from a node still receiving the blob, which streams it on. |
+| `angryduck_controller_spread_slow_total` | counter | `action` | What the slow-chain guard did about late transfers: `race` (a late streamed registry pull raced), `replaced` (a late stream restarted from a holder), `kept` (the receiver judged its stream finishes sooner). |
 | `angryduck_controller_spread_bytes_total` | counter | `path` | Bytes received for spreads. `path="registry"` is everything the registry served for them. |
 | `angryduck_controller_spread_finalizes_total` | counter | `result` | Nodes registering a spread image. |
 | `angryduck_controller_spreads_total` | counter | `result` | Spreads ended: `complete`, `superseded`, `expired`. |
@@ -119,6 +121,7 @@ what is moving, not history:
 | `angryduck_worker_gc_stalled` | gauge | `node` | 1 while disk-pressure removals are paused because they freed nothing. |
 | `angryduck_worker_spread_transfers_total` | counter | `node`, `path`, `result` | Spread blobs fetched, by `path` (`registry`, `peer`) and `result` (`ok`, `failed`, `cancelled`). |
 | `angryduck_worker_spread_bytes_total` | counter | `node`, `path` | Spread bytes received (`registry`, `peer`) or `served` to peers. |
+| `angryduck_worker_spread_streamed_bytes_total` | counter | `node` | Bytes served to peers from blobs this node was still receiving (part of `served`). |
 | `angryduck_worker_spread_transfer_milliseconds_total` | counter | `node`, `path` | Time spent transferring. Bytes divided by it is the throughput per path. |
 | `angryduck_worker_spread_active` | gauge | `node`, `path` | Blobs coming in right now on that path (any number; one blob at most once per path). |
 | `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
