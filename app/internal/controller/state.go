@@ -31,6 +31,8 @@ type workerEntry struct {
 	Images   []string
 	invHash  string // InventoryHash of the inventory held
 	LastSeen time.Time
+	// Streams: the worker serves spread blobs it is still receiving.
+	Streams bool
 }
 
 // hasSorted reports whether sorted list contains s.
@@ -218,6 +220,7 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 	w.Address = rep.Address
 	w.Utilization = rep.Utilization
 	w.LastSeen = rep.Timestamp
+	w.Streams = rep.Streams
 
 	// A worker omits an unchanged inventory once we've echoed its hash.
 	// Workers that predate this never omit it.

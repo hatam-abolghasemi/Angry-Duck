@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,15 @@ var (
 		"angryduck_controller_spread_last_duration_seconds",
 		"How long the last complete spread took, from the preheat to the last node registering the image.",
 	)
+	spreadStreamOrdersTotal = metrics.NewCounterVec(
+		"angryduck_controller_spread_stream_orders_total",
+		"Peer transfers ordered from a node still receiving the blob itself, which streams it on.",
+	)
+	spreadSlowTotal = metrics.NewCounterVec(
+		"angryduck_controller_spread_slow_total",
+		"What the slow-chain guard did about late transfers: race (a late streamed registry pull raced from the registry), replaced (a late transfer restarted from a holder), kept (the receiver judged it finishes sooner as it is).",
+		"action",
+	)
 )
 
 // ImageResolver returns what an image is made of, from its registry.
@@ -95,6 +105,49 @@ type SpreaderConfig struct {
 	ResolveTimeout  time.Duration
 	Window          time.Duration // 0: until done or superseded
 	Platform        string
+	// Streaming: with Stream on, a node still receiving a blob of at least
+	// StreamMinBytes may serve it on, to nodes that have no transfer of it
+	// yet. Chains of nodes receiving through each other are at most
+	// StreamMaxDepth long (the node getting it from the registry or a full
+	// copy is 1); 0 caps them only by the number of nodes.
+	Stream         bool
+	StreamMinBytes int64
+	StreamMaxDepth int
+	// ExpressMaxBytes: blobs up to this size have their own PerSource
+	// budget on each source, so they don't wait behind large transfers.
+	// 0: one budget for all.
+	ExpressMaxBytes int64
+	// SlowFactor: a transfer running more than this many times its
+	// expected time (its size at the typical speed of its path, learned
+	// from finished transfers) is late, and the slow-chain guard acts on
+	// it. 0: no guard.
+	SlowFactor float64
+}
+
+// Slow-chain guard timing.
+const (
+	slowFloor     = 5 * time.Second  // nothing is late before this
+	slowNoRate    = 30 * time.Second // late without a typical speed to judge by
+	replaceEvery  = 10 * time.Second // a late transfer is offered a restart at most this often
+	rateMinBytes  = 4 << 20          // transfers smaller than this don't teach typical speeds
+	rateSmoothing = 0.3              // weight of the newest transfer in a typical speed
+)
+
+// express reports whether a blob of size uses the express budget.
+func (s *Spreader) express(size int64) bool {
+	return s.cfg.ExpressMaxBytes > 0 && size <= s.cfg.ExpressMaxBytes
+}
+
+// streamDepth is the chain cap in effect: StreamMaxDepth, or with 0 one
+// more than the nodes there are (no cap). Below 2 nothing is streamed.
+func (s *Spreader) streamDepth(nodes int) int {
+	if !s.cfg.Stream {
+		return 0
+	}
+	if s.cfg.StreamMaxDepth > 0 {
+		return s.cfg.StreamMaxDepth
+	}
+	return nodes + 1
 }
 
 // Spreader spreads a pushed image to every eligible node blob by blob.
@@ -119,6 +172,16 @@ type SpreaderConfig struct {
 // Peer transfers go to the rarest layer first (fewest holders), so new
 // sources appear where they are scarcest. Nodes with a pod waiting for the
 // image come first, then the nodes that lack the fewest bytes.
+//
+// A node still receiving a large blob is a source for it too, if its
+// worker streams (see SpreaderConfig.StreamMinBytes): the receiver gets the
+// bytes as they arrive there instead of waiting a whole transfer per hop.
+// Nodes that hold the blob come first. A stream only goes to a node with
+// no transfer of that blob yet whose worker streams too (it tells a broken
+// stream from its own failure), never around in a circle, and chains stay
+// within StreamMaxDepth. When a stream breaks because its source's own
+// transfer stopped, the receiver isn't backed off and that source streams
+// no more for the job.
 //
 // When a node holds every layer (its blob or its unpacked snapshot), it
 // gets the image's metadata, a few KB read from the registry once, and
@@ -148,6 +211,13 @@ type Spreader struct {
 
 	// Scratch reused across ticks (tick runs under mu).
 	present, blob []bool
+
+	// Typical speed per path (registry, peer), bytes per second, from
+	// finished transfers of at least rateMinBytes. Streams don't count:
+	// their speed is their source's. Under mu.
+	rates map[string]float64
+	// lateTimer wakes the loop when the next running transfer turns late.
+	lateTimer *time.Timer
 }
 
 type sjob struct {
@@ -160,6 +230,15 @@ type sjob struct {
 	nodes     map[string]*snode
 	got       []map[string]bool // per layer: nodes that reported it (inventories lag)
 	regFails  []int             // per layer: failed registry pulls
+	noStream  map[string]bool   // nodes whose stream broke on their side: not streaming sources for this job
+	seq       int               // transfer IDs
+}
+
+// newXfer returns a transfer of this job with a fresh ID.
+func (j *sjob) newXfer(x sxfer) *sxfer {
+	j.seq++
+	x.id = j.id + "-" + strconv.Itoa(j.seq)
+	return &x
 }
 
 type snode struct {
@@ -171,19 +250,25 @@ type snode struct {
 	skipped    bool // too full, as of the last tick
 	skipLogged bool // the skip was logged (once per spread)
 	done       bool
-	touched    bool            // was ordered something: has blobs to release if the job ends early
-	recorded   bool            // its delivery is in the image history
-	paths      map[string]bool // paths its blobs came over (registry, peer)
-	received   pathTotals      // bytes and time received per path, for the history
+	touched    bool              // was ordered something: has blobs to release if the job ends early
+	recorded   bool              // its delivery is in the image history
+	paths      map[string]bool   // paths its blobs came over (registry, peer)
+	declined   map[int]time.Time // per layer: a second copy declined (the running one finishes sooner) until then
+	received   pathTotals        // bytes and time received per path, for the history
 	fails      int
 	next       time.Time // no new orders before this
 }
 
 type sxfer struct {
-	layer int // -1: a whole-image transfer (fallback)
-	path  string
-	from  string // registry, or the sending node
-	at    time.Time
+	layer    int // -1: a whole-image transfer (fallback)
+	path     string
+	from     string // registry, or the sending node
+	at       time.Time
+	stream   bool // from is still receiving the blob and streams it on
+	accepted bool // the worker took the order: peers may stream from it
+	id       string
+	replaces *sxfer    // a restart offered for this late transfer (see sendFetch)
+	offered  time.Time // last restart offered for it
 }
 
 func (n *snode) busy() bool { return len(n.xfers) > 0 }
@@ -399,6 +484,10 @@ func (s *Spreader) tick(ctx context.Context) {
 		if s.published {
 			s.resetMetricsLocked()
 		}
+		if s.lateTimer != nil {
+			s.lateTimer.Stop()
+			s.lateTimer = nil
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -427,13 +516,18 @@ func (s *Spreader) tick(ctx context.Context) {
 	// Load across every job, recomputed: nothing to drift when a report
 	// is lost.
 	var regBusy int
-	serving := map[string]int{}
+	serving := map[string]int{} // per source: transfers of large blobs (and whole images)
+	express := map[string]int{} // per source: transfers of small blobs (see ExpressMaxBytes)
 	for _, j := range jobs {
 		for _, n := range j.nodes {
 			for _, x := range n.xfers {
-				if x.path == model.SpreadPathRegistry {
+				switch {
+				case x.path == model.SpreadPathRegistry:
 					regBusy++
-				} else if x.from != "" {
+				case x.from == "":
+				case x.layer >= 0 && s.express(j.res.Layers[x.layer].Size):
+					express[x.from]++
+				default:
 					serving[x.from]++
 				}
 			}
@@ -444,11 +538,12 @@ func (s *Spreader) tick(ctx context.Context) {
 	var drops []dropOrder
 	s.resetMetricsLocked()
 	for _, j := range jobs {
-		o, d := s.planLocked(j, fresh, byNode, ids, waiting[j.image], now, &regBusy, serving)
+		o, d := s.planLocked(j, fresh, byNode, ids, waiting[j.image], now, &regBusy, serving, express)
 		orders = append(orders, o...)
 		drops = append(drops, d...)
 	}
 	s.published = len(s.jobs) > 0
+	s.wakeForLateLocked(jobs, now)
 	s.mu.Unlock()
 
 	s.sendDrops(drops)
@@ -461,7 +556,7 @@ func (s *Spreader) tick(ctx context.Context) {
 // planLocked updates one job from the latest inventories and decides its
 // next orders. Caller holds s.mu.
 func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*workerEntry, ids []string, waiting map[string]bool,
-	now time.Time, regBusy *int, serving map[string]int) ([]order, []dropOrder) {
+	now time.Time, regBusy *int, serving, express map[string]int) ([]order, []dropOrder) {
 	layers := j.res.Layers
 	nl := len(layers)
 	index := s.registry.Layers()
@@ -600,9 +695,15 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 	}
 
 	// Registry pulls per layer right now, and the oldest one's start.
+	// regStreamed: a node pulling the layer streams it on, so other nodes
+	// join that stream instead of racing it for the registry's bandwidth,
+	// unless the pull is late (regLate): then it is raced, by any node,
+	// those streaming it included.
 	regPulls := make([]int, nl)
 	regSince := make([]time.Time, nl)
-	for _, n := range j.nodes {
+	regStreamed := make([]bool, nl)
+	regLate := make([]bool, nl)
+	for node, n := range j.nodes {
 		for _, x := range n.xfers {
 			if x.path != model.SpreadPathRegistry || x.layer < 0 {
 				continue
@@ -611,6 +712,14 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			regPulls[i]++
 			if regSince[i].IsZero() || x.at.Before(regSince[i]) {
 				regSince[i] = x.at
+			}
+			if s.cfg.Stream && layers[i].Size >= s.cfg.StreamMinBytes && !j.noStream[node] {
+				if w := byNode[node]; w != nil && w.Streams {
+					regStreamed[i] = true
+				}
+			}
+			if s.lateLocked(x, layers[i].Size, now) {
+				regLate[i] = true
 			}
 		}
 	}
@@ -636,31 +745,47 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 
 	// East-west: rarest layer first, then largest, from the least busy
 	// holder. One new transfer per node per round, until nothing more fits.
+	maxDepth := s.streamDepth(len(fresh))
+	streamers := s.streamersLocked(j, holders, byNode, maxDepth)
+	// load is the budget a transfer of layer i counts against.
+	load := func(i int) map[string]int {
+		if s.express(layers[i].Size) {
+			return express
+		}
+		return serving
+	}
 	peerOrder := func(nd need) bool {
 		n, w := nd.n, nd.w
-		best, src := -1, ""
+		best, src, stream := -1, "", false
 		for _, i := range nd.missing {
-			if n.running(i, model.SpreadPathPeer) {
+			if n.running(i, model.SpreadPathPeer) || now.Before(n.declined[i]) {
 				continue
 			}
-			h := pickSource(holders[i], w.NodeID, serving, s.cfg.PerSource)
+			h, st := pickSource(holders[i], w.NodeID, load(i), s.cfg.PerSource), false
+			if h == "" && w.Streams && !n.hasLayer(i) {
+				h = j.pickStreamer(streamers[i], i, w.NodeID, load(i), s.cfg.PerSource, maxDepth)
+				st = h != ""
+			}
 			if h == "" {
 				continue
 			}
 			if best < 0 || len(holders[i]) < len(holders[best]) ||
 				len(holders[i]) == len(holders[best]) && layers[i].Size > layers[best].Size {
-				best, src = i, h
+				best, src, stream = i, h, st
 			}
 		}
 		if best < 0 {
 			return false
 		}
-		x := &sxfer{layer: best, path: model.SpreadPathPeer, from: src, at: now}
+		x := j.newXfer(sxfer{layer: best, path: model.SpreadPathPeer, from: src, at: now, stream: stream})
 		n.xfers, n.touched = append(n.xfers, x), true
-		serving[src]++
+		load(best)[src]++
+		if stream {
+			spreadStreamOrdersTotal.Inc()
+		}
 		orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
 			fetch: &model.SpreadFetch{Job: j.id, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathPeer,
-				Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}}})
+				Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}, Stream: stream, ID: x.id, ExpectRate: s.rates[model.SpreadPathPeer]}})
 		return true
 	}
 	// North-south: only blobs no node holds. Unstarted ones first, largest
@@ -673,7 +798,8 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 		best := -1
 		for _, i := range nd.missing {
 			if len(holders[i]) > 0 || (fullHolder && j.regFails[i] >= 3) || regPulls[i] >= s.cfg.RacePerBlob ||
-				n.running(i, model.SpreadPathRegistry) {
+				regPulls[i] > 0 && regStreamed[i] && !regLate[i] || n.running(i, model.SpreadPathRegistry) ||
+				n.streaming(i) && !regLate[i] {
 				continue
 			}
 			if best < 0 || betterPull(i, best, regPulls, regSince, layers) {
@@ -683,15 +809,22 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 		if best < 0 {
 			return false
 		}
-		x := &sxfer{layer: best, path: model.SpreadPathRegistry, from: model.SpreadPathRegistry, at: now}
+		x := j.newXfer(sxfer{layer: best, path: model.SpreadPathRegistry, from: model.SpreadPathRegistry, at: now})
 		n.xfers, n.touched = append(n.xfers, x), true
 		*regBusy++
+		if regPulls[best] > 0 && regStreamed[best] {
+			spreadSlowTotal.Inc("race")
+			logging.Infof("angryduck-controller: spread: registry pull of %s of image=%s is late; node=%s races it", layers[best].Digest, j.image, w.NodeID)
+		}
 		regPulls[best]++
+		if s.cfg.Stream && layers[best].Size >= s.cfg.StreamMinBytes && w.Streams {
+			regStreamed[best] = true
+		}
 		if regSince[best].IsZero() {
 			regSince[best] = now
 		}
 		orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
-			fetch: &model.SpreadFetch{Job: j.id, Image: j.image, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathRegistry}})
+			fetch: &model.SpreadFetch{Job: j.id, Image: j.image, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathRegistry, ID: x.id}})
 		return true
 	}
 	for more := true; more; {
@@ -702,6 +835,45 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			}
 			if regOrder(nd) {
 				more = true
+			}
+		}
+	}
+
+	// Slow-chain guard: a late peer transfer (a stream behind a slow node,
+	// or a copy from a slow holder) is offered a restart from another node
+	// that holds the blob. The receiver decides (it knows how far and how
+	// fast its transfer is going); see sendFetch.
+	if s.cfg.SlowFactor > 0 && s.rates[model.SpreadPathPeer] > 0 {
+		for _, nd := range needs {
+			n, w := nd.n, nd.w
+			if n.finalizing || !w.Streams { // workers before 1.9.0 can't take a restart offer
+				continue
+			}
+			for _, x := range append([]*sxfer(nil), n.xfers...) {
+				i := x.layer
+				if i < 0 || x.path != model.SpreadPathPeer || x.replaces != nil || !x.accepted || now.Sub(x.offered) < replaceEvery || n.offering(i) ||
+					!s.lateLocked(x, layers[i].Size, now) {
+					continue
+				}
+				// Never the late transfer's own source; one slot beyond
+				// PerSource: a holder busy feeding a slow receiver isn't
+				// using its link, and a restart frees a slot elsewhere.
+				var h string
+				for _, c := range holders[i] {
+					if c != x.from && c != w.NodeID && load(i)[c] < s.cfg.PerSource+1 && (h == "" || load(i)[c] < load(i)[h]) {
+						h = c
+					}
+				}
+				if h == "" {
+					continue
+				}
+				x.offered = now
+				y := j.newXfer(sxfer{layer: i, path: model.SpreadPathPeer, from: h, at: now, replaces: x})
+				n.xfers, n.touched = append(n.xfers, y), true
+				load(i)[h]++
+				orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: y, layer: i, digest: layers[i].Digest,
+					fetch: &model.SpreadFetch{Job: j.id, Digest: layers[i].Digest, Size: layers[i].Size, Path: model.SpreadPathPeer,
+						Peer: &model.Holder{NodeID: h, Address: byNode[h].Address}, ID: y.id, Replace: true, ExpectRate: s.rates[model.SpreadPathPeer]}})
 			}
 		}
 	}
@@ -734,7 +906,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			}
 		}
 		if len(sources) > 0 {
-			x := &sxfer{layer: -1, path: "image", from: sources[0].NodeID, at: now}
+			x := j.newXfer(sxfer{layer: -1, path: "image", from: sources[0].NodeID, at: now})
 			n.xfers, n.touched = append(n.xfers, x), true
 			serving[sources[0].NodeID]++
 			orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: -1, image: sources})
@@ -847,6 +1019,228 @@ func pickSource(holders []string, target string, serving map[string]int, perSour
 	return best
 }
 
+// lateLocked reports whether x, a transfer of size bytes, has run more
+// than SlowFactor times its expected time: size at the typical speed of
+// its path, or slowNoRate when that isn't known yet. Never before
+// slowFloor. Caller holds s.mu.
+func (s *Spreader) lateLocked(x *sxfer, size int64, now time.Time) bool {
+	after, ok := s.lateAfterLocked(x, size)
+	return ok && now.Sub(x.at) > after
+}
+
+// lateAfterLocked is how long x may run before it is late. ok is false
+// when the guard is off or x is a whole-image transfer.
+func (s *Spreader) lateAfterLocked(x *sxfer, size int64) (time.Duration, bool) {
+	if s.cfg.SlowFactor <= 0 || x.layer < 0 {
+		return 0, false
+	}
+	path := x.path
+	if path != model.SpreadPathRegistry {
+		path = model.SpreadPathPeer
+	}
+	rate := s.rates[path]
+	if rate <= 0 {
+		return slowNoRate, true
+	}
+	after := time.Duration(s.cfg.SlowFactor * float64(size) / rate * float64(time.Second))
+	if after < slowFloor {
+		after = slowFloor
+	}
+	return after, true
+}
+
+// wakeForLateLocked schedules a tick for when the next running transfer
+// turns late (or a late one may be offered a restart again), so the guard
+// acts then rather than at the next periodic tick. Caller holds s.mu.
+func (s *Spreader) wakeForLateLocked(jobs []*sjob, now time.Time) {
+	if s.lateTimer != nil {
+		s.lateTimer.Stop()
+		s.lateTimer = nil
+	}
+	if s.cfg.SlowFactor <= 0 {
+		return
+	}
+	var next time.Time
+	for _, j := range jobs {
+		for _, n := range j.nodes {
+			for _, x := range n.xfers {
+				after, ok := s.lateAfterLocked(x, j.res.Layers[max(x.layer, 0)].Size)
+				if !ok {
+					continue
+				}
+				at := x.at.Add(after)
+				if !at.After(now) {
+					if x.path != model.SpreadPathPeer || x.offered.IsZero() {
+						continue // late already: acted on this tick, or nothing to do
+					}
+					at = x.offered.Add(replaceEvery)
+				}
+				if at.After(now) && (next.IsZero() || at.Before(next)) {
+					next = at
+				}
+			}
+		}
+	}
+	if !next.IsZero() {
+		s.lateTimer = time.AfterFunc(next.Sub(now)+10*time.Millisecond, s.wakeup.wake)
+	}
+}
+
+// learnRateLocked folds a finished transfer into its path's typical speed.
+// Caller holds s.mu.
+func (s *Spreader) learnRateLocked(path string, bytes int64, seconds float64) {
+	if bytes < rateMinBytes || seconds <= 0 {
+		return
+	}
+	if s.rates == nil {
+		s.rates = map[string]float64{}
+	}
+	r := float64(bytes) / seconds
+	if old := s.rates[path]; old > 0 {
+		r = old + rateSmoothing*(r-old)
+	}
+	s.rates[path] = r
+}
+
+// offering reports whether a restart of layer is being offered.
+func (n *snode) offering(layer int) bool {
+	for _, x := range n.xfers {
+		if x.layer == layer && x.replaces != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// streaming reports whether layer is coming as a stream.
+func (n *snode) streaming(layer int) bool {
+	for _, x := range n.xfers {
+		if x.layer == layer && x.stream {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLayer reports whether layer is coming over any path.
+func (n *snode) hasLayer(layer int) bool {
+	for _, x := range n.xfers {
+		if x.layer == layer {
+			return true
+		}
+	}
+	return false
+}
+
+// streamer is a node receiving a layer that may stream it on.
+type streamer struct {
+	node  string
+	depth int // 1: receiving it from the registry or a full copy
+}
+
+// streamersLocked lists, per layer, the nodes that may stream it on: still
+// receiving it (an order their worker took), with a worker that streams,
+// a layer of at least StreamMinBytes, and room in the chain below
+// the chain cap. Nodes holding the layer aren't listed: they are holders.
+// Caller holds s.mu.
+func (s *Spreader) streamersLocked(j *sjob, holders [][]string, byNode map[string]*workerEntry, maxDepth int) [][]streamer {
+	out := make([][]streamer, len(j.res.Layers))
+	if maxDepth < 2 {
+		return out
+	}
+	for node, n := range j.nodes {
+		w := byNode[node]
+		if w == nil || !w.Streams || j.noStream[node] {
+			continue
+		}
+		for _, x := range n.xfers {
+			i := x.layer
+			if i < 0 || !x.accepted || j.res.Layers[i].Size < s.cfg.StreamMinBytes || contains(holders[i], node) {
+				continue
+			}
+			if d := j.depth(node, i, holders, maxDepth); d < maxDepth && !hasStreamer(out[i], node) {
+				out[i] = append(out[i], streamer{node: node, depth: d})
+			}
+		}
+	}
+	return out
+}
+
+func hasStreamer(list []streamer, node string) bool {
+	for _, st := range list {
+		if st.node == node {
+			return true
+		}
+	}
+	return false
+}
+
+// depth is how far node is from a full copy of layer i: 1 when it receives
+// it from the registry or a holder, one more than its source when it
+// receives a stream. Anything beyond max counts as max+1.
+func (j *sjob) depth(node string, i int, holders [][]string, max int) int {
+	return j.depthWithin(node, i, holders, max, max)
+}
+
+func (j *sjob) depthWithin(node string, i int, holders [][]string, max, budget int) int {
+	n := j.nodes[node]
+	if n == nil || budget <= 0 {
+		return max + 1
+	}
+	best := max + 1
+	for _, x := range n.xfers {
+		if x.layer != i {
+			continue
+		}
+		d := 1
+		if x.path == model.SpreadPathPeer && x.stream && !contains(holders[i], x.from) {
+			d = j.depthWithin(x.from, i, holders, max, budget-1) + 1
+		}
+		if d < best {
+			best = d
+		}
+	}
+	return best
+}
+
+// feeds reports whether target is upstream of node for layer i: node
+// receives the layer, directly or through other streams, from target.
+func (j *sjob) feeds(target, node string, i, hops int) bool {
+	n := j.nodes[node]
+	if n == nil || hops <= 0 {
+		return false
+	}
+	for _, x := range n.xfers {
+		if x.layer != i || x.path != model.SpreadPathPeer || !x.stream {
+			continue
+		}
+		if x.from == target || j.feeds(target, x.from, i, hops-1) {
+			return true
+		}
+	}
+	return false
+}
+
+// pickStreamer returns the streamer of layer i for target serving the
+// fewest transfers, the shortest chain first, among those below perSource
+// and never one target feeds (a circle). Caller holds s.mu.
+func (j *sjob) pickStreamer(list []streamer, i int, target string, serving map[string]int, perSource, maxDepth int) string {
+	best := -1
+	for k, st := range list {
+		if st.node == target || serving[st.node] >= perSource || j.feeds(target, st.node, i, maxDepth) {
+			continue
+		}
+		if best < 0 || st.depth < list[best].depth ||
+			st.depth == list[best].depth && serving[st.node] < serving[list[best].node] {
+			best = k
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	return list[best].node
+}
+
 func contains(list []string, s string) bool {
 	for _, x := range list {
 		if x == s {
@@ -939,7 +1333,25 @@ func (s *Spreader) sendFetch(ctx context.Context, o order) {
 		resp.Body.Close()
 	}
 	if err == nil && status == http.StatusAccepted && ack.Accepted {
-		return // its SpreadDone follows
+		// Its SpreadDone follows. From now on peers may stream from it: a
+		// streamable blob gets a round right away rather than at the next.
+		s.mu.Lock()
+		o.xfer.accepted = true
+		if old := o.xfer.replaces; old != nil {
+			// The receiver restarts from the holder; the late transfer
+			// reports its end (cancelled) under its own ID.
+			if n := s.slotOwnerLocked(o); n != nil {
+				n.remove(old)
+			}
+			o.xfer.replaces = nil
+			spreadSlowTotal.Inc("replaced")
+			logging.Infof("angryduck-controller: spread: node=%s restarts its late transfer of %s of image=%s from %s", o.node, o.digest, o.job.image, o.fetch.Peer.NodeID)
+		}
+		s.mu.Unlock()
+		if s.cfg.Stream && o.fetch.Size >= s.cfg.StreamMinBytes {
+			s.wakeup.wake()
+		}
+		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -953,6 +1365,20 @@ func (s *Spreader) sendFetch(ctx context.Context, o order) {
 		n.have[o.layer] = true
 		o.job.addGot(o.layer, o.node)
 		spreadTransfersTotal.Inc(o.fetch.Path, "present")
+	case err == nil && ack.Kept && o.xfer.replaces == nil:
+		// A second copy declined: the one already coming finishes sooner
+		// (a node at its own link's limit). Not offered again for a while.
+		if n.declined == nil {
+			n.declined = map[int]time.Time{}
+		}
+		n.declined[o.layer] = time.Now().Add(replaceEvery)
+		spreadSlowTotal.Inc("kept")
+	case o.xfer.replaces != nil:
+		// A restart offer declined: the running transfer goes on.
+		if err == nil && ack.Kept {
+			spreadSlowTotal.Inc("kept")
+			logging.Debugf("angryduck-controller: spread: node=%s keeps its transfer of %s: %s", o.node, o.digest, ack.Reason)
+		}
 	case err == nil && status == http.StatusConflict:
 		// The worker is already fetching this blob over this path, a
 		// transfer we don't know about (a controller restart, a cancelled
@@ -1105,7 +1531,11 @@ func (s *Spreader) done(d model.SpreadDone) {
 	if path != model.SpreadPathPeer {
 		path = model.SpreadPathRegistry
 	}
-	spreadTransfersTotal.Inc(path, d.Result)
+	result := d.Result
+	if result == model.SpreadResultFailed && d.Upstream {
+		result = "upstream"
+	}
+	spreadTransfersTotal.Inc(path, result)
 	if d.Bytes > 0 {
 		spreadBytesTotal.Add(d.Bytes, path)
 	}
@@ -1123,11 +1553,21 @@ func (s *Spreader) done(d model.SpreadDone) {
 	if d.Bytes > 0 || d.Seconds > 0 {
 		n.received = n.received.add(path, d.Bytes, d.Seconds)
 	}
+	// Workers that send IDs are matched by them: a restarted transfer's
+	// old one ends after the new one started, over the same path.
+	var ended *sxfer
 	for _, x := range n.xfers {
-		if x.layer == i && x.path == path {
+		if d.ID != "" && x.id == d.ID || d.ID == "" && x.layer == i && x.path == path {
+			ended = x
 			n.remove(x)
 			break
 		}
+	}
+	if d.ID != "" && ended == nil && d.Result != model.SpreadResultOK {
+		return // a transfer replaced or forgotten meanwhile: nothing to act on
+	}
+	if d.Result == model.SpreadResultOK && ended != nil && !ended.stream {
+		s.learnRateLocked(path, d.Bytes, d.Seconds)
 	}
 	switch d.Result {
 	case model.SpreadResultOK:
@@ -1141,6 +1581,16 @@ func (s *Spreader) done(d model.SpreadDone) {
 			n.fails = 0
 		}
 	case model.SpreadResultFailed:
+		if d.Upstream && ended != nil && ended.stream {
+			// The source's own transfer stopped: not this node's fault.
+			// Get it elsewhere right away; that source streams no more.
+			if j.noStream == nil {
+				j.noStream = map[string]bool{}
+			}
+			j.noStream[ended.from] = true
+			logging.Infof("angryduck-controller: spread: node=%s lost its stream of %s of image=%s: %s stopped receiving it (%s); fetching it elsewhere", d.Node, d.Digest, j.image, ended.from, d.Error)
+			break
+		}
 		if path == model.SpreadPathRegistry {
 			j.regFails[i]++
 		}
@@ -1172,7 +1622,7 @@ func (s *Spreader) Status() []model.SpreadStatus {
 				if x.layer >= 0 {
 					blob = j.res.Layers[x.layer].Digest
 				}
-				ns.Transfers = append(ns.Transfers, model.SpreadTransferStatus{Blob: blob, Path: x.path, From: x.from})
+				ns.Transfers = append(ns.Transfers, model.SpreadTransferStatus{Blob: blob, Path: x.path, From: x.from, Stream: x.stream})
 				switch {
 				case x.path == model.SpreadPathRegistry && ns.Registry == "":
 					ns.Registry = blob

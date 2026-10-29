@@ -269,6 +269,25 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		ResolveTimeout:  config.Duration("RANK_RESOLVE_TIMEOUT_S", 5),
 		Window:          config.Duration("PROPAGATE_WINDOW_S", 0),
 		Platform:        platform,
+		Stream:          config.Bool("SPREAD_STREAM_ENABLED", true),
+		StreamMinBytes:  int64(config.Int("SPREAD_STREAM_MIN_MB", 32)) << 20,
+		StreamMaxDepth:  config.Int("SPREAD_STREAM_MAX_DEPTH", 0),
+		ExpressMaxBytes: int64(config.Int("SPREAD_EXPRESS_MAX_MB", 32)) << 20,
+		SlowFactor:      config.Float("SPREAD_SLOW_FACTOR", 2),
+	}
+	switch {
+	case !cfg.Stream:
+		log.Println("angryduck-controller: spread streaming off: peers serve only blobs they hold")
+	case cfg.StreamMaxDepth > 0:
+		log.Printf("angryduck-controller: spread streams blobs of %d MiB and more from nodes still receiving them, chains up to %d nodes", cfg.StreamMinBytes>>20, cfg.StreamMaxDepth)
+	default:
+		log.Printf("angryduck-controller: spread streams blobs of %d MiB and more from nodes still receiving them, chains as long as the cluster", cfg.StreamMinBytes>>20)
+	}
+	if cfg.SlowFactor > 0 {
+		log.Printf("angryduck-controller: slow-chain guard on: a transfer taking over %.1fx its expected time is raced or offered a restart", cfg.SlowFactor)
+	}
+	if cfg.ExpressMaxBytes > 0 {
+		log.Printf("angryduck-controller: blobs up to %d MiB have their own per-source slots, beside large transfers", cfg.ExpressMaxBytes>>20)
 	}
 	return controller.NewSpreader(registry, rc, token, cfg)
 }
