@@ -124,6 +124,7 @@ what is moving, not history:
 | `angryduck_worker_spread_streamed_bytes_total` | counter | `node` | Bytes served to peers from blobs this node was still receiving (part of `served`). |
 | `angryduck_worker_spread_transfer_milliseconds_total` | counter | `node`, `path` | Time spent transferring. Bytes divided by it is the throughput per path. |
 | `angryduck_worker_spread_active` | gauge | `node`, `path` | Blobs coming in right now on that path (any number; one blob at most once per path). |
+| `angryduck_worker_page_cache_released_bytes_total` | counter | `node` | Page cache handed back after serving blob files: the pages this worker's reads brought in, once the file was idle for `PAGE_CACHE_RELEASE_AFTER_S`. |
 | `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
 | `angryduck_worker_spread_finalizing` | gauge | `node` | Images being registered (imported and unpacked) right now. Different images run side by side. |
 | `angryduck_worker_mirror_requests_total` | counter | `node`, `kind`, `result` | Mirror requests (`blob`, `manifest`): `local`, `peer`, `miss`, `error`. |
@@ -150,13 +151,18 @@ The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `angryduck_build_info` | gauge | `component`, `version`, `node` | One series per process: its version, and as the value the Unix time it started. |
-| `angryduck_process_memory_bytes` | gauge | `component`, `kind` | Refreshed every 15s. `rss_anon`: memory the process really holds. `rss_file`: its own code, shared and reclaimable by the kernel. `heap_live`: what the Go heap needs right now. `heap_retained`: freed heap kept for reuse. `heap_released`: already returned to the OS. `stacks`: goroutine stacks. |
+| `angryduck_process_memory_bytes` | gauge | `component`, `kind` | Refreshed every 15s. `rss_anon`: memory the process really holds. `rss_file`: its own code, shared and reclaimable by the kernel. `heap_live`: what the Go heap needs right now. `heap_retained`: freed heap kept for reuse. `heap_released`: already returned to the OS. `stacks`: goroutine stacks. From the container's cgroup: `working_set`, what `kubectl top` and `container_memory_working_set_bytes` show, and `page_cache`, the file cache charged to the container (files it read, its own binary). |
 
 `rss_anon` is the number to size against; container memory usage
-(`container_memory_working_set_bytes`) also counts `rss_file`, which the kernel
-can drop and reload at will. Once a minute, if `heap_retained` is above 1 MiB,
-the process hands it back to the OS, so after a burst `rss_anon` returns to
-near its idle level.
+(`container_memory_working_set_bytes`, `working_set` here) also counts
+`rss_file`, which the kernel can drop and reload at will, and the page cache
+of files the container read. A few seconds after a burst of work ends (a
+transfer, a request, a pass over the images), and at least once a minute, if
+`heap_retained` is above 1 MiB, the process hands it back to the OS, so
+`rss_anon` returns to near its idle level. A worker also gives back the page
+cache its blob reads brought in once a blob has been idle for
+`PAGE_CACHE_RELEASE_AFTER_S`, so serving images doesn't leave its
+`working_set` high.
 
 Useful queries:
 

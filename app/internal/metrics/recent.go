@@ -44,6 +44,10 @@ type RecentGaugeVec struct {
 	mu     sync.Mutex
 	values map[string]recentValue
 	now    func() time.Time
+	// expiry drops events past EventTTL even when nothing scrapes this
+	// process (no Prometheus yet, a scrape outage): otherwise they would
+	// pile up to maxRecentSeries and stay. nil while no event is held.
+	expiry *time.Timer
 }
 
 type recentValue struct {
@@ -77,6 +81,9 @@ func (g *RecentGaugeVec) update(labelValues []string, v float64, held bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.values[key] = recentValue{v: v, at: g.now(), held: held}
+	if !held && g.expiry == nil {
+		g.expiry = time.AfterFunc(EventTTL(), g.expire)
+	}
 	if len(g.values) > maxRecentSeries {
 		g.pruneLocked()
 		for len(g.values) > maxRecentSeries {
@@ -97,6 +104,24 @@ func (g *RecentGaugeVec) Delete(labelValues ...string) {
 	g.mu.Lock()
 	delete(g.values, key)
 	g.mu.Unlock()
+}
+
+// expire drops expired events, and comes back while any event is left.
+func (g *RecentGaugeVec) expire() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.expiry = nil
+	g.pruneLocked()
+	for _, rv := range g.values {
+		if !rv.held {
+			ttl := EventTTL()
+			if ttl <= 0 {
+				ttl = time.Second
+			}
+			g.expiry = time.AfterFunc(ttl, g.expire)
+			return
+		}
+	}
 }
 
 func (g *RecentGaugeVec) pruneLocked() {

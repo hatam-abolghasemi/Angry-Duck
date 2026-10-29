@@ -15,7 +15,10 @@ var processMemory = NewGaugeVec(
 		"holds; rss_file is its own code, shared and reclaimable by the kernel. "+
 		"heap_live is what the Go heap needs right now; heap_retained is freed "+
 		"heap kept for reuse (returned to the OS when idle); heap_released was "+
-		"already returned.",
+		"already returned. From its container's cgroup: working_set is what "+
+		"kubectl top and container_memory_working_set_bytes show, page_cache "+
+		"the file cache charged to the container (files it read, its own "+
+		"binary).",
 	"component", "kind")
 
 // TrackProcessMemory publishes angryduck_process_memory_bytes until ctx
@@ -39,6 +42,10 @@ func TrackProcessMemory(ctx context.Context, component string) {
 		if anon, file, ok := rss(); ok {
 			processMemory.Set(anon, component, "rss_anon")
 			processMemory.Set(file, component, "rss_file")
+		}
+		if ws, cache, ok := cgroupMemory(); ok {
+			processMemory.Set(ws, component, "working_set")
+			processMemory.Set(cache, component, "page_cache")
 		}
 	}
 	update()
@@ -77,6 +84,79 @@ func rss() (anon, file float64, ok bool) {
 		}
 	}
 	return anon, file, ok
+}
+
+// cgroupMemory reads this container's memory from its cgroup, the way
+// cAdvisor does: the working set is usage minus inactive file pages, and
+// page cache is every file page charged to it.
+func cgroupMemory() (workingSet, pageCache float64, ok bool) {
+	v2, v1 := ownCgroups()
+	// cgroup v2, then v1; this process's own cgroup where it is visible
+	// (no cgroup namespace), else the mount's root, which a container
+	// sees as its own.
+	for _, c := range []struct{ dir, usage, stat, inactive, file string }{
+		{"/sys/fs/cgroup" + v2, "memory.current", "memory.stat", "inactive_file", "file"},
+		{"/sys/fs/cgroup", "memory.current", "memory.stat", "inactive_file", "file"},
+		{"/sys/fs/cgroup/memory" + v1, "memory.usage_in_bytes", "memory.stat", "total_inactive_file", "total_cache"},
+		{"/sys/fs/cgroup/memory", "memory.usage_in_bytes", "memory.stat", "total_inactive_file", "total_cache"},
+	} {
+		u, err := os.ReadFile(c.dir + "/" + c.usage)
+		if err != nil {
+			continue
+		}
+		usage, err := strconv.ParseFloat(strings.TrimSpace(string(u)), 64)
+		if err != nil {
+			continue
+		}
+		st, err := os.ReadFile(c.dir + "/" + c.stat)
+		if err != nil {
+			continue
+		}
+		var inactive, file float64
+		for _, line := range strings.Split(string(st), "\n") {
+			k, v, found := strings.Cut(line, " ")
+			if !found {
+				continue
+			}
+			switch k {
+			case c.inactive:
+				inactive, _ = strconv.ParseFloat(v, 64)
+			case c.file:
+				file, _ = strconv.ParseFloat(v, 64)
+			}
+		}
+		if inactive > usage {
+			inactive = usage
+		}
+		return usage - inactive, file, true
+	}
+	return 0, 0, false
+}
+
+// ownCgroups returns this process's cgroup v2 path and cgroup v1 memory
+// controller path, from /proc/self/cgroup ("" when not listed).
+func ownCgroups() (v2, v1 string) {
+	b, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "", ""
+	}
+	return parseCgroups(string(b))
+}
+
+func parseCgroups(s string) (v2, v1 string) {
+	for _, line := range strings.Split(s, "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 || parts[2] == "/" {
+			continue
+		}
+		switch {
+		case parts[0] == "0" && parts[1] == "":
+			v2 = parts[2]
+		case strings.Contains(","+parts[1]+",", ",memory,"):
+			v1 = parts[2]
+		}
+	}
+	return v2, v1
 }
 
 var buildInfo = NewGaugeVec(

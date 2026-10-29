@@ -528,7 +528,7 @@
         "spec": {
           "id": 100,
           "title": "Memory by Kind",
-          "description": "Memory of the selected processes by kind, summed: rss_anon (really held), rss_file (own code), heap_live, heap_retained (freed, kept for reuse), heap_released, stacks.",
+          "description": "Memory of the selected processes by kind, summed: rss_anon (really held), rss_file (own code), heap_live, heap_retained (freed, kept for reuse), heap_released, stacks; from the containers' cgroups, working_set (what kubectl top shows) and page_cache (file cache charged to the containers).",
           "links": [],
           "data": {
             "kind": "QueryGroup",

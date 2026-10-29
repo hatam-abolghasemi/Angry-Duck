@@ -65,3 +65,29 @@ func TestRecentGaugeVecOffAndCapped(t *testing.T) {
 		t.Fatal("the oldest series should go first")
 	}
 }
+
+func TestRecentEventsExpireWithoutScrapes(t *testing.T) {
+	old := EventTTL()
+	SetEventTTL(50 * time.Millisecond)
+	defer SetEventTTL(old)
+	g := &RecentGaugeVec{name: "x", labelNames: []string{"image"}, values: map[string]recentValue{}, now: time.Now}
+	g.Set(1, "a")
+	g.Hold(2, "b")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		g.mu.Lock()
+		_, a := g.values["a"]
+		_, b := g.values["b"]
+		g.mu.Unlock()
+		if !a {
+			if !b {
+				t.Fatal("a held state expired")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("event still held long after its TTL, with no scrape")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
