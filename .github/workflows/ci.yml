@@ -42,7 +42,7 @@ jobs:
           go vet -tags integration ./...
 
       - name: Build
-        run: go build ./cmd/controller ./cmd/worker
+        run: go build -tags grpcnotrace ./cmd/controller ./cmd/worker
 
       - name: Unit tests
         run: go test -race -count=1 ./...

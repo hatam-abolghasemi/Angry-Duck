@@ -4,7 +4,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY internal ./internal
 COPY cmd/worker ./cmd/worker
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/angryduck-worker ./cmd/worker
+# grpcnotrace: gRPC without golang.org/x/net/trace (its /debug/requests
+# pages, never served here) and the html/template it drags in, about 4 MB
+# of binary that the kernel would otherwise keep mapped in every worker.
+RUN CGO_ENABLED=0 go build -tags grpcnotrace -trimpath -ldflags="-s -w" -o /out/angryduck-worker ./cmd/worker
 
 FROM gcr.io/distroless/static-debian13
 COPY --from=build /out/angryduck-worker /angryduck-worker
