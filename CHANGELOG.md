@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.9.2
+
+Workers give their memory back: after serving images, their container
+memory returns to its idle level instead of staying high.
 
 ### Added
 
@@ -8,6 +11,52 @@
   bytes each node streamed while still receiving them, stream orders, and
   what the slow-chain guard did (`race`, `replaced`, `kept`). *Spread
   Transfers by Result* explains `upstream`.
+- **The memory `kubectl top` shows, as a metric.**
+  `angryduck_process_memory_bytes` gains `working_set` (what `kubectl top`
+  and `container_memory_working_set_bytes` show) and `page_cache` (file
+  cache charged to the container), read from the container's cgroup.
+- `angryduck_worker_page_cache_released_bytes_total`: page cache a worker
+  handed back after serving blobs.
+- **Profiling builds.** Built with `-tags pprof` and run with
+  `DEBUG_PPROF_ADDR` set (e.g. `127.0.0.1:6060`), either binary serves Go's
+  `/debug/pprof/` there. Release images are built without the tag: the
+  endpoints aren't in them.
+
+### Changed
+
+Workers use much less memory, most visibly after serving images: their
+container memory no longer stays high after a transfer.
+
+- **Page cache from serving blobs is given back.** Reading a blob file to
+  serve it (a spread source, the mirror, a rescue) cached it, charged to the
+  worker's pod, where it stayed in its container memory until the node ran
+  short. Serving one 120 MB layer twice took a worker from 6.5 MiB to
+  126 MiB. Now, once nothing has read a file for
+  `PAGE_CACHE_RELEASE_AFTER_S` (30), the worker drops the pages its own
+  reads brought in; pages that were cached before stay, and nothing is
+  dropped while a blob keeps being served. In a 3-node lab, a node
+  re-fetching a 190 MB image from peers left them at 149.8 MiB and
+  60.1 MiB with 1.9.1, and at 7.7 MiB and 10.3 MiB 45 seconds later now,
+  with the same transfer time. `0` keeps the pages, as before.
+- **Smaller worker binary.** Built with gRPC's `grpcnotrace` tag: without
+  `golang.org/x/net/trace` and the `html/template` it brought, the binary is
+  14.7 MB instead of 19 MB, and its code mapped in memory about 4 MiB less.
+- **Content writes reuse their buffers.** Every blob that reaches a node
+  through the worker goes to containerd in 1 MiB writes, each encoded into a
+  new buffer, and every transfer took a new 1 MiB buffer of its own: a
+  190 MB image left about 205 MB of garbage on each receiver. Both are
+  reused now (about 15 MB), so the collector runs far less during
+  transfers, and the heap stays closer to what's live. Worker CPU for the
+  same spread dropped by a third to a half (0.63–0.85 CPU-seconds per node
+  with 1.9.1, 0.34–0.57 now).
+- **Freed heap goes back to the OS seconds after a burst** (a transfer, a
+  request, a pass over the images), not up to a minute later; the
+  once-a-minute check stays as a safety net.
+- **Leaner idle state.** The layer inventory and image repair's per-image
+  record keep digests as 32 raw bytes instead of strings, cached content and
+  snapshot listings are let go once past their 15 seconds, and event
+  metrics expire after `METRICS_EVENT_TTL_S` even when nothing scrapes the
+  process (before, unscraped they piled up to 5,000 series per metric).
 
 ## 1.9.1
 
