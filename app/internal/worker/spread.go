@@ -136,6 +136,13 @@ type Spread struct {
 	onFinalize func()
 	onStale    func()         // the controller's view of this node's layers is off
 	wg         sync.WaitGroup // transfers, for tests
+
+	// Streaming (see spreadstream.go): nil ingest when this node can't.
+	ingest   IngestStore
+	streamMu sync.Mutex
+	arriving map[string]*arriving // by digest: blobs coming in now
+	replaced atomic.Int64         // restarts from a faster source, naming their ingests
+	peakRecv float64              // fastest finished transfer here, bytes/s: what this node's link takes; under mu
 }
 
 type spreadJob struct {
@@ -148,8 +155,16 @@ type spreadJob struct {
 
 type spreadXfer struct {
 	job, digest, path string
+	ref               string // its ingest
 	cancel            context.CancelFunc
-	cancelled         atomic.Bool // cancelled on purpose: race lost or job dropped
+	cancelled         atomic.Bool // cancelled on purpose: race lost, job dropped or replaced
+	feed              *feed       // what peers stream from while it runs; nil when this node can't stream
+	progress          xferProgress
+}
+
+// spreadRef names the ingest of a spread transfer of dgst over path.
+func spreadRef(path, dgst string) string {
+	return "angryduck-spread-" + path + "-" + strings.TrimPrefix(dgst, "sha256:")
 }
 
 // xferKey names a running transfer: one blob over one path.
@@ -188,7 +203,8 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 	spreadFinalizesTotal.Add(0, nodeID, "success")
 	spreadFinalizesTotal.Add(0, nodeID, "failure")
 	spreadFinalizing.Set(0, nodeID)
-	return &Spread{
+	spreadStreamedBytes.Add(0, nodeID)
+	sp := &Spread{
 		store: store, registry: registry, token: token, nodeID: nodeID, platform: platform,
 		controllerURL: strings.TrimRight(controllerURL, "/"), timeout: timeout, epoch: randomSuffix()[:8],
 		// Peers stream for as long as a blob takes; ctx bounds it.
@@ -201,8 +217,21 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 		jobs:       map[string]*spreadJob{},
 		xfers:      map[xferKey]*spreadXfer{},
 		finalizing: newKeyedLock(),
+		arriving:   map[string]*arriving{},
 	}
+	if is, ok := store.(IngestStore); ok && is.CanStream() {
+		sp.ingest = is
+	}
+	return sp
 }
+
+// Streams reports whether this node serves blobs to peers while still
+// receiving them.
+func (s *Spread) Streams() bool { return s.ingest != nil }
+
+// DisableStreaming serves only committed blobs, as before streaming.
+// Call before Register.
+func (s *Spread) DisableStreaming() { s.ingest = nil }
 
 // OnFinalize registers fn to run after an image is registered (the
 // reporter's Kick, so the controller sees the image right away).
@@ -270,18 +299,50 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	key := xferKey{o.Digest, o.Path}
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-	x := &spreadXfer{job: o.Job, digest: o.Digest, path: o.Path, cancel: cancel}
+	x := &spreadXfer{job: o.Job, digest: o.Digest, path: o.Path, ref: spreadRef(o.Path, o.Digest), cancel: cancel}
+	x.progress.start(time.Now())
 	s.mu.Lock()
-	if _, running := s.xfers[key]; running {
-		s.mu.Unlock()
-		cancel()
-		writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Reason: "already fetching " + o.Digest + " from " + o.Path})
-		return
+	if old, running := s.xfers[key]; running {
+		if !o.Replace {
+			s.mu.Unlock()
+			cancel()
+			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Reason: "already fetching " + o.Digest + " from " + o.Path})
+			return
+		}
+		keep, why := keepRunning(&old.progress, o.Size, s.expectLocked(old, o.ExpectRate, time.Now()), time.Now())
+		if keep {
+			s.mu.Unlock()
+			cancel()
+			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Kept: true, Reason: why})
+			return
+		}
+		// Restart from the faster source. The old transfer reports its
+		// own end (cancelled, under its own ID); its ingest may still be
+		// held while it aborts, so this one writes under another ref.
+		old.cancelled.Store(true)
+		old.cancel()
+		x.ref = fmt.Sprintf("%s-r%d", x.ref, s.replaced.Add(1))
+		logging.Infof("angryduck-worker[%s]: spread: restarting %s from %s: %s", s.nodeID, o.Digest, o.Peer.NodeID, why)
+	}
+	// The blob is already coming over the other path: start this second
+	// copy only if it should finish clearly sooner (a node whose own link
+	// is the limit would only split it). Orders without ExpectRate, from
+	// controllers before 1.9.0, race as before.
+	if other := s.xfers[xferKey{o.Digest, otherPath(o.Path)}]; other != nil && o.ExpectRate > 0 && !o.Replace {
+		if keep, why := keepRunning(&other.progress, o.Size, s.expectLocked(other, o.ExpectRate, time.Now()), time.Now()); keep {
+			s.mu.Unlock()
+			cancel()
+			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Kept: true, Reason: why})
+			return
+		}
 	}
 	s.xfers[key] = x
 	s.activeLocked(o.Path)
 	s.pruneJobsLocked(time.Now())
 	s.mu.Unlock()
+	// Streamable from the moment the order is accepted: the controller
+	// may send peers here as soon as it sees the 202.
+	x.feed = s.feedStart(o.Digest, x.ref, o.Size)
 
 	s.wg.Add(1)
 	go s.run(ctx, x, o)
@@ -362,15 +423,23 @@ func (s *Spread) lease(ctx context.Context, job string) (string, error) {
 func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	defer s.wg.Done()
 	start := time.Now()
-	n, err := s.fetch(ctx, x, o)
+	n, upstream, err := s.fetch(ctx, x, o)
 	x.cancel()
 	took := time.Since(start)
+	// Before the other path is cancelled below: streams then go on from
+	// the committed blob.
+	s.feedEnd(o.Digest, x.feed, err == nil)
 
 	result := model.SpreadResultOK
 	switch {
 	case err == nil:
 		// Won: stop the other path if it is fetching this same blob.
 		s.mu.Lock()
+		if n >= recvRateMinBytes && took > 0 {
+			if r := float64(n) / took.Seconds(); r > s.peakRecv {
+				s.peakRecv = r
+			}
+		}
 		if other := s.xfers[xferKey{o.Digest, otherPath(o.Path)}]; other != nil {
 			other.cancelled.Store(true)
 			other.cancel()
@@ -392,7 +461,7 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	spreadBytesTotal.Add(n, s.nodeID, o.Path)
 	spreadMillisTotal.Add(took.Milliseconds(), s.nodeID, o.Path)
 
-	done := model.SpreadDone{Node: s.nodeID, Job: o.Job, Digest: o.Digest, Path: o.Path, Result: result, Bytes: n, Seconds: took.Seconds()}
+	done := model.SpreadDone{Node: s.nodeID, Job: o.Job, Digest: o.Digest, Path: o.Path, Result: result, Bytes: n, Seconds: took.Seconds(), ID: o.ID}
 	from := "registry"
 	if o.Peer != nil {
 		from = o.Peer.NodeID
@@ -404,16 +473,23 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 		logging.Debugf("angryduck-worker[%s]: spread: stopped fetching %s from %s after %d bytes: it arrived another way first", s.nodeID, o.Digest, from, n)
 	default:
 		done.Error = err.Error()
-		logging.Warnf("angryduck-worker[%s]: spread: fetching %s from %s failed after %d bytes: %v", s.nodeID, o.Digest, from, n, err)
+		done.Upstream = upstream
+		if upstream {
+			logging.Infof("angryduck-worker[%s]: spread: streaming %s from %s ended after %d bytes: %v (the source's own transfer stopped)", s.nodeID, o.Digest, from, n, err)
+		} else {
+			logging.Warnf("angryduck-worker[%s]: spread: fetching %s from %s failed after %d bytes: %v", s.nodeID, o.Digest, from, n, err)
+		}
 	}
 	s.report(done)
 }
 
 // fetch streams the blob from its source into the content store.
-func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) (int64, error) {
+// upstream is set when a stream from a peer still receiving the blob
+// failed on the peer's side (see SpreadDone.Upstream).
+func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) (n int64, upstream bool, err error) {
 	lease, err := s.lease(ctx, o.Job)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var body io.ReadCloser
 	var length int64
@@ -423,14 +499,26 @@ func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) 
 		body, length, err = s.openPeer(ctx, o.Peer.Address, o.Digest)
 	}
 	if err != nil {
-		return 0, err
+		return 0, o.Stream && ctx.Err() == nil, err
 	}
 	defer body.Close()
 	if length >= 0 && length != o.Size {
-		return 0, fmt.Errorf("source announced %d bytes, want %d", length, o.Size)
+		return 0, false, fmt.Errorf("source announced %d bytes, want %d", length, o.Size)
 	}
-	ref := "angryduck-spread-" + o.Path + "-" + strings.TrimPrefix(o.Digest, "sha256:")
-	return s.store.WriteBlob(ctx, lease, ref, o.Digest, o.Size, body)
+	var src io.Reader = &progressReader{r: body, p: &x.progress}
+	var tracker *readTracker
+	if o.Stream {
+		tracker = &readTracker{r: src}
+		src = tracker
+	}
+	if x.feed != nil {
+		ctx = withWriteObserver(ctx, feedObserver{s: s, digest: o.Digest, f: x.feed})
+	}
+	n, err = s.store.WriteBlob(ctx, lease, x.ref, o.Digest, o.Size, src)
+	if err != nil && tracker != nil && tracker.failed() && !x.cancelled.Load() {
+		upstream = true
+	}
+	return n, upstream, err
 }
 
 func (s *Spread) openPeer(ctx context.Context, addr, dgst string) (io.ReadCloser, int64, error) {
@@ -478,7 +566,8 @@ func (s *Spread) report(done model.SpreadDone) {
 	logging.Warnf("angryduck-worker[%s]: spread: couldn't report %s of %s to the controller", s.nodeID, done.Result, done.Digest)
 }
 
-// HandleContent serves one committed blob by digest to a peer.
+// HandleContent serves one blob by digest to a peer: committed, or still
+// arriving here (streamed, see spreadstream.go).
 func (s *Spread) HandleContent(w http.ResponseWriter, r *http.Request) {
 	dgst := strings.TrimPrefix(r.URL.Path, "/spread/content/")
 	if !validDigest(dgst) || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
@@ -486,7 +575,9 @@ func (s *Spread) HandleContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.have(r.Context(), dgst) {
-		http.NotFound(w, r)
+		if !s.serveStream(w, r, dgst) {
+			http.NotFound(w, r)
+		}
 		return
 	}
 	body, size, err := s.store.OpenContent(r.Context(), dgst)

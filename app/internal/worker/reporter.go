@@ -31,12 +31,17 @@ type Reporter struct {
 	kick          chan struct{}
 	layers        *LayerTracker          // nil: no layer inventory (no containerd, or turned off)
 	exclude       func() map[string]bool // names to leave out of reports (broken images)
+	streams       bool                   // spread streams blobs still arriving (see Spread.Streams)
 
 	// ackedInv is the inventory hash the controller last confirmed it
 	// holds. While it matches, reports leave the lists out. Only the Run
 	// goroutine touches it.
 	ackedInv string
 }
+
+// SetStreams makes reports tell the controller this node streams spread
+// blobs it is still receiving. Call before Run.
+func (rp *Reporter) SetStreams(on bool) { rp.streams = on }
 
 // SetLayerTracker makes reports carry this node's layer inventory.
 func (rp *Reporter) SetLayerTracker(t *LayerTracker) { rp.layers = t }
@@ -147,6 +152,7 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		Address:     rp.selfAddress,
 		Utilization: result.Utilization,
 		Layers:      layers,
+		Streams:     rp.streams,
 		Timestamp:   time.Now(),
 	}
 	switch invHash := inventoryHash(repos, images); {

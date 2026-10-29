@@ -197,7 +197,14 @@ func main() {
 		sp.OnFinalize(reporter.Kick)
 		sp.OnStale(reporter.Kick)
 		extra = append(extra, sp.Register)
-		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s", nodeID, platform, timeout)
+		// Serving blobs still arriving needs the content store mounted
+		// (their ingest files); SPREAD_STREAM_ENABLED=false turns it off.
+		streams := sp.Streams() && config.Bool("SPREAD_STREAM_ENABLED", true)
+		if !streams {
+			sp.DisableStreaming()
+		}
+		reporter.SetStreams(streams)
+		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t", nodeID, platform, timeout, streams)
 	}
 
 	// Images being pulled or received right now: cleanup and repair never

@@ -38,8 +38,12 @@ type WorkerReport struct {
 	// InventoryOmitted is set when Repos and Images were left out because
 	// the controller already holds InventoryHash. Without it, empty lists
 	// are a real (empty) inventory.
-	InventoryOmitted bool      `json:"inventory_omitted,omitempty"`
-	Timestamp        time.Time `json:"timestamp"`
+	InventoryOmitted bool `json:"inventory_omitted,omitempty"`
+	// Streams says this worker serves a spread blob to peers while it is
+	// still receiving it. Workers that predate it don't, and are only
+	// sent peers once they hold a blob.
+	Streams   bool      `json:"streams,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // LayerSync is one step of a worker's layer inventory: every blob digest
@@ -258,6 +262,17 @@ type SpreadFetch struct {
 	Size   int64   `json:"size"`
 	Path   string  `json:"path"`
 	Peer   *Holder `json:"peer,omitempty"` // for SpreadPathPeer
+	// Stream: Peer is still receiving the blob itself and streams it on.
+	// A failure on its side is reported with SpreadDone.Upstream.
+	Stream bool `json:"stream,omitempty"`
+	// ID names this transfer; the worker echoes it in SpreadDone.
+	ID string `json:"id,omitempty"`
+	// Replace: if this blob is already coming over this path, restart it
+	// from Peer only when that should clearly finish sooner, judged from
+	// how far and how fast the running transfer is and ExpectRate (bytes
+	// per second from Peer). Otherwise the worker keeps it (409, Kept).
+	Replace    bool    `json:"replace,omitempty"`
+	ExpectRate float64 `json:"expect_rate,omitempty"`
 }
 
 // SpreadFetchAck is the worker's immediate answer to a SpreadFetch.
@@ -266,6 +281,7 @@ type SpreadFetch struct {
 type SpreadFetchAck struct {
 	Accepted bool   `json:"accepted"`
 	Present  bool   `json:"present,omitempty"`
+	Kept     bool   `json:"kept,omitempty"` // a Replace declined: the running transfer finishes sooner
 	Reason   string `json:"reason,omitempty"`
 }
 
@@ -287,6 +303,11 @@ type SpreadDone struct {
 	Error   string  `json:"error,omitempty"`
 	Bytes   int64   `json:"bytes"`
 	Seconds float64 `json:"seconds"`
+	// Upstream: a streamed fetch failed because the peer's own transfer
+	// of the blob stopped, not because of this node.
+	Upstream bool `json:"upstream,omitempty"`
+	// ID is SpreadFetch.ID, from workers that have it.
+	ID string `json:"id,omitempty"`
 }
 
 // SpreadFinalize hands a node that holds every layer the image's metadata
@@ -343,7 +364,8 @@ type SpreadNodeStatus struct {
 
 // SpreadTransferStatus is one transfer running to a node.
 type SpreadTransferStatus struct {
-	Blob string `json:"blob"`
-	Path string `json:"path"`
-	From string `json:"from"`
+	Blob   string `json:"blob"`
+	Path   string `json:"path"`
+	From   string `json:"from"`
+	Stream bool   `json:"stream,omitempty"` // From is still receiving the blob and streams it on
 }

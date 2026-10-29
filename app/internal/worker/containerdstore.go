@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -59,6 +60,9 @@ type ContainerdStore struct {
 	// named by digest, so they are read directly; anything not found there
 	// is read through containerd's content API.
 	blobDir string
+	// ingestDir holds the writes still running (see OpenIngest); set with
+	// blobDir.
+	ingestDir string
 
 	importsMu sync.Mutex
 	importing map[string]bool // temporary name prefixes of imports running now
@@ -98,7 +102,88 @@ func (s *ContainerdStore) UseBlobDir(root, configPath string) string {
 		return ""
 	}
 	s.blobDir = dir
+	s.ingestDir = filepath.Join(filepath.Dir(filepath.Dir(dir)), "ingest")
 	return dir
+}
+
+// CanStream reports whether blobs still being written can be read (see
+// OpenIngest): containerd's content store is mounted.
+func (s *ContainerdStore) CanStream() bool { return s.ingestDir != "" }
+
+// OpenIngest opens the data file of the write running under ref (see
+// WriteBlob), so a peer can be served bytes before the blob is committed.
+//
+// containerd's local content store keeps a write in ingest/<dir>/data and
+// the ref it runs under in ingest/<dir>/ref. Through the metadata store
+// that ref is "<namespace>/<sequence>/<ref>", and <dir> is a hash of it,
+// so the directory is found by reading the ref files. Committing renames
+// data to blobs/sha256/<digest>: the file opened here stays the same file
+// and stays readable, so a reader keeps going through the commit.
+func (s *ContainerdStore) OpenIngest(ref string) (*os.File, error) {
+	if s.ingestDir == "" {
+		return nil, errors.New("content store not mounted")
+	}
+	entries, err := os.ReadDir(s.ingestDir)
+	if err != nil {
+		return nil, err
+	}
+	prefix, suffix := s.namespace+"/", "/"+ref
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(s.ingestDir, e.Name(), "ref"))
+		if err != nil {
+			continue // finished or aborted meanwhile
+		}
+		full := string(b)
+		if !strings.HasPrefix(full, prefix) || !strings.HasSuffix(full, suffix) {
+			continue
+		}
+		seq := strings.TrimSuffix(strings.TrimPrefix(full, prefix), suffix)
+		if seq == "" || strings.Trim(seq, "0123456789") != "" {
+			continue
+		}
+		return os.Open(filepath.Join(s.ingestDir, e.Name(), "data"))
+	}
+	return nil, os.ErrNotExist
+}
+
+// writeObserver follows a WriteBlob: opened once the write starts from
+// zero, wrote with the bytes containerd has written so far, each time
+// they grow. The bytes up to that count can be read from the ingest file.
+type writeObserver interface {
+	opened()
+	wrote(total int64)
+}
+
+type writeObserverKey struct{}
+
+// withWriteObserver makes WriteBlob calls under ctx report to obs.
+func withWriteObserver(ctx context.Context, obs writeObserver) context.Context {
+	return context.WithValue(ctx, writeObserverKey{}, obs)
+}
+
+func writeObserverFrom(ctx context.Context) writeObserver {
+	obs, _ := ctx.Value(writeObserverKey{}).(writeObserver)
+	return obs
+}
+
+// observedWriter reports every write containerd acknowledged: a remote
+// content write returns once containerd wrote the bytes to the ingest file.
+type observedWriter struct {
+	w     io.Writer
+	obs   writeObserver
+	total int64
+}
+
+func (o *observedWriter) Write(p []byte) (int, error) {
+	n, err := o.w.Write(p)
+	if n > 0 {
+		o.total += int64(n)
+		o.obs.wrote(o.total)
+	}
+	return n, err
 }
 
 // containerdRoot reads the top-level root setting from containerd's
@@ -1002,7 +1087,12 @@ func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string
 	}
 	// Every Write is one synchronous round trip to containerd: batch them
 	// at 1 MiB, the same as snapshot staging.
-	bw := bufio.NewWriterSize(cw, rpcChunk)
+	var sink io.Writer = cw
+	if obs := writeObserverFrom(ctx); obs != nil {
+		obs.opened()
+		sink = &observedWriter{w: cw, obs: obs}
+	}
+	bw := bufio.NewWriterSize(sink, rpcChunk)
 	n, err := io.Copy(bw, io.LimitReader(r, size+1))
 	if err == nil {
 		err = bw.Flush()
