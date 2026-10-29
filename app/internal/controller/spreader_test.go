@@ -50,6 +50,7 @@ type spreadFleet struct {
 	finalizes []string
 	drops     []string
 	busy      map[string]bool // answer fetches with 409
+	kept      map[string]bool // answer restart offers with 409, kept
 }
 
 type fetchRec struct {
@@ -65,6 +66,12 @@ func (f *spreadFleet) worker(t *testing.T, node string) string {
 		case "/spread/fetch":
 			var o model.SpreadFetch
 			_ = json.NewDecoder(r.Body).Decode(&o)
+			if o.Replace && f.kept[node] {
+				f.fetches = append(f.fetches, fetchRec{node, o})
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(model.SpreadFetchAck{Kept: true, Reason: "keeping"})
+				return
+			}
 			if f.busy[node] {
 				w.WriteHeader(http.StatusConflict)
 				_ = json.NewEncoder(w).Encode(model.SpreadFetchAck{Reason: "busy"})
