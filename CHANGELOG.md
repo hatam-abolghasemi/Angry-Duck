@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Dashboard:** a *Streaming & slow chains* row on the Delivery tab:
+  bytes each node streamed while still receiving them, stream orders, and
+  what the slow-chain guard did (`race`, `replaced`, `kept`). *Spread
+  Transfers by Result* explains `upstream`.
+
 ## 1.9.1
 
 ### Fixed
