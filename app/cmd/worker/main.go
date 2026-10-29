@@ -37,6 +37,7 @@ import (
 	"github.com/containerd/containerd"
 
 	"angryduck/internal/config"
+	"angryduck/internal/debugpprof"
 	"angryduck/internal/kube"
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
@@ -55,6 +56,7 @@ func main() {
 	}
 	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
 	memlimit.Apply("worker")
+	debugpprof.Start("worker")
 	metrics.SetEventTTL(config.Duration("METRICS_EVENT_TTL_S", 15))
 
 	nodeID := config.String("NODE_ID", "")
@@ -127,6 +129,9 @@ func main() {
 	// One containerd store shared by everything below, so its short
 	// listing cache is shared too.
 	store := worker.NewContainerdStore(client, namespace, snapshotter)
+	// Reading a blob file to serve it caches it, charged to this pod: give
+	// those pages back once the file has been idle this long (0 keeps them).
+	store.ReleasePageCache(config.Duration("PAGE_CACHE_RELEASE_AFTER_S", 30), nodeID)
 	if dir := store.UseBlobDir(config.String("CONTAINERD_ROOT", ""), filepath.Join(hostRoot, "/etc/containerd/config.toml")); dir != "" {
 		log.Printf("angryduck-worker[%s]: reading blobs directly from %s", nodeID, dir)
 		if err := store.VerifyStreaming(context.Background()); err != nil {
@@ -292,7 +297,7 @@ func main() {
 			m := worker.NewMirror(store, nodeID, token, controllerURL)
 			m.RequireClientToken(hosts.Token)
 			extra = append(extra, m.RegisterPeer)
-			mirrorSrv = &http.Server{Addr: mirrorListen, Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second}
+			mirrorSrv = &http.Server{Addr: mirrorListen, Handler: memlimit.AfterEach(m.Handler()), ReadHeaderTimeout: 10 * time.Second}
 			go func() {
 				log.Printf("angryduck-worker[%s]: mirror listening on %s, containerd reaches it at %s", nodeID, mirrorListen, mirrorAddr)
 				if err := mirrorSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -318,7 +323,7 @@ func main() {
 		}()
 	}
 
-	httpServer := &http.Server{Addr: listenAddr, Handler: worker.NewServer(auth, puller, rescue, extra...)}
+	httpServer := &http.Server{Addr: listenAddr, Handler: memlimit.AfterEach(worker.NewServer(auth, puller, rescue, extra...))}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("angryduck-worker[%s]: http server failed: %v", nodeID, err)

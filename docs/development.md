@@ -41,7 +41,22 @@ docker build -t angry-duck-controller:dev -f Dockerfile.controller .
 docker build -t angry-duck-worker:dev -f Dockerfile.worker .
 ```
 
-Both images are single static binaries on a distroless base.
+Both images are single static binaries on a distroless base. The worker is
+built with `-tags grpcnotrace`: gRPC without `golang.org/x/net/trace` and the
+`html/template` it brings, about 4 MB less binary, all of it otherwise mapped
+in every worker's memory.
+
+### Profiling
+
+Built with `-tags pprof`, either binary serves Go's `/debug/pprof/` on
+`DEBUG_PPROF_ADDR` when it is set; `DEBUG_MEMPROFILERATE=1` records every
+allocation instead of a sample. Release images don't have the tag.
+
+```bash
+CGO_ENABLED=0 go build -tags "grpcnotrace pprof" -o angryduck-worker ./cmd/worker
+DEBUG_PPROF_ADDR=127.0.0.1:6060 ./angryduck-worker
+go tool pprof -top http://127.0.0.1:6060/debug/pprof/heap
+```
 
 ## Test
 

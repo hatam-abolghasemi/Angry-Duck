@@ -18,6 +18,7 @@ import (
 
 	"angryduck/internal/config"
 	"angryduck/internal/controller"
+	"angryduck/internal/debugpprof"
 	"angryduck/internal/kube"
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
@@ -35,6 +36,7 @@ func main() {
 	}
 	logging.SetLevel(logging.ParseLevel(config.String("LOG_LEVEL", "info")))
 	memlimit.Apply("controller")
+	debugpprof.Start("controller")
 	metrics.SetEventTTL(config.Duration("METRICS_EVENT_TTL_S", 15))
 
 	listenAddr := config.String("CONTROLLER_LISTEN_ADDR", ":8080")
@@ -158,7 +160,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
-		Handler: server.Handler(),
+		Handler: memlimit.AfterEach(server.Handler()),
 	}
 
 	go func() {

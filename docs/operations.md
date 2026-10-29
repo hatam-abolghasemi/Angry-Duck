@@ -120,12 +120,18 @@ On a node holding 304 images, 614 snapshots and 918 blobs, with containerd 2.2:
 | 150 MiB layer rescued as a snapshot, on one CPU | ~10.5 s |
 | 400 mirror requests | ~2 s |
 
-- The worker's container memory (`kubectl top`) is about 15 MiB higher than
-  `rss_anon`: that is its own code, mapped from the binary, which the kernel
-  can drop and reload. Size against `angryduck_process_memory_bytes{kind="rss_anon"}`.
-- Once a minute, worker and controller hand freed heap back to the OS when
-  more than 1 MiB is retained, so after a burst memory returns to near its
-  idle level.
+- The worker's container memory (`kubectl top`,
+  `angryduck_process_memory_bytes{kind="working_set"}`) is about 13 MiB higher
+  than `rss_anon`: that is its own code, mapped from the binary, which the
+  kernel can drop and reload. Size against `angryduck_process_memory_bytes{kind="rss_anon"}`.
+- Serving blobs (to peers, the mirror, a rescue) reads them through the page
+  cache, charged to the worker's pod. The worker gives those pages back once a
+  blob has been idle for `PAGE_CACHE_RELEASE_AFTER_S` (30s), so its container
+  memory returns to its idle level after a transfer instead of staying up to
+  the size of what it served.
+- A few seconds after a burst of work ends, and at least once a minute,
+  worker and controller hand freed heap back to the OS when more than 1 MiB is
+  retained, so after a burst memory returns to near its idle level.
 - Snapshot shipping (only when no node has a layer's blob, as with
   `discard_unpacked_layers`) has containerd stage each layer once in its
   content store on each side, the price of the worker having no
@@ -172,7 +178,7 @@ local. Workers listen on their pod IPs; find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.9.1
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.9.2
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 
