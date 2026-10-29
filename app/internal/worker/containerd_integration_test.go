@@ -203,7 +203,9 @@ func testClient(t *testing.T) *containerd.Client {
 	if addr == "" {
 		t.Skip("ANGRYDUCK_CONTAINERD not set")
 	}
-	c, err := containerd.New(addr, containerd.WithTimeout(5*time.Second))
+	// The worker's own dial options: every test's content writes go through
+	// the pooled encoding (grpcbuffers.go), as on a node.
+	c, err := containerd.New(addr, containerd.WithTimeout(5*time.Second), containerd.WithDialOpts(ContainerdDialOptions("integration")))
 	if err != nil {
 		t.Fatal(err)
 	}

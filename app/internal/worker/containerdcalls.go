@@ -21,7 +21,8 @@ var containerdCallsTotal = metrics.NewCounterVec(
 // ContainerdDialOptions is containerd's own default dial options (the
 // client uses passed options instead of its defaults, not on top of them)
 // plus interceptors counting every call made over the connection, so the
-// load the worker puts on containerd is visible.
+// load the worker puts on containerd is visible, and content writes
+// encoded into pooled buffers (see grpcbuffers.go).
 func ContainerdDialOptions(nodeID string) []grpc.DialOption {
 	bo := backoff.DefaultConfig
 	bo.MaxDelay = 3 * time.Second
@@ -33,7 +34,7 @@ func ContainerdDialOptions(nodeID string) []grpc.DialOption {
 		}
 		return full
 	}
-	return []grpc.DialOption{
+	return append([]grpc.DialOption{
 		grpc.WithBlock(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.FailOnNonTempDialError(true),
@@ -48,5 +49,5 @@ func ContainerdDialOptions(nodeID string) []grpc.DialOption {
 			containerdCallsTotal.Inc(nodeID, name(method))
 			return streamer(ctx, desc, cc, method, opts...)
 		}),
-	}
+	}, pooledWrites()...)
 }

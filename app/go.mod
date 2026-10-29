@@ -4,11 +4,13 @@ go 1.22.2
 
 require (
 	github.com/containerd/containerd v1.7.27
+	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/platforms v0.2.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.0
 	golang.org/x/sys v0.28.0
 	google.golang.org/grpc v1.65.0
+	google.golang.org/protobuf v1.35.2
 	k8s.io/cri-api v0.31.0
 )
 
@@ -18,7 +20,6 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.11.7 // indirect
 	github.com/containerd/cgroups v1.1.0 // indirect
-	github.com/containerd/containerd/api v1.8.0 // indirect
 	github.com/containerd/continuity v0.4.4 // indirect
 	github.com/containerd/errdefs v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
@@ -55,5 +56,4 @@ require (
 	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/genproto v0.0.0-20240401170217-c3f982113cda // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240701130421-f6361c86f094 // indirect
-	google.golang.org/protobuf v1.35.2 // indirect
 )
