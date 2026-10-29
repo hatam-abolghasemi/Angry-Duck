@@ -368,7 +368,7 @@ func (s *Spread) streamCommitted(ctx context.Context, w io.Writer, dgst string, 
 // response: sendfile for a file), like serveBody.
 func copyToWriter(w io.Writer, r io.Reader) (int64, error) {
 	if rf, ok := w.(io.ReaderFrom); ok {
-		return rf.ReadFrom(r)
+		return rf.ReadFrom(fileOf(r))
 	}
 	return io.Copy(w, r)
 }

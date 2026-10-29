@@ -80,10 +80,10 @@ func TestDirectBlobReads(t *testing.T) {
 	}
 	// Not on disk: would go through the content API.
 	missing := "sha256:" + hex.EncodeToString(make([]byte, 32))
-	if _, ok := func() (int64, bool) { _, n, ok := s.openBlob(missing); return n, ok }(); ok {
+	if _, ok := func() (int64, bool) { _, n, _, ok := s.openBlob(missing); return n, ok }(); ok {
 		t.Fatal("openBlob found a missing blob")
 	}
-	if _, ok := func() (int64, bool) { _, n, ok := s.openBlob("sha256:../../etc/passwd"); return n, ok }(); ok {
+	if _, ok := func() (int64, bool) { _, n, _, ok := s.openBlob("sha256:../../etc/passwd"); return n, ok }(); ok {
 		t.Fatal("openBlob accepted an invalid digest")
 	}
 }

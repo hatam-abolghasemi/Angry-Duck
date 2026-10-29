@@ -67,6 +67,10 @@ type ContainerdStore struct {
 
 	importsMu sync.Mutex
 	importing map[string]bool // temporary name prefixes of imports running now
+
+	// pages gives back the page cache that reading blob files brings in
+	// (nil: kept, as the kernel does by default).
+	pages *pageCache
 }
 
 // NewContainerdStore wraps a connected client.
@@ -75,6 +79,15 @@ func NewContainerdStore(client *containerd.Client, namespace, snapshotter string
 		snapshotter = "overlayfs"
 	}
 	return &ContainerdStore{client: client, namespace: namespace, snapshotter: snapshotter}
+}
+
+// ReleasePageCache makes the store give back, after a blob file has been
+// idle for after, the page cache its reads brought in (see pageCache). 0
+// keeps it.
+func (s *ContainerdStore) ReleasePageCache(after time.Duration, nodeID string) {
+	if after > 0 {
+		s.pages = newPageCache(after, nodeID)
+	}
 }
 
 func (s *ContainerdStore) ns(ctx context.Context) context.Context {
@@ -249,21 +262,52 @@ func containerdRoot(configPath string) string {
 
 // openBlob opens a committed blob straight from the content store. ok is
 // false when direct reads are off or the file isn't there; callers then
-// go through the content API.
-func (s *ContainerdStore) openBlob(dgst string) (f *os.File, size int64, ok bool) {
+// go through the content API. Call release once done reading: it lets the
+// page cache the reads brought in go (see pageCache).
+func (s *ContainerdStore) openBlob(dgst string) (f *os.File, size int64, release func(), ok bool) {
 	if s.blobDir == "" || !validDigest(dgst) {
-		return nil, 0, false
+		return nil, 0, nil, false
 	}
-	f, err := os.Open(s.blobDir + "/" + strings.TrimPrefix(dgst, "sha256:"))
+	path := s.blobDir + "/" + strings.TrimPrefix(dgst, "sha256:")
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, false
+		return nil, 0, nil, false
 	}
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() {
 		f.Close()
-		return nil, 0, false
+		return nil, 0, nil, false
 	}
-	return f, st.Size(), true
+	return f, st.Size(), s.pages.open(f, path, st.Size()), true
+}
+
+// servedFile is a blob file handed out to be served. It is still the
+// *os.File underneath (fileOf unwraps it, so a response sends it with
+// sendfile), and closing it lets its page cache go.
+type servedFile struct {
+	*os.File
+	release func()
+}
+
+func (f *servedFile) Close() error {
+	err := f.File.Close()
+	f.release()
+	return err
+}
+
+// fileOf returns r with a servedFile unwrapped, directly or under an
+// io.LimitedReader: the net package only sends an *os.File (or a
+// LimitedReader of one) with sendfile.
+func fileOf(r io.Reader) io.Reader {
+	switch v := r.(type) {
+	case *servedFile:
+		return v.File
+	case *io.LimitedReader:
+		if sf, ok := v.R.(*servedFile); ok {
+			return &io.LimitedReader{R: sf.File, N: v.N}
+		}
+	}
+	return r
 }
 
 // HasBlob reports whether a committed blob is on disk. known is false when
@@ -297,7 +341,8 @@ const rpcChunk = 1 << 20
 // directory when it is mounted, otherwise through the content API in
 // rpcChunk reads.
 func (s *ContainerdStore) copyBlob(ctx context.Context, w io.Writer, desc ocispec.Descriptor) (int64, error) {
-	if f, _, ok := s.openBlob(desc.Digest.String()); ok {
+	if f, _, release, ok := s.openBlob(desc.Digest.String()); ok {
+		defer release()
 		defer f.Close()
 		return copyContext(ctx, w, f)
 	}
@@ -306,13 +351,40 @@ func (s *ContainerdStore) copyBlob(ctx context.Context, w io.Writer, desc ocispe
 		return 0, err
 	}
 	defer ra.Close()
-	return copyContext(ctx, w, contentReader(ra))
+	r, done := contentReader(ra)
+	defer done()
+	return copyContext(ctx, w, r)
 }
 
 // contentReader reads a blob through the content API in rpcChunk calls
-// instead of the 32 KiB io.Copy would ask for, each a new gRPC stream.
-func contentReader(ra content.ReaderAt) io.Reader {
-	return bufio.NewReaderSize(content.NewReader(ra), rpcChunk)
+// instead of the 32 KiB io.Copy would ask for, each a new gRPC stream. Its
+// buffer is pooled: call done once finished with the reader.
+func contentReader(ra content.ReaderAt) (r io.Reader, done func()) {
+	br := chunkReaders.Get().(*bufio.Reader)
+	br.Reset(content.NewReader(ra))
+	return br, func() {
+		br.Reset(nil)
+		chunkReaders.Put(br)
+	}
+}
+
+// chunkReaders and chunkWriters pool the rpcChunk buffers of reads and
+// writes through containerd's content API, so a transfer doesn't allocate
+// (and leave behind for the collector) a MiB per blob.
+var (
+	chunkReaders = sync.Pool{New: func() any { return bufio.NewReaderSize(nil, rpcChunk) }}
+	chunkWriters = sync.Pool{New: func() any { return bufio.NewWriterSize(nil, rpcChunk) }}
+)
+
+// chunkWriter returns a pooled rpcChunk-buffered writer to w. Call done
+// once finished with it (after Flush, or after giving up).
+func chunkWriter(w io.Writer) (bw *bufio.Writer, done func()) {
+	bw = chunkWriters.Get().(*bufio.Writer)
+	bw.Reset(w)
+	return bw, func() {
+		bw.Reset(nil)
+		chunkWriters.Put(bw)
+	}
 }
 
 // openContent opens a blob through containerd's content API.
@@ -331,7 +403,8 @@ func (s *ContainerdStore) openContent(ctx context.Context, dgst string) (content
 
 // ReadBlob reads a whole blob into memory, refusing anything above max.
 func (s *ContainerdStore) ReadBlob(ctx context.Context, dgst string, max int64) ([]byte, error) {
-	if f, size, ok := s.openBlob(dgst); ok {
+	if f, size, release, ok := s.openBlob(dgst); ok {
+		defer release()
 		defer f.Close()
 		if size > max {
 			return nil, fmt.Errorf("blob %s is larger than %d bytes", dgst, max)
@@ -363,7 +436,8 @@ func (s *ContainerdStore) ReadBlob(ctx context.Context, dgst string, max int64) 
 func (s *ContainerdStore) StreamBlob(ctx context.Context, dgst string, size int64, w io.Writer) error {
 	var r io.Reader
 	var have int64
-	if f, n, ok := s.openBlob(dgst); ok {
+	if f, n, release, ok := s.openBlob(dgst); ok {
+		defer release()
 		defer f.Close()
 		r, have = f, n
 	} else {
@@ -372,7 +446,9 @@ func (s *ContainerdStore) StreamBlob(ctx context.Context, dgst string, size int6
 			return err
 		}
 		defer ra.Close()
-		r, have = contentReader(ra), ra.Size()
+		cr, done := contentReader(ra)
+		defer done()
+		r, have = cr, ra.Size()
 	}
 	if have != size {
 		return fmt.Errorf("blob %s: have %d bytes, expected %d", dgst, have, size)
@@ -390,19 +466,30 @@ func (s *ContainerdStore) StreamBlob(ctx context.Context, dgst string, size int6
 // on the other end (containerd for the mirror, WriteBlob for a peer)
 // checks the digest.
 func (s *ContainerdStore) OpenContent(ctx context.Context, dgst string) (io.ReadCloser, int64, error) {
-	if f, n, ok := s.openBlob(dgst); ok {
-		return f, n, nil
+	if f, n, release, ok := s.openBlob(dgst); ok {
+		return &servedFile{File: f, release: release}, n, nil
 	}
 	ra, err := s.openContent(s.ns(ctx), dgst)
 	if err != nil {
 		return nil, 0, err
 	}
-	return readCloser{contentReader(ra), ra}, ra.Size(), nil
+	r, done := contentReader(ra)
+	return &readCloser{Reader: r, ra: ra, done: done}, ra.Size(), nil
 }
 
+// readCloser reads a blob through the content API; closing it gives its
+// pooled buffer back.
 type readCloser struct {
 	io.Reader
-	io.Closer
+	ra   io.Closer
+	done func()
+	once sync.Once
+}
+
+func (r *readCloser) Close() error {
+	err := r.ra.Close()
+	r.once.Do(r.done)
+	return err
 }
 
 // Digests lists every blob digest in the namespace's content store. The
@@ -953,11 +1040,12 @@ func (s *ContainerdStore) ApplySnapshot(ctx context.Context, chainID, parent str
 	}
 	// Every Write to a content writer is one synchronous round trip to
 	// containerd. Batch them: 1 MiB per call instead of io.Copy's 32 KiB.
-	bw := bufio.NewWriterSize(cw, rpcChunk)
+	bw, bwDone := chunkWriter(cw)
 	n, err := io.Copy(bw, r)
 	if err == nil {
 		err = bw.Flush()
 	}
+	bwDone()
 	if err != nil {
 		cw.Close()
 		return fmt.Errorf("staging layer: %w", err)
@@ -1123,11 +1211,12 @@ func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string
 		obs.opened()
 		sink = &observedWriter{w: cw, obs: obs}
 	}
-	bw := bufio.NewWriterSize(sink, rpcChunk)
+	bw, bwDone := chunkWriter(sink)
 	n, err := io.Copy(bw, io.LimitReader(r, size+1))
 	if err == nil {
 		err = bw.Flush()
 	}
+	bwDone()
 	if err == nil && n != size {
 		err = fmt.Errorf("got %d bytes, want %d", n, size)
 	}

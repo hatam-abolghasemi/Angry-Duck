@@ -136,6 +136,7 @@ The whole-image fallback, and the limits spread shares.
 | `CONTAINERD_SNAPSHOTTER` | `overlayfs` | The snapshotter kubelet's images are unpacked with. |
 | `CONTAINERD_ROOT` | from `/etc/containerd/config.toml`, else `/var/lib/containerd` | containerd's root directory, as mounted into the worker. Blobs are read directly from its content store when mounted, otherwise through containerd's content API. |
 | `HOST_ROOT` | *(empty)* | Prefix for the node paths the worker mounts (state dir, containerd's config and `certs.d`). The manifests mount them at the same paths. Not a chroot. |
+| `PAGE_CACHE_RELEASE_AFTER_S` | `30` | Reading a blob file to serve it (to a peer, the mirror or a rescue) caches it, and the kernel charges that page cache to the worker's pod, where it stays in its container memory. Once nothing has read a file for this long, the worker gives back the pages its own reads brought in; pages that were cached already stay. While a blob keeps being served, nothing is dropped. `0` keeps them. |
 | `LAYER_INVENTORY_ENABLED` | `true` | Report layer blobs and snapshot chainIDs to the controller. |
 | `LAYER_SCAN_INTERVAL_S` | `60` | Time between layer scans while containerd's event stream is down (or `INVENTORY_EVENTS_ENABLED=false`). A transfer triggers one at once. |
 | `INVENTORY_EVENTS_ENABLED` | `true` | Follow containerd's events (images created, updated or deleted, content deleted): any pull or removal, kubelet's included, reaches the controller in about a second. |
