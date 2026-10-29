@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.9.1
+
+### Fixed
+
+- **Streaming checks it reads the right containerd.** At startup the
+  worker writes a small blob through containerd and looks for its file in
+  the mounted content store. If it isn't there (`CONTAINERD_ROOT` pointing
+  at another daemon's store), streaming is turned off with a warning
+  instead of streams waiting on ingest files that never appear.
+- CI: the integration tests are given their containerd's root
+  (`ANGRYDUCK_CONTAINERD_ROOT`), so they read its content store, not the
+  runner's own containerd.
+
 ## 1.9.0
 
 Large layers reach every node much sooner: a node still receiving a blob
