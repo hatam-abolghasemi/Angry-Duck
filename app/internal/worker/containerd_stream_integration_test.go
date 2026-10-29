@@ -28,6 +28,9 @@ func streamStore(t *testing.T, prefix string) *ContainerdStore {
 	if s.UseBlobDir(os.Getenv("ANGRYDUCK_CONTAINERD_ROOT"), "/etc/containerd/config.toml") == "" {
 		t.Skip("containerd's content store isn't readable here")
 	}
+	if err := s.VerifyStreaming(context.Background()); err != nil {
+		t.Fatalf("set ANGRYDUCK_CONTAINERD_ROOT to this containerd's root: %v", err)
+	}
 	if !s.CanStream() {
 		t.Fatal("content store mounted but CanStream is false")
 	}

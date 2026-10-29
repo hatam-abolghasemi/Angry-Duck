@@ -129,6 +129,9 @@ func main() {
 	store := worker.NewContainerdStore(client, namespace, snapshotter)
 	if dir := store.UseBlobDir(config.String("CONTAINERD_ROOT", ""), filepath.Join(hostRoot, "/etc/containerd/config.toml")); dir != "" {
 		log.Printf("angryduck-worker[%s]: reading blobs directly from %s", nodeID, dir)
+		if err := store.VerifyStreaming(context.Background()); err != nil {
+			log.Printf("angryduck-worker[%s]: WARNING: spread streaming off: %v (set CONTAINERD_ROOT to containerd's root)", nodeID, err)
+		}
 	} else {
 		log.Printf("angryduck-worker[%s]: containerd's content store isn't mounted (set CONTAINERD_ROOT to where it is): serving blobs through containerd's content API", nodeID)
 	}

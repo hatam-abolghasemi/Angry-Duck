@@ -3,6 +3,7 @@ package worker
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -109,6 +110,36 @@ func (s *ContainerdStore) UseBlobDir(root, configPath string) string {
 // CanStream reports whether blobs still being written can be read (see
 // OpenIngest): containerd's content store is mounted.
 func (s *ContainerdStore) CanStream() bool { return s.ingestDir != "" }
+
+// VerifyStreaming checks that the mounted content store is this
+// containerd's: it writes a small random blob through containerd and looks
+// for its file. If it isn't there (CONTAINERD_ROOT pointing at another
+// daemon's store), streaming is turned off: its ingest files would never
+// be found. The blob is held by a short lease and released right away.
+func (s *ContainerdStore) VerifyStreaming(ctx context.Context) error {
+	if s.ingestDir == "" {
+		return nil
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil
+	}
+	dgst := digest.FromBytes(b).String()
+	lease := "angryduck-probe-" + randomSuffix()
+	if err := s.CreateLease(ctx, lease, time.Minute); err != nil {
+		return nil // can't check; keep it on, as before the check
+	}
+	defer func() { _ = s.DeleteLease(context.WithoutCancel(ctx), lease) }()
+	if _, err := s.WriteBlob(ctx, lease, lease, dgst, int64(len(b)), bytes.NewReader(b)); err != nil {
+		return nil
+	}
+	if have, _ := s.HasBlob(dgst); have {
+		return nil
+	}
+	dir := filepath.Dir(s.ingestDir)
+	s.ingestDir = ""
+	return fmt.Errorf("a blob just written through containerd isn't in %s: not this containerd's content store", dir)
+}
 
 // OpenIngest opens the data file of the write running under ref (see
 // WriteBlob), so a peer can be served bytes before the blob is committed.
