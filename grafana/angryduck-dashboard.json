@@ -18307,8 +18307,8 @@
         "kind": "Panel",
         "spec": {
           "id": 6,
-          "title": "Registry Traffic Avoided",
-          "description": "Bytes nodes got from a peer instead of the registry in the time range: mirror, spreads, rescues and repairs.",
+          "title": "Bytes from Peers",
+          "description": "Bytes nodes received from another node instead of the registry in the time range: spreads, mirror requests, rescues and repairs. Spreads send an image to every eligible node, including nodes that never run it, so this isn't what the registry would have served without Angry Duck.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -22871,8 +22871,8 @@
         "kind": "Panel",
         "spec": {
           "id": 8,
-          "title": "Where Image Bytes Came From",
-          "description": "Bytes per second the nodes received, by source. Dashed: what the registry would have served without Angry Duck (everything below added up). registry (now): what it served for spreads and repairs. The peer lines are traffic that stayed inside the cluster. Plain kubelet pulls on a mirror miss aren't measured in bytes.",
+          "title": "Where Delivered Image Bytes Came From",
+          "description": "Bytes per second Angry Duck delivered to the nodes, by source. Dashed: all of it added up. from the registry: what the registry served for spreads and repairs. The peer lines stayed inside the cluster. Spreads send an image to every eligible node, including nodes that never run it, so this isn't what the registry would have served without Angry Duck. Registry pulls containerd makes on its own (seed pulls, mirror misses) aren't measured in bytes and aren't included.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -22891,7 +22891,7 @@
                       "spec": {
                         "editorMode": "code",
                         "expr": "(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))",
-                        "legendFormat": "without Angry Duck: all from the registry",
+                        "legendFormat": "all delivered",
                         "range": true
                       }
                     },
@@ -22912,7 +22912,7 @@
                       "spec": {
                         "editorMode": "code",
                         "expr": "(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))",
-                        "legendFormat": "registry (now)",
+                        "legendFormat": "from the registry",
                         "range": true
                       }
                     },
@@ -23097,7 +23097,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "without Angry Duck: all from the registry"
+                      "options": "all delivered"
                     },
                     "properties": [
                       {
@@ -23127,7 +23127,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "registry (now)"
+                      "options": "from the registry"
                     },
                     "properties": [
                       {
@@ -25547,8 +25547,8 @@
         "kind": "Panel",
         "spec": {
           "id": 9,
-          "title": "Registry Downloads, Without vs With Angry Duck",
-          "description": "Bytes from the registry added up since the start of the time range. Dashed: what the nodes would have downloaded without Angry Duck. Solid: what they did. The gap between them is the traffic Angry Duck saved.",
+          "title": "Image Bytes Delivered, All vs From the Registry",
+          "description": "Bytes Angry Duck delivered to the nodes, added up since the start of the time range. Dashed: all of them, from peers and the registry. Solid: the part the registry served. Spreads send an image to every eligible node, including nodes that never run it, so this isn't what the registry would have served without Angry Duck. Registry pulls containerd makes on its own (seed pulls, mirror misses) aren't measured in bytes and aren't included.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -25567,7 +25567,7 @@
                       "spec": {
                         "editorMode": "code",
                         "expr": "(\n(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))\n) * $__interval_ms / 1000",
-                        "legendFormat": "step without",
+                        "legendFormat": "step all",
                         "range": true
                       }
                     },
@@ -25588,7 +25588,7 @@
                       "spec": {
                         "editorMode": "code",
                         "expr": "(\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))\n) * $__interval_ms / 1000",
-                        "legendFormat": "step with",
+                        "legendFormat": "step registry",
                         "range": true
                       }
                     },
@@ -25603,9 +25603,9 @@
                   "group": "calculateField",
                   "spec": {
                     "options": {
-                      "alias": "without Angry Duck",
+                      "alias": "all delivered",
                       "cumulative": {
-                        "field": "step without",
+                        "field": "step all",
                         "reducer": "sum"
                       },
                       "mode": "cumulativeFunctions",
@@ -25618,9 +25618,9 @@
                   "group": "calculateField",
                   "spec": {
                     "options": {
-                      "alias": "with Angry Duck",
+                      "alias": "from the registry",
                       "cumulative": {
-                        "field": "step with",
+                        "field": "step registry",
                         "reducer": "sum"
                       },
                       "mode": "cumulativeFunctions",
@@ -25718,7 +25718,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "step without"
+                      "options": "step all"
                     },
                     "properties": [
                       {
@@ -25735,7 +25735,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "step with"
+                      "options": "step registry"
                     },
                     "properties": [
                       {
@@ -25752,7 +25752,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "without Angry Duck"
+                      "options": "all delivered"
                     },
                     "properties": [
                       {
@@ -25778,7 +25778,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "with Angry Duck"
+                      "options": "from the registry"
                     },
                     "properties": [
                       {
