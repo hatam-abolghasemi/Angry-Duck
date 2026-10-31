@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Angry Duck version
-      placeholder: "1.8.10"
+      placeholder: "1.9.3"
     validations:
       required: true
   - type: dropdown
@@ -19,7 +19,7 @@ body:
     attributes:
       label: Installed with
       options:
-        - Helm chart (charts/angryduck)
+        - Helm chart (oci://ghcr.io/hatam-abolghasemi/charts/angryduck or helm/angryduck)
         - Plain manifests (k8s/)
         - Other
     validations:
@@ -33,9 +33,11 @@ body:
         - Preheat
         - Propagation
         - Rescue
+        - Repair
         - Transfers
         - Mirror
         - Image cleanup
+        - Origin check
         - Webhook / CI integration
         - Helm chart
         - Metrics / Grafana dashboard
