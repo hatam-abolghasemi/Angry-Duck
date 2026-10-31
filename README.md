@@ -106,7 +106,7 @@ them, so there is nothing to clone or build:
 
 ```bash
 helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck \
-  --version 1.9.3 --namespace angryduck --create-namespace \
+  --version 1.9.4 --namespace angryduck --create-namespace \
   --set ingress.host=angryduck.example.com
 ```
 
@@ -148,7 +148,7 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.9.3**; see the [changelog](CHANGELOG.md) and the
+The current version is **1.9.4**; see the [changelog](CHANGELOG.md) and the
 [releases](https://github.com/hatam-abolghasemi/Angry-Duck/releases). It runs
 on the clusters it was built for, through hundreds of deploys a day. Angry
 Duck targets Linux nodes running containerd 1.6 or later.

@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.9.4
+
+Runs on arm64 nodes, installs without a clone, and the dashboard tells
+the truth about colors and memory. Nothing changed in how the controller
+or the workers behave.
 
 ### Added
 
