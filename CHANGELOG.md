@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **arm64 images.** Both images are built for `linux/amd64` and
+  `linux/arm64`, so Angry Duck runs on Graviton, Ampere and other arm64
+  nodes. CI builds both binaries for arm64 on every change.
+- **SBOM and provenance** attached to every released image.
+- **A chart check in CI:** `helm lint`, and a render of the chart's defaults
+  that must match `k8s/` object for object.
+- Dependabot for Go modules, the Dockerfiles' base images and the GitHub
+  Actions, monthly.
+- A contributing guide and a code of conduct.
+
+### Changed
+
+- **Install the chart without cloning:** the README and the Helm guide use
+  the published `oci://ghcr.io/hatam-abolghasemi/charts/angryduck`.
+- The Grafana dashboard no longer carries a data source, cluster or
+  registries of ours: pick yours on import.
+- **Dashboard fixes:** series colors matched by pattern never applied
+  (Grafana anchors those patterns), so *present*, *cancelled* and *failed*
+  transfers and the mirror results got random colors; they now get their
+  meant ones, with *present* grey. *Memory by Kind* shows one process,
+  averaged, without the memory already handed back to the OS, which made it
+  look like a leak. The pull and start stats have titles that fit.
+- Development docs: the full release checklist (`version.go`, chart, tags,
+  changelog, wait for CI before tagging), and the code layout's `version` and
+  `debugpprof` packages.
+- Issue and pull request templates point to `helm/angryduck`, and the bug
+  report lists Repair and Origin check.
+
 ## 1.9.3
 
 The dashboard explains itself: what didn't happen stays out of sight,
