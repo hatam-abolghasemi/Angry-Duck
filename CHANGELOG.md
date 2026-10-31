@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.9.3
+
+The dashboard explains itself: what didn't happen stays out of sight,
+colors mean the same thing everywhere, and tables fit their content.
+Nothing changed in the controller or the workers.
+
+### Changed
+
+- **Dashboard: easier to read.** Charts and tables for things that didn't
+  happen in the time range hide themselves (seed pulls, propagation, repairs,
+  streaming, ...) instead of showing a flat zero, and empty status tables say
+  what empty means. Lines no longer break where a series disappears: absent
+  is drawn as 0. Table columns are sized to their content, and colors keep
+  one meaning everywhere (green fine, amber look, red critical, sky blue in
+  progress, teal kept in the cluster, peach registry downloads, violet event
+  counts); image names take their registry's color. Chart series have plain
+  names (*skipped: no peer has it* instead of `no_source`). Every number has
+  a sparkline. Annotations show only on the charts they concern, and flapping
+  ones mark once.
+- **Dashboard: a Registry filter.** The global *Image* filter is replaced by
+  *Registry*; each tab that lists images has its own *Image* filter within
+  the picked registries.
+- **Dashboard: what Angry Duck saves.** *Where Image Bytes Came From* shows
+  the bytes per source next to what the registry would have served without
+  Angry Duck, and *Registry Downloads, Without vs With Angry Duck* adds both
+  up over the time range. *Workers Up* is compared with the DaemonSet's
+  desired count.
+- **Dashboard: no phantom rows.** Joined tables (*Delivery per Node*,
+  *Spreads*, *Repairs*, ...) listed rows that only a side query produced,
+  such as pods of images nobody delivered, with the panel's empty message in
+  their cells. They are dropped now. *Delivery Time per Node* (images, average
+  and slowest delivery, bytes per path) joins the Image tab, and stream orders
+  share a chart with the slow-chain guard.
+- **Dashboard: fixed state timelines.** *Cleanup State over Time*, *The Image
+  on Each Node* and the containerd event watch drew every bar grey with a
+  `-∞+` legend: their values were bucketed by threshold, ignoring the value
+  mappings. They now show idle/cleaning/stalled, running/receiving/stuck, and
+  so on. The event watch only lists nodes that lost containerd's events.
+- **Dashboard: numbers that mean what they say.** *Failed Rescues in Range*
+  counts rescues that failed, not the retries for images no peer holds (those
+  are in *Rescues by Result* as *skipped: no peer has it*). Live-only numbers
+  that read 0 nearly all the time became range numbers: *Spreads in Range*,
+  *Spreads Finished in Range*, *Registry Bytes for Spreads*, *Rescued in
+  Range*. The per-node mirror hit ratio uses a one-hour window instead of
+  jumping between 0 and 100%. *Registry Status* gains a *served* gauge and
+  lists the worst registry first.
+
 ## 1.9.2
 
 Workers give their memory back: after serving images, their container

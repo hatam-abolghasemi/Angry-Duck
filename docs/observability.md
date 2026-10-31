@@ -10,9 +10,25 @@ one tab per concern. Each opens with a summary row: six numbers, then a status
 table with one row per node, image, registry or process, then charts in pairs.
 Detail rows follow, the rarely needed ones collapsed.
 
+Charts and tables for things that didn't happen in the time range hide
+themselves: on a quiet cluster seed pulls, propagation, repairs, streaming or
+pinned snapshots simply don't show, so what is on screen is what happened.
+Widen the time range to bring them back. Status tables don't hide: when empty
+they say so ("Nothing is stuck pulling right now"). Lines don't break: a
+series that disappears for a while (nothing stuck, no spread running) is drawn
+at 0. Long tables page.
+
+Colors keep one meaning across the dashboard: green is fine, amber needs a
+look, red is critical (a softer red when it is retried anyway), sky blue is
+work in progress, teal is traffic kept inside the cluster, peach is registry
+downloads, violet counts events, light blue is a duration. In tables a count of
+problems stays grey at 0, node names are a warm grey, and image names take the
+color of their registry (the regex value mappings on the *image* columns; add
+yours there).
+
 | Tab | Answers |
 |---|---|
-| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up, images stuck and broken, spreads running, mirror hit ratio, registry traffic avoided; a node table (version, uptime, containerd event watch, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); peer versus registry traffic; which nodes follow containerd's events. |
+| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up out of the nodes the DaemonSet should run on, images that can't be pulled and images that can't start, spreads in the time range, mirror hit ratio, registry traffic avoided; a node table, worst first (uptime, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); where image bytes came from, and the registry downloads with and without Angry Duck added up over the range; stuck and broken images and the mirror hit ratio per node; the nodes that lost containerd's events in the time range, if any. |
 | **Image** | Everything about one image (pick it in **Image**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side; the components and pods using it, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the same tables list every recent image. |
 | **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, streaming and the slow-chain guard, seed pulls; preheat and propagation in collapsed rows. |
 | **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
@@ -35,10 +51,15 @@ Variables:
   aggregate several clusters. Without that label, leave it on *All*. If your
   cluster label has another name, replace `k8s_source_cluster` in the JSON.
 - **Node**: applies to every per-node metric.
-- **Image**: the images Angry Duck is busy with, or has [history](#image-history)
-  for in the time range: spreading, delivered, stuck, broken, repaired, pulled, removed or coming
-  up for removal, gone from their registry. Counters over time carry no image
-  label, by design, to keep the number of series bounded.
+- **Registry**: the registries of the images Angry Duck is busy with, or has
+  [history](#image-history) for in the time range. Applies to every image on
+  every tab.
+- **Image**, on each tab that lists images (Image, Delivery, Rescue & Repair,
+  Mirror & Registry, Disk Cleanup): those images, within the picked
+  registries: spreading, delivered, stuck, broken, repaired, pulled, removed or
+  coming up for removal, gone from their registry. Clicking an image in a table
+  picks it on that tab. Counters over time carry no image label, by design, to
+  keep the number of series bounded.
 
 The pod and component views use kube-state-metrics in the same data source
 (`kube_pod_container_info`, `kube_pod_info`, `kube_pod_owner`,
@@ -48,14 +69,19 @@ its owner: a Deployment through its ReplicaSet, a CronJob through its Job.
 Images are matched on the image as written in the pod spec
 (`image_spec`). That equals Angry Duck's `image` label for references with a
 registry host and a tag (`registry.example.com/team/app:v1`); Docker Hub short
-names (`nginx`) don't match. CPU comes from cAdvisor
+names (`nginx`) don't match. *Workers Up* compares with the worker
+DaemonSet's `kube_daemonset_status_desired_number_scheduled`. CPU comes from cAdvisor
 (`container_cpu_usage_seconds_total`, containers `worker` and `controller`).
 Without them, those panels stay empty and everything else works.
 
 Annotations, toggled from the dashboard controls: Angry Duck versions rolling
-out, process restarts, rescue failures, repair failures, disk cleanup stalling
-and a registry becoming unreachable (all on), and spreads starting (off: with
-hundreds of spreads a day they would cover every chart). The **Reset filters**
+out and process restarts, on every chart; rescue failures and repair failures,
+on the rescue and repair charts; disk cleanup stalling, on the cleanup charts;
+a registry becoming unreachable, on the mirror and origin charts; spreads
+starting (off: with hundreds of spreads a day they would cover every chart),
+on the delivery charts. A node or registry that flaps between stalled and not
+(or reachable and not) is marked once, not at every flap: a mark needs 30
+minutes without one before it. The **Reset filters**
 link keeps data source, cluster, time range and the current tab, and clears
 the rest.
 
