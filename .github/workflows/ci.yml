@@ -44,8 +44,50 @@ jobs:
       - name: Build
         run: go build -tags grpcnotrace ./cmd/controller ./cmd/worker
 
+      - name: Build for arm64
+        run: GOARCH=arm64 go build -tags grpcnotrace -o /dev/null ./cmd/controller ./cmd/worker
+
       - name: Unit tests
         run: go test -race -count=1 ./...
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: helm lint
+        run: helm lint helm/angryduck
+
+      # The chart's default render must be k8s/, object for object (the
+      # Namespace aside, left to --create-namespace).
+      - name: Chart renders k8s/
+        run: |
+          helm template angryduck helm/angryduck -n angryduck > /tmp/chart.yaml
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --user --break-system-packages pyyaml
+          python3 - <<'PY'
+          import glob, sys, yaml
+          def objects(paths):
+              out = {}
+              for p in paths:
+                  for o in yaml.safe_load_all(open(p)):
+                      if o and o["kind"] != "Namespace":
+                          out[(o["kind"], o["metadata"]["name"])] = o
+              return out
+          chart = objects(["/tmp/chart.yaml"])
+          plain = objects(sorted(glob.glob("k8s/*.yaml")))
+          bad = sorted(set(chart) ^ set(plain)) + sorted(k for k in set(chart) & set(plain) if chart[k] != plain[k])
+          for k in bad:
+              print(f"::error::{k[0]}/{k[1]} differs between the chart and k8s/")
+          sys.exit(1 if bad else 0)
+          PY
 
   integration:
     name: Integration tests (real containerd)
