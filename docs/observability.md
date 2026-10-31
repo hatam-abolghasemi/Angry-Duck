@@ -39,6 +39,36 @@ yours there).
 Every panel has a one-line description (hover its title). Click a node or an
 image anywhere, in a table or a chart, to focus the whole dashboard on it.
 
+**Overview.** The node table is sorted here by mirror hits; it opens sorted
+with the nodes that have stuck images first.
+
+![Overview tab](images/dashboard-overview.png)
+
+**Where image bytes came from, and the registry traffic saved.** The dashed
+line is what the registry would have served without Angry Duck.
+
+![Registry downloads with and without Angry Duck](images/registry-savings.png)
+
+**Delivery.** Spread traffic by path, throughput, nodes per state and
+transfers by result; below, spreads and finalizes by result, and streaming.
+
+![Delivery tab](images/dashboard-delivery.png)
+
+![Delivery tab, streaming and slow chains](images/dashboard-delivery-streaming.png)
+
+**Disk Cleanup.** These nodes are full of container logs: cleanup removes
+every image it safely can, keeps the rollback images, and reports the node
+*stalled* rather than deleting more.
+
+![Disk Cleanup tab](images/dashboard-disk-cleanup.png)
+
+**Runtime.** What Angry Duck itself costs: about 15 MiB of memory and 2% of a
+core per worker on a busy day.
+
+![Runtime tab](images/dashboard-runtime.png)
+
+![Runtime tab, containerd calls and controller](images/dashboard-containerd.png)
+
 The file uses Grafana's dashboard schema v2 (`dashboard.grafana.app/v2`), for
 the tabs, and was built with Grafana 13. To import it, go to **Dashboards → New
 → Import**, upload the file and pick your Prometheus data source in the

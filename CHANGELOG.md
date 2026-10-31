@@ -35,6 +35,8 @@ or the workers behave.
   `debugpprof` packages.
 - Issue and pull request templates point to `helm/angryduck`, and the bug
   report lists Repair and Origin check.
+- Screenshots of the dashboard, from our staging cluster, in the README and
+  in [Observability](docs/observability.md).
 
 ## 1.9.3
 

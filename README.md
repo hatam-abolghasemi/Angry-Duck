@@ -19,6 +19,12 @@ Two small Go binaries, a controller and a worker per node, working with the
 containerd and registry you already run. No database, no extra storage, no
 changes to your pods.
 
+![Registry downloads with and without Angry Duck](docs/images/registry-savings.png)
+
+*On our staging cluster, over eight hours of deploys, the nodes needed 104 GiB
+of images. The registry served 6.7 GiB of it; the rest came from neighboring
+nodes.*
+
 ## How it started
 
 It started with speed. Our clusters see hundreds of deploys a day, and every
@@ -118,6 +124,17 @@ curl -fsS -m 10 -X POST https://angryduck.example.com/webhook/preheat \
   -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
+
+## Dashboard
+
+The Grafana dashboard in [`grafana/`](grafana/angryduck-dashboard.json) shows
+what Angry Duck does and what it saves, node by node: images it couldn't help
+with, disks that are filling up, and its own cost.
+
+![The dashboard's Overview tab](docs/images/dashboard-overview.png)
+
+See [Observability](docs/observability.md) for every tab, the metrics and
+suggested alerts.
 
 ## Documentation
 
