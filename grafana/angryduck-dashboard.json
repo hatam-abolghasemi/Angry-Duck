@@ -2,21 +2,7 @@
   "apiVersion": "dashboard.grafana.app/v2",
   "kind": "Dashboard",
   "metadata": {
-    "name": "angryduck",
-    "namespace": "default",
-    "uid": "a6cf5e1a-e2d6-40b1-a7cb-63879e828c16",
-    "resourceVersion": "1793452648220081",
-    "generation": 4,
-    "creationTimestamp": "2026-10-31T13:10:57Z",
-    "labels": {
-      "grafana.app/deprecatedInternalID": "4330062875516928"
-    },
-    "annotations": {
-      "grafana.app/createdBy": "user:bg19fo7x34fswb",
-      "grafana.app/saved-from-ui": "Grafana v13.2.2 (1bea008f7e)",
-      "grafana.app/updatedBy": "user:bg19fo7x34fswb",
-      "grafana.app/updatedTimestamp": "2026-10-31T13:17:28Z"
-    }
+    "name": "angryduck"
   },
   "spec": {
     "annotations": [
@@ -626,8 +612,8 @@
         "kind": "Panel",
         "spec": {
           "id": 100,
-          "title": "Memory by Kind",
-          "description": "Memory of the selected processes by kind, summed: rss_anon (really held), rss_file (own code), heap_live, heap_retained (freed, kept for reuse), heap_released, stacks; from the containers' cgroups, working_set (what kubectl top shows) and page_cache (file cache charged to the containers).",
+          "title": "Memory by Kind, per Process",
+          "description": "What one process holds, by kind, averaged over the selected workers (and the controller). rss_anon: memory it really holds. working_set: what kubectl top shows, which also counts its own code and file cache. heap_live: what the Go heap needs now; heap_retained: freed heap kept for reuse; stacks: goroutine stacks; page_cache: file cache charged to the container. Memory already handed back to the OS (heap_released) isn't shown.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -645,7 +631,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "sum by (component, kind) (angryduck_process_memory_bytes{k8s_source_cluster=~\"$cluster\"}\n  and on (k8s_source_cluster, namespace, pod) (angryduck_build_info{k8s_source_cluster=~\"$cluster\", component=\"controller\"} or angryduck_build_info{k8s_source_cluster=~\"$cluster\", component=\"worker\", node=~\"$node\"}))",
+                        "expr": "avg by (component, kind) (angryduck_process_memory_bytes{k8s_source_cluster=~\"$cluster\", kind!=\"heap_released\"}\n  and on (k8s_source_cluster, namespace, pod) (angryduck_build_info{k8s_source_cluster=~\"$cluster\", component=\"controller\"} or angryduck_build_info{k8s_source_cluster=~\"$cluster\", component=\"worker\", node=~\"$node\"}))",
                         "legendFormat": "{{component}} · {{kind}}",
                         "range": true
                       }
@@ -2476,30 +2462,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -3773,30 +3739,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -4661,30 +4607,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -5411,30 +5337,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -5934,30 +5840,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -6446,30 +6332,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -6971,30 +6837,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -7368,30 +7214,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -10219,30 +10045,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -10642,7 +10448,7 @@
         "kind": "Panel",
         "spec": {
           "id": 2,
-          "title": "Images That Can't Be Pulled",
+          "title": "Can't Be Pulled",
           "description": "Image and node pairs where kubelet's pull from the registry fails right now (ImagePullBackOff, ErrImagePull). Angry Duck copies the image from a peer that has it. When no node has it (a tag that doesn't exist, an image built nowhere), nothing can fix it but the registry: the Rescue & Repair tab shows those as 'skipped: no peer has it'.",
           "links": [],
           "data": {
@@ -11413,7 +11219,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· failed$"
+                      "options": ".*· failed"
                     },
                     "properties": [
                       {
@@ -11428,7 +11234,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· cancelled$"
+                      "options": ".*· cancelled"
                     },
                     "properties": [
                       {
@@ -11443,14 +11249,14 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· present$"
+                      "options": ".*· present"
                     },
                     "properties": [
                       {
                         "id": "color",
                         "value": {
-                          "fixedColor": "light-blue",
-                          "mode": "fixed"
+                          "mode": "fixed",
+                          "fixedColor": "#808080"
                         }
                       }
                     ]
@@ -11458,7 +11264,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· rejected$"
+                      "options": ".*· rejected"
                     },
                     "properties": [
                       {
@@ -11473,7 +11279,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· upstream$"
+                      "options": ".*· upstream"
                     },
                     "properties": [
                       {
@@ -12088,30 +11894,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -12496,30 +12282,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -13026,7 +12792,7 @@
         "kind": "Panel",
         "spec": {
           "id": 3,
-          "title": "Images That Can't Start",
+          "title": "Can't Start",
           "description": "A different failure: the image is on the node, but a container can't start from it (CreateContainerError: missing or corrupt layers). The node repairs it in place, from peers first, then the registry. Normally 0.",
           "links": [],
           "data": {
@@ -14837,7 +14603,7 @@
         "kind": "Panel",
         "spec": {
           "id": 40,
-          "title": "Images That Can't Be Pulled",
+          "title": "Can't Be Pulled",
           "description": "Images some node can't pull right now.",
           "links": [],
           "data": {
@@ -15202,7 +14968,7 @@
         "kind": "Panel",
         "spec": {
           "id": 44,
-          "title": "Images That Can't Start",
+          "title": "Can't Start",
           "description": "Images registered on a node that can't start a container.",
           "links": [],
           "data": {
@@ -15713,30 +15479,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -16175,30 +15921,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -16537,30 +16263,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -20245,30 +19951,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -22128,7 +21814,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· local$"
+                      "options": ".*· local"
                     },
                     "properties": [
                       {
@@ -22143,7 +21829,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· peer$"
+                      "options": ".*· peer"
                     },
                     "properties": [
                       {
@@ -22158,7 +21844,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· miss$"
+                      "options": ".*· miss"
                     },
                     "properties": [
                       {
@@ -22173,7 +21859,7 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
-                      "options": "· error$"
+                      "options": ".*· error"
                     },
                     "properties": [
                       {
@@ -25383,30 +25069,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -25764,30 +25430,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -26436,30 +26082,10 @@
                           },
                           {
                             "options": {
-                              "pattern": "registry\\.snappfood\\.ir/.+",
-                              "result": {
-                                "color": "#e6c36a",
-                                "index": 7
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
-                              "pattern": "repo-afra\\.snappfood\\.dev/.+",
-                              "result": {
-                                "color": "#c7a17a",
-                                "index": 8
-                              }
-                            },
-                            "type": "regex"
-                          },
-                          {
-                            "options": {
                               "pattern": "cr\\.kgateway\\.dev/.+",
                               "result": {
                                 "color": "#86c5b5",
-                                "index": 9
+                                "index": 7
                               }
                             },
                             "type": "regex"
@@ -30814,8 +30440,8 @@
           "refresh": "onDashboardLoad",
           "regex": "",
           "current": {
-            "text": "mimir-mgmt",
-            "value": "cfm8wap1kopogb"
+            "text": "",
+            "value": ""
           },
           "options": [],
           "multi": false,
@@ -30832,8 +30458,8 @@
         "spec": {
           "name": "cluster",
           "current": {
-            "text": "sahand-stg",
-            "value": "sahand-stg"
+            "text": "",
+            "value": ""
           },
           "label": "Cluster",
           "hide": "dontHide",
