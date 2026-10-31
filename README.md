@@ -19,11 +19,11 @@ Two small Go binaries, a controller and a worker per node, working with the
 containerd and registry you already run. No database, no extra storage, no
 changes to your pods.
 
-![Registry downloads with and without Angry Duck](docs/images/registry-savings.png)
+![Image bytes delivered, all and from the registry](docs/images/registry-savings.png)
 
-*On our staging cluster, over eight hours of deploys, the nodes needed 104 GiB
-of images. The registry served 6.7 GiB of it; the rest came from neighboring
-nodes.*
+*On our staging cluster, over eight hours of deploys, Angry Duck delivered
+104 GiB of images to the nodes, and only 6.7 GiB of it came from the registry.
+The rest came from neighboring nodes.*
 
 ## How it started
 

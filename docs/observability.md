@@ -28,7 +28,7 @@ yours there).
 
 | Tab | Answers |
 |---|---|
-| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up out of the nodes the DaemonSet should run on, images that can't be pulled and images that can't start, spreads in the time range, mirror hit ratio, registry traffic avoided; a node table, worst first (uptime, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); where image bytes came from, and the registry downloads with and without Angry Duck added up over the range; stuck and broken images and the mirror hit ratio per node; the nodes that lost containerd's events in the time range, if any. |
+| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up out of the nodes the DaemonSet should run on, images that can't be pulled and images that can't start, spreads in the time range, mirror hit ratio, bytes from peers; a node table, worst first (uptime, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); where delivered image bytes came from, and all of them against the registry's share, added up over the range; stuck and broken images and the mirror hit ratio per node; the nodes that lost containerd's events in the time range, if any. |
 | **Image** | Everything about one image (pick it in **Image**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side; the components and pods using it, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the same tables list every recent image. |
 | **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, streaming and the slow-chain guard, seed pulls; preheat and propagation in collapsed rows. |
 | **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
@@ -44,10 +44,14 @@ with the nodes that have stuck images first.
 
 ![Overview tab](images/dashboard-overview.png)
 
-**Where image bytes came from, and the registry traffic saved.** The dashed
-line is what the registry would have served without Angry Duck.
+**Image bytes delivered, and how much came from the registry.** The dashed
+line is everything Angry Duck delivered to the nodes; the solid one is the part
+the registry served. It isn't a "without Angry Duck" estimate: spreads reach
+every eligible node, including nodes that never run the image, and registry
+pulls containerd makes on its own (seed pulls, mirror misses) aren't measured
+in bytes.
 
-![Registry downloads with and without Angry Duck](images/registry-savings.png)
+![Image bytes delivered, all and from the registry](images/registry-savings.png)
 
 **Delivery.** Spread traffic by path, throughput, nodes per state and
 transfers by result; below, spreads and finalizes by result, and streaming.
