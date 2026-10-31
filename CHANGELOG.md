@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Dashboard: no "without Angry Duck" claim.** *Registry Downloads,
+  Without vs With Angry Duck* presented every byte delivered to the nodes as
+  what the registry would have served without Angry Duck. Spreads reach every
+  eligible node, including nodes that never run the image, so that
+  overstated the savings. The chart is now *Image Bytes Delivered, All vs
+  From the Registry*, *Where Image Bytes Came From* is relabeled the same
+  way, and the Overview's *Registry Traffic Avoided* is *Bytes from Peers*.
+  The README caption and the Observability docs say what the numbers
+  measure, including that registry pulls containerd makes on its own aren't
+  counted.
+
 ## 1.9.4
 
 Runs on arm64 nodes, installs without a clone, and the dashboard tells
