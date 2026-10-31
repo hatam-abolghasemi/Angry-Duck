@@ -20,6 +20,8 @@ app/
     ├── metrics/           small Prometheus text-format registry
     ├── memlimit/          sets GOMEMLIMIT from the cgroup limit
     ├── logging/           leveled logging
+    ├── debugpprof/        /debug/pprof, only in builds with -tags pprof
+    ├── version/           the release version
     ├── config/            .env loader and typed getters
     └── model/             wire types shared by both binaries
 helm/
@@ -101,11 +103,11 @@ cd app && go test -race ./...
 ```bash
 helm lint helm/angryduck
 helm template angryduck helm/angryduck -n angryduck
-helm template angryduck helm/angryduck -n angryduck -f helm/angryduck/values-stg.yaml
 ```
 
 The default render must match `k8s/` object for object, apart from the
-Namespace. Change both together. Keep `version` and `appVersion` in
+Namespace. Change both together: CI renders the chart and fails on any
+difference. Keep `version` and `appVersion` in
 `helm/angryduck/Chart.yaml` equal to the release.
 
 ## Running locally
@@ -118,27 +120,38 @@ containerd and node-exporter.
 
 The Grafana dashboard is plain JSON. Import it, edit it in Grafana, then export
 it with **Share → Export → Save to file** with *Export for sharing externally*
-enabled, and replace `grafana/angryduck-dashboard.json`.
+enabled, and replace `grafana/angryduck-dashboard.json`. Before committing,
+make sure it carries no cluster of yours: the *Data source* and *Cluster*
+variables saved empty, `metadata` reduced to `name`, and no internal
+registries in the image color mappings.
 
 ## CI and releases
 
 GitHub Actions run two workflows from `.github/workflows/`:
 
 - **CI** (`ci.yml`), on every pull request and push to `main`: `gofmt`, `go
-  vet` (with and without the `integration` tag), a build of both binaries, the
-  unit tests with `-race`, and the integration tests against a real containerd
-  (the release binaries of the version the nodes run, started next to the
-  runner's own, overlayfs and CRI).
+  vet` (with and without the `integration` tag), a build of both binaries for
+  amd64 and arm64, the unit tests with `-race`, the integration tests against
+  a real containerd (the release binaries of the version the nodes run,
+  started next to the runner's own, overlayfs and CRI), and `helm lint` plus a
+  check that the chart renders exactly `k8s/`.
 - **Release** (`release.yml`), on a pushed `vX.Y.Z` tag: checks that the tag,
   `helm/angryduck/Chart.yaml`'s `appVersion`, the image tags in `k8s/` and a
   `## X.Y.Z` section of `CHANGELOG.md` all agree, builds and pushes
   `ghcr.io/<owner>/angry-duck-controller` and `angry-duck-worker` as `X.Y.Z`
-  and `latest`, then publishes the GitHub release with that changelog section
-  as its notes. It can be re-run for an existing tag from the Actions tab.
+  and `latest` for `linux/amd64` and `linux/arm64`, with an SBOM and build
+  provenance attached, pushes the chart to `oci://ghcr.io/<owner>/charts`,
+  then publishes the GitHub release with that changelog section as its notes.
+  It can be re-run for an existing tag from the Actions tab.
 
-To release: bump the version in `Chart.yaml`, `k8s/` and `docs/`, add the
-`CHANGELOG.md` section, merge, then:
+It doesn't wait for CI, so tag only a commit whose CI run passed. To release:
+bump the version in `app/internal/version/version.go`, `Chart.yaml`
+(`version` and `appVersion`), the image tags in `k8s/` and the examples in
+`docs/`; turn the changelog's `Unreleased` section into `## X.Y.Z`; merge;
+wait for CI on `main`; then:
 
 ```bash
-git tag -a vX.Y.Z -m "Angry Duck X.Y.Z" && git push origin vX.Y.Z
+git tag -a vX.Y.Z -m "short description" && git push origin vX.Y.Z
 ```
+
+The tag's message becomes the release title after the dash.

@@ -13,10 +13,13 @@ references `registry-pull`, `angryduck-rescue-token` and
 `angryduck-webhook-token` but doesn't create them.
 
 ```bash
-helm upgrade --install angryduck ./helm/angryduck \
+helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.9.3 \
   --namespace angryduck --create-namespace \
   -f my-values.yaml
 ```
+
+Every release publishes the chart to `oci://ghcr.io/hatam-abolghasemi/charts/angryduck`, with the
+same version as the images. From a clone, `./helm/angryduck` works the same.
 
 `values.yaml` is the example setup, the same as `k8s/`. Your values file only
 needs what differs. For example, images from a pull-through
@@ -84,7 +87,7 @@ Set `serviceMonitor.enabled: false` without the Prometheus Operator.
 ## Upgrading
 
 ```bash
-helm upgrade angryduck ./helm/angryduck -n angryduck -f my-values.yaml
+helm upgrade angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version <new version> -n angryduck -f my-values.yaml
 ```
 
 Read the [changelog](../CHANGELOG.md) first. Like `kubectl apply`, a change to

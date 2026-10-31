@@ -99,14 +99,14 @@ node-exporter on every node. Check the
 [node settings](docs/node-settings.md) that decide how much Angry Duck can do,
 then install.
 
-Prebuilt images for every release are on GitHub Container Registry:
-`ghcr.io/hatam-abolghasemi/angry-duck-controller` and
-`ghcr.io/hatam-abolghasemi/angry-duck-worker`. The Helm chart uses them by
-default:
+Every release publishes both images to GitHub Container Registry
+(`ghcr.io/hatam-abolghasemi/angry-duck-controller` and
+`ghcr.io/hatam-abolghasemi/angry-duck-worker`) and the Helm chart next to
+them, so there is nothing to clone or build:
 
 ```bash
-helm upgrade --install angryduck ./helm/angryduck \
-  --namespace angryduck --create-namespace \
+helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck \
+  --version 1.9.3 --namespace angryduck --create-namespace \
   --set ingress.host=angryduck.example.com
 ```
 
@@ -148,7 +148,9 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.8.11**; see the [changelog](CHANGELOG.md). Angry
+The current version is **1.9.3**; see the [changelog](CHANGELOG.md) and the
+[releases](https://github.com/hatam-abolghasemi/Angry-Duck/releases). It runs
+on the clusters it was built for, through hundreds of deploys a day. Angry
 Duck targets Linux nodes running containerd 1.6 or later.
 
 ## Feedback and contributing
@@ -158,7 +160,8 @@ Running Angry Duck, or thinking about it? Tell us how it goes in
 Bugs and feature requests go in
 [Issues](https://github.com/hatam-abolghasemi/Angry-Duck/issues), and security
 reports through the [private advisory form](https://github.com/hatam-abolghasemi/Angry-Duck/security/advisories/new).
-See [Development](docs/development.md) to build and test it.
+See [Contributing](.github/CONTRIBUTING.md) to send a change, and
+[Development](docs/development.md) to build and test it.
 
 ## License
 
