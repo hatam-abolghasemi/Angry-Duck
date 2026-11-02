@@ -1,6 +1,129 @@
 # Changelog
 
-## Unreleased
+## 1.10.0
+
+Rollbacks without keeping old images everywhere: when the cluster stops
+running an image, one node, the one with the most room, keeps it for 24
+hours, and every other copy goes after an hour. Every feature has an on/off
+switch, and turning one off turns off everything beneath it. The mirror is on
+by default. Image cleanup does about a fifth of the allocations it did.
+
+### Added
+
+- **Retention copies.** When the last container in the cluster stops using
+  an image (a new version replaced it, or its pods were removed), the
+  controller picks one node to keep it for `GC_RETENTION_TTL_S` (24h),
+  counted from that moment. It picks among nodes below
+  `GC_RETENTION_MAX_UTILIZATION` (the cleanup's high mark, 70%) one that
+  holds the image, preferring one holding its layer blobs (only blobs can be
+  served by the mirror), then the most free disk. If no node with room holds
+  it, it is copied (through rescue) to the node with the most room. The
+  worker marks the image in containerd,
+  `angryduck.io/last-survivor=<expiry>`, on every name, and its cleanup
+  leaves it alone, disk pressure included, until the time is up, then
+  removes it at once. A rollback in the meantime pulls through the mirror
+  from that node and the peers that receive it, or through rescue if the
+  registry is down.
+  - While every node is at or above the limit, no copy is kept; as soon as
+    one is below it, images that went unused meanwhile get theirs, until
+    their 24 hours are over.
+  - An image that runs again loses its mark. A copy whose node went away or
+    no longer has it is picked again elsewhere. A second copy (two marks for
+    one image) is unmarked.
+  - Nothing is lost on a restart: marks live on the images and workers
+    report them, so a restarted controller picks them up. A restarted worker
+    keeps its marks, and until its first cleanup look its containers still
+    count as using what they used, so a worker rollout doesn't look like
+    every image going unused.
+  - Workers send the images their containers use (by target digest) and
+    their marks in the reports they already send, only when they change;
+    the controller acts on them at once, and looks every
+    `GC_RETENTION_INTERVAL_S` (30s) for what time alone changes.
+- **Feature switches as a tree.** Both binaries resolve every `*_ENABLED`
+  switch in one place and log the result at startup. A child is on only if
+  its parent is: `GC_ENABLED` → `GC_RETENTION_ENABLED`, `SPREAD_ENABLED` →
+  `SPREAD_STREAM_ENABLED`. A feature turned off only by its parent gets a log
+  line saying so. With `GC_ENABLED=false` kubelet does all image cleanup: no
+  age rule, no disk-pressure removal, no retention, and workers remove any
+  retention mark at startup.
+- `GC_RETENTION_ENABLED` (`true`), `GC_RETENTION_TTL_S` (`86400`),
+  `GC_RETENTION_MAX_UTILIZATION` (`GC_HIGH_UTILIZATION`),
+  `GC_RETENTION_INTERVAL_S` (`30`).
+- Worker endpoint `POST /images/retain` (shared token), and `retain` as a
+  rescue reason.
+- `angryduck_worker_gc_retained_images{node}`,
+  `angryduck_controller_retention_copies{state}`,
+  `angryduck_controller_retention_paused`,
+  `angryduck_controller_retention_events_total{event}`, the `retention`
+  tier in `angryduck_worker_gc_images_deleted_total` and
+  `angryduck_worker_gc_image_removal_seconds`, and, in each image's history,
+  `angryduck_controller_image_retention_timestamp_seconds{image,node,event}`.
+- **Dashboard: retention.** A *Retention copies* row on the Disk Cleanup tab:
+  copies kept and waiting, whether retention is paused, copies kept, used
+  again and lost in the range; every copy with its node and when it expires;
+  retention events over time; and each copy's history. On the Image tab,
+  *The Image on Each Node* shows *kept for rollbacks* on the node keeping the
+  image's copy, and *Kept for Rollbacks* (under *Pulls, repairs & cleanup*)
+  lists its history.
+- `/status`: `retention`, every copy with its node and expiry.
+- Recipes: *Leave cleanup to kubelet*; *Rollbacks matter most* now keeps
+  copies longer.
+
+### Changed
+
+- **`GC_UNUSED_FOR_S` defaults to `3600`** (was `21600`): an image unused on
+  a node for an hour is removed, whatever the disk. The retention copy is
+  what keeps rollbacks local. This includes images a spread put on a node
+  that never ran them: a preheat that lands more than an hour before its
+  rollout is removed before use.
+- **`GC_LOW_UTILIZATION` defaults to `0.40`** (was `0.60`): a disk that
+  crosses 70% is cleaned down to 40%. Cleanup runs less often but removes
+  more each time, in batches as before, with the same stop when a batch
+  frees nothing.
+- **`MIRROR_ENABLED` defaults to `true`** (was `false`; the manifests and
+  chart already set it). It takes effect where containerd's `config_path` is
+  set, and costs nothing where it isn't.
+- **Cleanup is lighter.** An image's names are grouped and sorted in one
+  pass into one array, instead of a slice per image and a sort per repo. On
+  a node with 300 images (100 in use), a cleanup look went from 1145 to 236
+  allocations and from 243 KB to 137 KB, at about the same CPU time; with
+  retention on, the same. Image repair's listing uses the same grouping.
+- The controller keeps each node's in-use images (interned, like its image
+  list): about 0.5 MiB more at 150 nodes with 60 running images each, and
+  0.1 MiB for retention itself. Steady reports still allocate nothing. A
+  retention look over 150 nodes takes about 0.5 ms.
+- **Dependencies:** containerd's client 1.7.36 (was 1.7.27), gRPC 1.82.1
+  (1.65.0), protobuf 1.36, `golang.org/x/sys` 0.47.0, CRI API 0.37.2, OCI
+  image-spec 1.1.1. containerd's API module stays at 1.8.0: 1.9 and later
+  are for containerd 2 and don't build with the 1.7 client, so Dependabot
+  now leaves it alone. Building needs Go 1.26; the images build with Go
+  1.27.3. CI and release actions are on their current major versions.
+- **Pooled content writes kept working on the new gRPC.** gRPC 1.66 moved
+  codecs to a new API and stopped returning the old proto codec, which
+  would have quietly turned the worker's pooled encoding of content writes
+  off: every 1 MiB write into containerd would again be a fresh allocation,
+  and gRPC's own pool zeroes each buffer before use. The pooled encoding now
+  uses the new API, and gRPC hands each buffer back once its transport wrote
+  it. Measured against 1.9.4 on the same Go, a 1 MiB write costs the worker
+  about 6% less CPU and 30% less memory.
+- `app/.env.example` lists every setting again (the streaming, slow-chain and
+  repair settings were missing); `GC_RETENTION_MAX_UTILIZATION` is left empty
+  there, so it follows `GC_HIGH_UTILIZATION`.
+- kubelet's `imageMaximumGCAge` should now be unset or above
+  `GC_RETENTION_TTL_S` (was `GC_UNUSED_FOR_S`); see
+  [Node settings](docs/node-settings.md).
+- Dashboard: the `rollback` tier is now `retention`; *Cleanup Status* shows
+  the retention copies each node keeps; *Images Coming Up for Removal* and
+  *Next Removal In* include retention copies' expiry.
+
+### Removed
+
+- **The rollback tier and `GC_ROLLBACK_KEEP`.** The newest 3 unused images
+  per repo on every node are no longer kept; one retention copy per image in
+  the cluster replaces them. A worker that still finds `GC_ROLLBACK_KEEP` set
+  logs that it is ignored. `tier="rollback"` is gone from
+  `angryduck_worker_gc_candidates` and
+  `angryduck_worker_gc_images_deleted_total`.
 
 ### Fixed
 
@@ -14,6 +137,22 @@
   The README caption and the Observability docs say what the numbers
   measure, including that registry pulls containerd makes on its own aren't
   counted.
+
+### Upgrade notes
+
+- Disks will hold fewer images: unused images go after an hour instead of
+  six, and only one copy of each image that went unused stays, for 24 hours.
+  To keep the old pace, set `GC_UNUSED_FOR_S: "21600"` and
+  `GC_LOW_UTILIZATION: "0.60"`.
+- Remove `GC_ROLLBACK_KEEP` from your values or ConfigMap; it does nothing.
+- Retention needs the shared token on both sides (as rescue does), and
+  copying to a node that doesn't hold the image needs `RESCUE_ENABLED`.
+- Alerts or panels on `tier="rollback"` should use
+  `angryduck_worker_gc_retained_images` instead.
+- During the rollout, workers still on 1.9.x don't report their running
+  images, and can't keep a copy: an image running only on such nodes may get
+  a retention copy it doesn't need yet, which is dropped as soon as their
+  workers run 1.10.0 and report it running.
 
 ## 1.9.4
 
