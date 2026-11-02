@@ -61,8 +61,11 @@ transfers by result; below, spreads and finalizes by result, and streaming.
 ![Delivery tab, streaming and slow chains](images/dashboard-delivery-streaming.png)
 
 **Disk Cleanup.** These nodes are full of container logs: cleanup removes
-every image it safely can, keeps the rollback images, and reports the node
-*stalled* rather than deleting more.
+every image it safely can and reports the node *stalled* rather than deleting
+more. The *Retention copies* row below the summary shows the images the
+cluster stopped running, the node keeping each and when its copy expires, and
+what happened to each copy; on the Image tab, *The Image on Each Node* shows a
+retention copy as *kept for rollbacks*.
 
 ![Disk Cleanup tab](images/dashboard-disk-cleanup.png)
 
@@ -146,6 +149,9 @@ the first event too.
 | `angryduck_controller_rescues_in_flight` | gauge | | Rescues running now. |
 | `angryduck_controller_rescue_stuck_pods` | gauge | `node`, `image`, `in_flight` | Pods stuck per node and image; `in_flight` 1 while a rescue runs for it. Only pairs stuck now. |
 | `angryduck_controller_repair_orders_total` | counter | `node`, `result` | Repair orders sent because a container failed to start on a broken image (`CreateContainerError`): `sent`, `failed`, `no_worker`. |
+| `angryduck_controller_retention_copies` | gauge | `state` | [Retention copies](image-cleanup.md#retention-copies): `held` (a node keeps it), `pending` (no node picked yet), `copying` (being copied to a node with room). |
+| `angryduck_controller_retention_paused` | gauge | | 1 while copies wait because every node is at or above `GC_RETENTION_MAX_UTILIZATION`. |
+| `angryduck_controller_retention_events_total` | counter | `event` | `unused` (an image went unused everywhere), `kept` (a node keeps the copy), `copied`, `used` (runs again), `lost` (its node went away or dropped it), `gone` (no node holds it), `expired`. |
 
 <a id="spread"></a>Spread. Series labeled `image` or `node` exist only while
 that image is being spread and drop when it ends, so their number follows
@@ -173,7 +179,7 @@ what is moving, not history:
 | `angryduck_worker_pulls_total` | counter | `node`, `result`, `registry` | Seed pulls: `success`, `failure`, `cancelled`. |
 | `angryduck_worker_pull_seconds_total` | counter | `node`, `result`, `registry` | Seconds spent in seed pulls. Divide by `pulls_total` for the average. |
 | `angryduck_worker_pulls_in_flight` | gauge | `node` | Seed pulls running now. |
-| `angryduck_worker_rescues_total` | counter | `node`, `reason`, `result` | Images fetched from peers. `reason`: `rescue` or `propagate`. `result`: `success`, `failure`, `already_present`. |
+| `angryduck_worker_rescues_total` | counter | `node`, `reason`, `result` | Images fetched from peers. `reason`: `rescue`, `propagate`, or `retain` (copying a retention copy to a node with room). `result`: `success`, `failure`, `already_present`. |
 | `angryduck_worker_rescue_bytes_total` | counter | `node`, `direction` | Bytes moved between nodes, `served` or `received`. |
 | `angryduck_worker_rescue_layers_total` | counter | `node`, `method` | Layers by delivery: `present`, `blob`, `snapshot`. |
 | `angryduck_worker_rescue_pinned_snapshots` | gauge | `node` | Snapshots pinned for a retry. |
@@ -192,9 +198,10 @@ what is moving, not history:
 | `angryduck_worker_mirror_peer_served_bytes_total` | counter | `node` | Bytes served to other nodes' mirrors. |
 | `angryduck_worker_inventory_events_total` | counter | `node`, `topic` | containerd events that changed what the node can serve; each burst settles into one inventory report. |
 | `angryduck_worker_inventory_watch_up` | gauge | `node` | 1 while the node follows containerd's events, 0 while it falls back to periodic layer scans. |
-| `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `rollback`, or `error`. |
+| `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `retention` (an expired [retention copy](image-cleanup.md#retention-copies)), or `error`. |
 | `angryduck_worker_gc_image_returns` | gauge | `node`, `image` | Images that came back within an hour of cleanup removing them, and how many times. Only images that came back in the last hour, so the series count stays small. |
-| `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`, `rollback`. |
+| `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`. |
+| `angryduck_worker_gc_retained_images` | gauge | `node` | Retention copies this node keeps (marked `angryduck.io/last-survivor`), not yet expired. Only with retention on. |
 | `angryduck_worker_gc_cleaning` | gauge | `node` | 1 while the disk is above high and not yet back to low. |
 | `angryduck_worker_broken_image` | gauge | `node`, `image` | 1 while that image is registered on the node but can't start a container. Removed once it is repaired or no longer registered. |
 | `angryduck_worker_image_repairs_total` | counter | `node`, `result` | Broken images repaired in place (`repaired`), or not (`failed`: some piece came from no peer and not from the registry; retried at the next check). |
@@ -257,6 +264,7 @@ a scrape (a scrape that failed, ran late, or a Prometheus restart) is lost.
 | `angryduck_controller_image_delivery_seconds` | `image`, `node`, `via` | How long after the preheat it got it (for a rescue, after its pull got stuck). |
 | `angryduck_controller_image_received_bytes` | `image`, `node`, `path` | Bytes the node received for it: `registry`, `peer`, `image`, `propagate`, `rescue`. Set when the node got it, or when its spread ended without it. |
 | `angryduck_controller_image_transfer_seconds` | `image`, `node`, `path` | Seconds spent receiving it, summed over transfers. |
+| `angryduck_controller_image_retention_timestamp_seconds` | `image`, `node`, `event` | When something happened to its [retention copy](image-cleanup.md#retention-copies): `unused` (went unused in the cluster; no node), `kept`, `copied`, `used` (runs again), `lost`, `gone` (no node holds it; no node), `expired`. |
 | `angryduck_worker_image_pull_seconds` | `node`, `image`, `result` | A seed pull of it from the registry. |
 | `angryduck_worker_image_repair_seconds` | `node`, `image`, `result` | A repair of it: `repaired`, `failed`. |
 | `angryduck_worker_image_repair_timestamp_seconds` | `node`, `image`, `result` | When that repair ended. |
@@ -278,9 +286,9 @@ a scrape (a scrape that failed, ran late, or a Prometheus restart) is lost.
 
 One more gauge is about the future rather than the past:
 `angryduck_worker_gc_image_removal_seconds{node, image, tier}` lists the unused
-images the age rule will remove, and in how many seconds (`0`: at the next
-check). Disk pressure removes them sooner, oldest first. Images kept for
-rollback are not listed.
+images the cleanup will remove, and in how many seconds (`0`: at the next
+check): `old` and `pressure` by the age rule (disk pressure removes them
+sooner, oldest first), `retention` when a retention copy expires.
 
 <a id="origin-check"></a>
 ## Origin check

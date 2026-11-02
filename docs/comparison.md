@@ -12,12 +12,12 @@ in one tool.
 |---|---|---|---|---|---|---|---|---|---|
 | **Push-triggered preheat** | Yes, webhook from CI | No | Yes, into seed peers | No | Declared list, refreshed on a schedule | Declared job | No | No | No |
 | **Image on every node before pods ask** | Yes, propagation | No | No | No | Yes, each node pulls from the registry | Yes, each node pulls from the registry | No | No | No |
-| **Peer-to-peer during a pull** | Yes, mirror (opt-in) | Yes | Yes | Yes | No | No | No | No | No |
+| **Peer-to-peer during a pull** | Yes, mirror (on by default) | Yes | Yes | Yes | No | No | No | No | No |
 | **Registry load per new image** | About `RANK_TOP_N` pulls, changed layers only | One per layer, then peers | One per piece via seed peers | Via origin cluster | One per node | One per node | n/a | n/a | n/a |
 | **Rescues `ImagePullBackOff` from peers** | Yes, any image | Indirectly, if the pull retries through the mirror | Indirectly, if in cache | Indirectly, if in cache | No | No | No | No | Routes to another registry |
 | **Registry outage, image already in cluster** | Pods start, pinned tags with `IfNotPresent` | Digest pulls; tags need `resolveTags` | From cache | From cache | Only where already cached | Only where already pulled | n/a | n/a | If a replica registry is up |
 | **Image cleanup** | Yes, age and disk based | No | Its own cache only | Its own cache only | No | No | Yes, list or scanner based | At disk pressure | No |
-| **Keeps rollback images** | Yes, `GC_ROLLBACK_KEEP` per repo | n/a | n/a | n/a | n/a | n/a | No | No | n/a |
+| **Keeps rollback images** | Yes, one copy per image that went unused, cluster-wide, for `GC_RETENTION_TTL_S` | n/a | n/a | n/a | n/a | n/a | No | No | n/a |
 | **Needs `discard_unpacked_layers = false`** | No, snapshots as last resort | Yes | No | No | No | No | No | No | No |
 | **Extra storage or databases** | None | None | Manager with MySQL and Redis, or a lightweight mode without | Origin storage backend | None | None | None | None | Replica registries |
 | **Rewrites Pod specs** | No | No | No | No | No | No | No | No | Yes, mutating webhook |
@@ -97,7 +97,8 @@ Each step needs to know what the others did.
 - **Cleanup must not undo placement.** A separate GC sees a freshly propagated
   image as unused and removes it before the rollout. Angry Duck's cleanup and
   propagation share one view: propagation waits for cleanup on full disks, and
-  cleanup keeps rollback images that rescue and rollbacks rely on.
+  cleanup keeps one copy of every image that went unused, which rescue and
+  rollbacks rely on.
 - **Transfers share one budget.** Preheat, propagation and rescue compete for
   the same node bandwidth and disk. One controller bounds them together, and
   gives rescues their own slots so a big rollout can't starve a stuck pod.

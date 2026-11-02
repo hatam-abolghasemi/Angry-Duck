@@ -8,7 +8,7 @@ app/
 │   ├── controller/        controller entrypoint
 │   └── worker/            worker entrypoint
 └── internal/
-    ├── controller/        worker registry, ranking, propagation, rescue, HTTP server
+    ├── controller/        worker registry, ranking, propagation, rescue, retention, HTTP server
     ├── worker/            reporter, puller, transfers, mirror, image cleanup, containerd store and CRI runtime
     ├── blobship/          image walk, per-layer decisions, partial OCI archives
     ├── layerindex/        which node holds which blob or snapshot
@@ -23,6 +23,7 @@ app/
     ├── debugpprof/        /debug/pprof, only in builds with -tags pprof
     ├── version/           the release version
     ├── config/            .env loader and typed getters
+    ├── features/          the feature switches, resolved as a tree
     └── model/             wire types shared by both binaries
 helm/
 └── angryduck/             Helm chart, the same objects as k8s/
@@ -35,6 +36,9 @@ The worker talks to containerd with containerd's own Go client and CRI API;
 those, gRPC and the OCI types are the module's only dependencies.
 
 ## Build
+
+Go 1.26 or later (the `go` line of `app/go.mod`); release images build with
+the Go version in the Dockerfiles.
 
 ```bash
 cd app
@@ -78,7 +82,7 @@ cd app && go test -race ./...
 
   They cover import, blob reads, a full rescue that ships a snapshot (with
   and without the content store mounted), rescue to and from a pre-1.8.6
-  worker (with its exact `tar` commands), and
+  worker (with its exact `tar` commands), the retention mark on images, and
   CRI pulls from a test registry, and compare the resulting file trees
   (contents, owners, modes, links, xattrs). With `ANGRYDUCK_NO_MOUNT=1` they
   skip the tree comparison, so they can run with every capability dropped:

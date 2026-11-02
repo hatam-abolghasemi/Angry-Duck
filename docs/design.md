@@ -124,11 +124,15 @@ failure for images the cluster already has.
 A rollback is a deploy of an image the cluster has already seen, so it should
 be the fastest deploy of all.
 
-- [Cleanup](image-cleanup.md) keeps every image for hours after it was last
-  used, and keeps the newest few of each app (`GC_ROLLBACK_KEEP`) longest,
-  even when disks run high.
-- If a node lost the image anyway and the registry can't serve it, rescue
-  copies it from a node that still has it.
+- When the cluster stops running an image, one node keeps it as the
+  [retention copy](image-cleanup.md#retention-copies) for 24 hours, outside the
+  cleanup's rules, disk pressure included. Not one copy per node and not the
+  last few versions per app: one copy per image, on the node with the most
+  room, enough for every peer to fetch it from.
+- A rollback pulls through the [mirror](mirror.md) from that copy, and from
+  the peers that receive it, instead of the registry. If the registry can't
+  serve the tag, rescue copies it from the node that keeps it.
+- Every other copy goes after an hour unused, so disks stay lean.
 
 ## Cleanup makes distribution safe
 
@@ -141,11 +145,13 @@ a separate tool, and the two halves share one view:
 
 - Nodes above `PROPAGATE_MAX_UTILIZATION` receive nothing new until cleanup
   has made room.
-- Cleanup removes images unused for 6 hours, and works down to
+- Cleanup removes images unused for an hour, and works down to
   `GC_LOW_UTILIZATION` when a disk crosses `GC_HIGH_UTILIZATION`, well before
   kubelet's own threshold.
+- Retention copies go only to nodes below `GC_RETENTION_MAX_UTILIZATION`, so
+  keeping them never fills a disk; while every node is above it, none is kept.
 - When removing images stops freeing space (the disk is full of something
-  else), cleanup stops instead of deleting rollback images for nothing.
+  else), cleanup stops instead of deleting images for nothing.
 
 ## Safe by construction
 

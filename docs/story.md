@@ -60,7 +60,10 @@ used for hours, free space early when a disk runs high, keep the last few
 images of every app for rollbacks, and don't send new images to a node that is
 already full. And when the disk is full of something other than images, stop
 deleting rather than throw away rollbacks for nothing. That became
-[image cleanup](image-cleanup.md).
+[image cleanup](image-cleanup.md). Later, "the last few images of every app on
+every node" gave way to something leaner: one copy of each image the cluster
+stopped running, on the node with the most room, for a day. Every other node
+can fetch it from there.
 
 ## Trying what already existed
 

@@ -48,7 +48,6 @@ from peers whenever possible.
 config:
   SPREAD_MAX_REGISTRY_PULLS: "2"
   SPREAD_RACE_PER_BLOB: "2"
-  MIRROR_ENABLED: "true"
   MIRROR_REGISTRIES: "registry.example.com"
 ```
 
@@ -58,32 +57,48 @@ containerd's `config_path`; see [Mirror](mirror.md#requirements).
 
 ## Small disks
 
-Clean up earlier and keep fewer rollback images. Keep the thresholds in order:
-`PROPAGATE_MAX_UTILIZATION` at or below `GC_HIGH_UTILIZATION`, both below
-kubelet's `imageGCHighThresholdPercent`.
+Clean up earlier and keep retention copies for less time. Keep the thresholds
+in order: `PROPAGATE_MAX_UTILIZATION` and `GC_RETENTION_MAX_UTILIZATION` at or
+below `GC_HIGH_UTILIZATION`, all below kubelet's `imageGCHighThresholdPercent`.
 
 ```yaml
 config:
-  GC_UNUSED_FOR_S: "7200"
+  GC_UNUSED_FOR_S: "1800"
   GC_HIGH_UTILIZATION: "0.60"
-  GC_LOW_UTILIZATION: "0.50"
-  GC_ROLLBACK_KEEP: "1"
+  GC_LOW_UTILIZATION: "0.40"
+  GC_RETENTION_TTL_S: "21600"
+  GC_RETENTION_MAX_UTILIZATION: "0.50"
   PROPAGATE_MAX_UTILIZATION: "0.60"
 ```
 
 If a node shows as *stalled* on the Cleanup tab, images aren't what fills its
 disk; see [When removing doesn't help](image-cleanup.md#when-removing-doesnt-help).
 
-## Rollbacks matter most
+## Leave cleanup to kubelet
 
-Keep images longer and keep more versions per app. Make sure kubelet's
-`imageMaximumGCAge` is unset or longer than `GC_UNUSED_FOR_S`, or kubelet
-removes them first.
+Turn Angry Duck's cleanup off and kubelet's image GC does it all. Everything
+beneath the switch goes with it: no age rule, no disk-pressure removal, no
+retention copies, and workers remove any retention mark at startup.
 
 ```yaml
 config:
-  GC_UNUSED_FOR_S: "86400"
-  GC_ROLLBACK_KEEP: "5"
+  GC_ENABLED: "false"
+```
+
+To keep Angry Duck's cleanup but without retention copies, set only
+`GC_RETENTION_ENABLED: "false"`.
+
+## Rollbacks matter most
+
+Keep the retention copy of every image that went unused for longer, so a
+rollback days later still finds it on a node. Make sure kubelet's
+`imageMaximumGCAge` is unset or longer than `GC_RETENTION_TTL_S`, or kubelet
+removes copies first. The mirror (on by default) is how a rollback reaches the
+copy while the registry is up; rescue covers it while the registry is down.
+
+```yaml
+config:
+  GC_RETENTION_TTL_S: "604800"   # 7 days
 ```
 
 ## Images only where they run
@@ -117,8 +132,8 @@ Both are needed: `SPREAD_ENABLED` controls blob-by-blob spreading,
 ## No CI integration yet
 
 Angry Duck still helps without the webhook: [rescue](rescue.md) unsticks
-pulls, [cleanup](image-cleanup.md) keeps disks and rollback images in shape,
-and the [mirror](mirror.md), if enabled, serves layers from peers. Add the
+pulls, [cleanup](image-cleanup.md) keeps disks lean and one copy of every image for rollbacks,
+and the [mirror](mirror.md) serves layers from peers. Add the
 webhook when you're ready, and preheat and spreading start working.
 
 ## CI runners inside the cluster

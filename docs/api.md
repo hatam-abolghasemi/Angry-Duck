@@ -10,7 +10,7 @@ Port `8080`.
 | `POST /report` | token, when configured | Worker reports. |
 | `GET /layers/holders?digest=&exclude=` | token | Nodes holding a blob, for mirrors. |
 | `POST /spread/done` | token | Workers report each spread transfer's end: `{"node", "job", "digest", "path", "result", "bytes", "seconds", "upstream", "id"}`. `upstream` marks a stream that broke because its source's own transfer stopped; `id` is the order's. |
-| `GET /status` | none | Workers, the preheat target, stuck pulls (`rescues`), active `spreads` and whole-image `propagations`. |
+| `GET /status` | none | Workers, the preheat target, stuck pulls (`rescues`), active `spreads`, whole-image `propagations` and [retention copies](image-cleanup.md#retention-copies) (`retention`: digest, image, node keeping it, when it went unused, until when). |
 | `GET /metrics` | none | Prometheus metrics. |
 | `GET /healthz` | none | Liveness and readiness. |
 
@@ -35,7 +35,8 @@ shared token as `Authorization: Bearer <token>`.
 |---|---|---|---|
 | `POST /pull` | token, when configured | controller | Body `{"image", "ordered_at"}`. Returns `202` and pulls from the registry in the background. |
 | `POST /pull/cancel` | token, when configured | controller | Cancels a slow seed pull. |
-| `POST /rescue` | token | controller | Body `{"image", "sources": [{"node_id", "address"}], "reason": "rescue" \| "propagate"}`. Fetches the image from the first source that works and returns the result. |
+| `POST /rescue` | token | controller | Body `{"image", "sources": [{"node_id", "address"}], "reason": "rescue" \| "propagate" \| "retain"}`. Fetches the image from the first source that works and returns the result. |
+| `POST /images/retain` | token | controller | Body `{"digest", "until"}`. Marks every name of the image with that target digest as the cluster's retention copy until `until` (Unix seconds), or removes the mark with `until` 0. `200` done, `404` no such image here, `409` retention off on this node. Only with `GC_RETENTION_ENABLED`. |
 | `POST /blobs/plan` | token | peer | Body `{"image", "platform"}`. Every blob and layer of the image for that platform, and which ones this node has. |
 | `POST /blobs/export` | token | peer | Body `{"image", "platform", "digests"}`. Streams a partial OCI archive with only those blobs. |
 | `POST /snapshots/export` | token | peer | Body `{"image", "platform", "chain_id", "format"}`. Streams one layer as a gzip-compressed tar: containerd's OCI layer diff with a SHA-256 trailer for `"format": "oci-layer"`, the overlayfs directory format for pre-1.8.6 receivers. |

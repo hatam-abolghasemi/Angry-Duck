@@ -16,6 +16,40 @@ default.
 Looking for a starting point rather than a reference? See
 [Recipes](recipes.md).
 
+## Feature switches
+
+Every feature has a switch, all on by default. A feature runs only when every
+feature it belongs to is on: turn a parent off and everything beneath it is
+off too, whatever its own switch says. Both binaries resolve the same tree
+from the same ConfigMap and log it at startup (`features: gc=true
+gc_retention=true ...`), with a line for each feature that is off only because
+its parent is. A feature that is off starts nothing: no goroutine, no timer,
+no endpoint, no metric series of its own.
+
+```text
+GC_ENABLED                  image cleanup on each node
+└─ GC_RETENTION_ENABLED     one retention copy of every image that went unused
+SPREAD_ENABLED              blob-by-blob spreading
+└─ SPREAD_STREAM_ENABLED    serving blobs to peers while still receiving them
+PROPAGATE_ENABLED           whole-image propagation
+RESCUE_ENABLED              rescue of pods stuck on pulls
+MIRROR_ENABLED              the pull-only registry mirror
+IMAGE_REPAIR_ENABLED        in-place repair of broken images
+LAYER_INVENTORY_ENABLED     layer inventory reports
+INVENTORY_EVENTS_ENABLED    following containerd's events
+```
+
+For example, `GC_ENABLED=false` leaves image cleanup to kubelet: no age rule,
+no disk-pressure removal and no retention copies, and workers remove any
+retention mark left from before at startup.
+
+Features that order workers around (rescue, propagation, spreading, the
+mirror's peer lookups, retention) also need the shared token
+(`RESCUE_TOKEN_PATH`); without it they stay off and say so in the log. A
+retention copy is copied to a node that doesn't hold the image through rescue,
+so with `RESCUE_ENABLED=false` it is only ever kept on a node that already
+holds it.
+
 ## General
 
 | Variable | Default | Description |
@@ -23,7 +57,7 @@ Looking for a starting point rather than a reference? See
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `METRICS_LABEL_REGISTRY` | `false` | Add a `registry` label to pull metrics. The set of registries is unbounded, so it is off by default. |
 | `METRICS_EVENT_TTL_S` | `15` | How long an event metric (a spread ending, a node getting an image, a pull, a repair, a removal) stays on `/metrics` after it happened, for Prometheus to scrape it; Prometheus keeps the history (see [Observability](observability.md#image-history)). Match it to your scrape interval: an event that lives less than a scrape apart can be missed. `0` turns them off. |
-| `RESCUE_TOKEN_PATH` | `/etc/angryduck/rescue-token/token` | Shared bearer token file, 32+ characters. Needed by rescue, propagation and the mirror. Read once at startup. With a token, `/report`, `/pull` and `/pull/cancel` also require it. |
+| `RESCUE_TOKEN_PATH` | `/etc/angryduck/rescue-token/token` | Shared bearer token file, 32+ characters. Needed by rescue, propagation, spreading, image retention and the mirror. Read once at startup. With a token, `/report`, `/pull` and `/pull/cancel` also require it. |
 | `WEBHOOK_TOKEN_PATH` | `/etc/angryduck/webhook-token/token` | Controller only. CI's bearer token for `/webhook/preheat`, 32+ characters. If the file is missing, the webhook is unauthenticated; if it exists but is unusable, the controller exits. |
 | `AUTH_MODE` | `enforce` | `enforce` rejects control requests without the token; `warn` allows and logs them. Use `warn` only while upgrading controller and workers, then remove it. |
 | `REGISTRY_CREDENTIALS_PATH` | *(empty)* | dockerconfigjson covering every private registry, for seed pulls and manifest reads. |
@@ -148,7 +182,7 @@ The whole-image fallback, and the limits spread shares.
 
 | Variable | Default | Description |
 |---|---|---|
-| `MIRROR_ENABLED` | `false` | Run the mirror and manage containerd's `hosts.toml` files. |
+| `MIRROR_ENABLED` | `true` | Run the mirror and manage containerd's `hosts.toml` files. Needs containerd's CRI registry `config_path` (see [Mirror](mirror.md#requirements)). |
 | `MIRROR_LISTEN_ADDR` | `:18082` | Listen address, on the pod network. A loopback address, from older configurations, is turned into `:<port>`. |
 | `MIRROR_ADVERTISE_ADDR` | `$POD_IP:<port>` | The address written into `hosts.toml`. |
 | `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | Where `hosts.toml` files are written. containerd's CRI registry `config_path` must point here. |
@@ -158,17 +192,21 @@ The whole-image fallback, and the limits spread shares.
 
 An image not in use on the node is removed when it has been unused for
 `GC_UNUSED_FOR_S`, or, while the disk is above `GC_HIGH_UTILIZATION`, oldest
-first until it is back to `GC_LOW_UTILIZATION`. The newest `GC_ROLLBACK_KEEP`
-unused images per repo go last. See [Image cleanup](image-cleanup.md).
+first until it is back to `GC_LOW_UTILIZATION`. When an image runs nowhere in
+the cluster anymore, one node keeps it as the retention copy for
+`GC_RETENTION_TTL_S`, outside both rules. See [Image cleanup](image-cleanup.md).
 
 | Variable | Default | Description |
 |---|---|---|
 | `GC_ENABLED` | `true` | Clean up images on each node. |
 | `GC_INTERVAL_S` | `60` | How often usage is sampled and the disk checked. |
-| `GC_UNUSED_FOR_S` | `21600` | Remove images unused this long, whatever the disk usage. |
+| `GC_UNUSED_FOR_S` | `3600` | Remove images unused this long, whatever the disk usage. |
 | `GC_HIGH_UTILIZATION` | `0.70` | Above this, remove unused images oldest first... Keep it below kubelet's `imageGCHighThresholdPercent`. |
-| `GC_LOW_UTILIZATION` | `0.60` | ...until the disk is back down to this. |
-| `GC_ROLLBACK_KEEP` | `3` | Newest unused images per repo kept for rollback. |
+| `GC_LOW_UTILIZATION` | `0.40` | ...until the disk is back down to this. |
+| `GC_RETENTION_ENABLED` | `true` | Keep one copy of every image that went unused in the cluster. Read by both binaries; off when `GC_ENABLED=false`. |
+| `GC_RETENTION_TTL_S` | `86400` | How long the copy is kept, counted from when the image went unused. Removed right after. `0` turns retention off. |
+| `GC_RETENTION_MAX_UTILIZATION` | `GC_HIGH_UTILIZATION` | Controller only. Never keep a copy on a node whose disk is at or above this. While every node is, copies wait. |
+| `GC_RETENTION_INTERVAL_S` | `30` | Controller only. How often copies are checked for what time alone changes (expiry, a node going away, a node with room again). Reports changing what runs where are acted on at once. |
 | `GC_BATCH` | `5` | Images removed per batch. |
 | `GC_SETTLE_S` | `10` | Wait after a batch before re-measuring the disk. |
 | `GC_PROTECT_SUBSTRINGS` | `pause` | Never remove images whose name contains one of these. |

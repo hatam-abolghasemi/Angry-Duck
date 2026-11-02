@@ -5,7 +5,15 @@ containerd. containerd asks the mirror first for every manifest and blob by
 digest, for every image, whether or not it was preheated. The mirror answers
 from the node or a peer, or tells containerd to go to the registry.
 
-The mirror is off by default (`MIRROR_ENABLED=false`).
+The mirror is on by default (`MIRROR_ENABLED=true`). It needs containerd's
+`config_path` (see [Requirements](#requirements)); without it containerd
+ignores the `hosts.toml` files and simply pulls from the registry, so turning
+the mirror on costs nothing where it can't help yet. Turn it off with
+`MIRROR_ENABLED=false`, which also removes Angry Duck's `hosts.toml` files on
+the next worker start.
+
+It is also how a rollback reaches the [retention copy](image-cleanup.md#retention-copies)
+of an image while the registry is up.
 
 ## How it works
 

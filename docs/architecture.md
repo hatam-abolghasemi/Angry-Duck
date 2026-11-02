@@ -67,7 +67,9 @@ sequenceDiagram
 3. **[Rescue](rescue.md).** If a pod still gets stuck pulling the image, it is
    copied to that node from a node that has it.
 4. **[Image cleanup](image-cleanup.md).** Once nothing has used it on a node
-   for 6 hours, or sooner when the disk runs high, the node removes it.
+   for an hour, or sooner when the disk runs high, the node removes it. When
+   the cluster stops running it altogether, one node keeps a retention copy
+   for 24 hours, for rollbacks.
 
 Whole-image propagation and rescue share one
 [transfer mechanism](transfers.md); spread moves single blobs by digest.

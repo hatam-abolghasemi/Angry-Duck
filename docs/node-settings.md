@@ -54,8 +54,8 @@ effect.
 |---|---|---|
 | `serializeImagePulls` | `false` | The default `true` pulls one image at a time per node, so one large image delays every other pod there. Angry Duck's own pulls go straight to containerd and aren't queued by kubelet, but pods that miss a preheated image are. |
 | `maxParallelImagePulls` | e.g. `5` | Bounds parallel pulls once `serializeImagePulls` is `false`. |
-| `imageGCHighThresholdPercent` | above `GC_HIGH_UTILIZATION` (default 85 vs 70) | Angry Duck should clean up first, knowing which images are rollback candidates. kubelet's own GC only starts at this mark. |
-| `imageMaximumGCAge` | unset, or above `GC_UNUSED_FOR_S` (6h) | Otherwise kubelet removes rollback images before Angry Duck's 6 hours are up. |
+| `imageGCHighThresholdPercent` | above `GC_HIGH_UTILIZATION` (default 85 vs 70) | Angry Duck should clean up first, knowing which image is the cluster's retention copy. kubelet's own GC only starts at this mark. |
+| `imageMaximumGCAge` | unset, or above `GC_RETENTION_TTL_S` (24h) | Otherwise kubelet removes retention copies before their 24 hours are up. |
 
 ```yaml
 apiVersion: kubelet.config.k8s.io/v1beta1

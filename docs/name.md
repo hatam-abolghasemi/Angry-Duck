@@ -54,16 +54,17 @@ while its image sits one pond over makes a duck very angry. The dock duck
 spots it, finds a neighbor that has the image, and has the missing layers
 swum across. Nobody files a ticket. kubelet's next retry just works.
 
-**They don't wait for disk pressure.** An image nothing has used for six hours
-is gone. Not "at 85%", not "when kubelet panics": six hours, then out. If the
+**They don't wait for disk pressure.** An image nothing has used for an hour
+is gone. Not "at 85%", not "when kubelet panics": an hour, then out. If the
 pond gets above 70% anyway, the oldest unused images go first until it's back
-under 60%. A duck keeps its pond clean *before* it floods.
+under 40%. A duck keeps its pond clean *before* it floods.
 
-**But they are rational about rollbacks.** Ruthless isn't careless. The newest
-three unused images of every repo stay the longest, because the most likely
-image you'll need next is the one you just replaced. Anything with a running
-container is never touched. Rolling back should come from the pond, not from
-the harbor.
+**But they are rational about rollbacks.** Ruthless isn't careless. When the
+flock stops using an image, one duck, the one with the most room in its pond,
+keeps a copy for a day, because the most likely image you'll need next is the
+one you just replaced. Every other duck can fetch it from that one. Anything
+with a running container is never touched. Rolling back should come from the
+pond, not from the harbor.
 
 That's the anger: not noise, just a refusal to wait. Every rule exists
 because someone once waited for something that was avoidable.

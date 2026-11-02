@@ -65,9 +65,10 @@ images. The registry is only asked for what no node has yet.
 
 **Cleanup is the other half of distribution.** Putting every new image on
 every node is only safe if something keeps disks healthy. Angry Duck removes
-images nothing has used for hours, frees space early when a disk runs high,
-and keeps the last few images of each app for rollbacks. Distribution pauses
-on a full node until cleanup has made room.
+images nothing has used for an hour, frees space early when a disk runs high,
+and keeps one copy of every image the cluster stopped running, on the node with
+the most room, for a day of rollbacks. Distribution pauses on a full node until
+cleanup has made room.
 
 Read [Design](docs/design.md) for the reasoning behind each choice.
 
@@ -96,7 +97,7 @@ and cleanup.
 | **Rescue** | A pod stuck in `ImagePullBackOff` gets its image copied from a node that has it, for any image. | [Rescue](docs/rescue.md) |
 | **Transfers** | Only missing layers move, as digest-verified blobs from any peer, with snapshots as a last resort. | [Transfers](docs/transfers.md) |
 | **Mirror** | A pull-only mirror on every node answers containerd from the node or a peer, and falls back to the registry. | [Mirror](docs/mirror.md) |
-| **Image cleanup** | Removes images unused for 6 hours, and oldest first when the disk is above 70%, keeping rollback images longest. | [Image cleanup](docs/image-cleanup.md) |
+| **Image cleanup** | Removes images unused for an hour, and oldest first when the disk is above 70% (down to 40%). One node keeps a copy of every image that went unused, for 24 hours of rollbacks. Every feature has an on/off switch. | [Image cleanup](docs/image-cleanup.md) |
 
 ## Quick start
 
@@ -112,7 +113,7 @@ them, so there is nothing to clone or build:
 
 ```bash
 helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck \
-  --version 1.9.4 --namespace angryduck --create-namespace \
+  --version 1.10.0 --namespace angryduck --create-namespace \
   --set ingress.host=angryduck.example.com
 ```
 
@@ -165,7 +166,7 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.9.4**; see the [changelog](CHANGELOG.md) and the
+The current version is **1.10.0**; see the [changelog](CHANGELOG.md) and the
 [releases](https://github.com/hatam-abolghasemi/Angry-Duck/releases). It runs
 on the clusters it was built for, through hundreds of deploys a day. Angry
 Duck targets Linux nodes running containerd 1.6 or later.

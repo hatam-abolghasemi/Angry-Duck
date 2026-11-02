@@ -12,7 +12,7 @@
 - [Propagation](propagation.md): every other node gets it from peers, layer by layer.
 - [Rescue](rescue.md): pods stuck in `ImagePullBackOff` get their image from a neighbor.
 - [Mirror](mirror.md): containerd's own pulls are served by peers.
-- [Image cleanup](image-cleanup.md): disks stay healthy and rollback images stay put.
+- [Image cleanup](image-cleanup.md): disks stay healthy, and one copy of every image that went unused stays for rollbacks.
 - [Transfers](transfers.md): how layers actually move between nodes.
 - [Architecture](architecture.md): the controller, the workers and an image's whole life.
 
