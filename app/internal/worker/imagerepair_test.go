@@ -32,12 +32,11 @@ func breakImage(store *blobship.MemStore, ti blobship.TestImage) {
 // single-blob removal.
 type repairStore struct {
 	*blobship.MemStore
-	mu       sync.Mutex
-	leases   map[string]map[string]bool
-	removed  []string // DeleteContent calls
-	holds    int
-	writes   int
-	failHold bool
+	mu      sync.Mutex
+	leases  map[string]map[string]bool
+	removed []string // DeleteContent calls
+	holds   int
+	writes  int
 }
 
 func newRepairStore() *repairStore {

@@ -22,11 +22,9 @@ import (
 // therefore exactly the pull kubelet would make, honoring the node's
 // registry config (hosts.toml, mirrors, the Angry Duck mirror included).
 //
-// Responses are mapped onto the same shapes `crictl -o json` printed, so
-// the parsing below (and its tests) is unchanged. Correct parsing matters
-// here: an earlier substring-scraping version deleted a worker's own
-// running image back when this worker garbage-collected images, and it
-// does again (see ImageGC), never touching an image a running container
+// Responses are mapped onto the shapes `crictl -o json` prints, which the
+// parsing below expects. Correct parsing matters here: the image cleanup
+// (see ImageGC) relies on it never to touch an image a running container
 // uses.
 type Runtime interface {
 	// PullImage pulls image; cancelling ctx kills the pull.

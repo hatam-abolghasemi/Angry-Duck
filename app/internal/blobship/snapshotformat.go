@@ -61,7 +61,10 @@ func OverlayDirToOCI(r io.Reader) io.ReadCloser {
 			opaque = h.PAXRecords[opaqueXattr] == "y"
 		}
 		h.PAXRecords = withoutOverlayXattrs(h.PAXRecords)
-		h.Xattrs = nil //nolint:staticcheck // the reader fills both; PAXRecords is what's written
+		// The reader fills both Xattrs and PAXRecords; only PAXRecords is
+		// written, so Xattrs must not add them a second time.
+		//lint:ignore SA1019 clearing the deprecated field is the point
+		h.Xattrs = nil
 		h.Format = tar.FormatPAX
 		if err := tw.WriteHeader(h); err != nil {
 			return err
@@ -103,7 +106,8 @@ func OCIToOverlayDir(r io.Reader) io.ReadCloser {
 				Uid: 0, Gid: 0, ModTime: h.ModTime, Format: tar.FormatPAX,
 			})
 		}
-		h.Xattrs = nil //nolint:staticcheck
+		//lint:ignore SA1019 as above: PAXRecords alone is written
+		h.Xattrs = nil
 		h.Format = tar.FormatPAX
 		if err := tw.WriteHeader(h); err != nil {
 			return err

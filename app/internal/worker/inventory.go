@@ -6,11 +6,9 @@ import (
 )
 
 // Inventory is the one place this worker's view of local images lives.
-//
-// Before it existed, the reporter (every 15s) ran the runtime's full image
-// listing on its own timer even when a very recent listing was already
-// available. Now a caller reuses the cached listing if it's young enough
-// instead of re-running the same subprocess and JSON parse.
+// A caller reuses the cached listing if it's young enough, instead of
+// asking the runtime for the full image list again (the reporter, every
+// REPORT_INTERVAL_S, usually finds one a moment old).
 type Inventory struct {
 	runtime Runtime
 
