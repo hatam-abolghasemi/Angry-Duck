@@ -7,6 +7,12 @@ updates:
     groups:
       go:
         patterns: ["*"]
+    ignore:
+      # containerd's API module follows its client: 1.8.x is what the
+      # containerd 1.7 client builds against; 1.9 and later are for
+      # containerd 2 and don't compile with it.
+      - dependency-name: github.com/containerd/containerd/api
+        versions: [">= 1.9.0"]
     commit-message:
       prefix: "chore(deps)"
   - package-ecosystem: docker
