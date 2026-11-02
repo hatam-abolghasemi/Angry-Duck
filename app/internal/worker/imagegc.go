@@ -3,9 +3,11 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,12 +16,14 @@ import (
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
+	"angryduck/internal/model"
+	"angryduck/internal/sharedtoken"
 )
 
 var (
 	imagesDeletedTotal = metrics.NewCounterVec(
 		"angryduck_worker_gc_images_deleted_total",
-		"Images this node's cleanup removed, by tier: old (unused for GC_UNUSED_FOR_S, removed whatever the disk), pressure (unused for less, removed only because the disk went above GC_HIGH), rollback (one of the newest GC_ROLLBACK_KEEP of its repo, removed only while the disk stays above GC_HIGH), or error.",
+		"Images this node's cleanup removed, by tier: old (unused for GC_UNUSED_FOR_S, removed whatever the disk), pressure (unused for less, removed only because the disk went above GC_HIGH), retention (the cluster's retention copy, removed when its GC_RETENTION_TTL_S ran out), or error.",
 		"node", "tier",
 	)
 	gcImageReturns = metrics.NewGaugeVec(
@@ -34,7 +38,7 @@ var (
 	)
 	gcStalled = metrics.NewGaugeVec(
 		"angryduck_worker_gc_stalled",
-		"1 while this node's disk-pressure cleanup has stopped because removing images didn't free space (the disk is filled by something else: running images, volumes, logs). The 6h rule still runs; pressure and rollback removals resume after an hour, or once the disk grows by 1%.",
+		"1 while this node's disk-pressure cleanup has stopped because removing images didn't free space (the disk is filled by something else: running images, volumes, logs). The GC_UNUSED_FOR_S rule and expiring retention copies still go; pressure removals resume after an hour, or once the disk grows by 1%.",
 		"node",
 	)
 	gcImageRemoved = metrics.NewRecentGaugeVec(
@@ -44,20 +48,35 @@ var (
 	)
 	gcImageRemoval = metrics.NewGaugeVec(
 		"angryduck_worker_gc_image_removal_seconds",
-		"Images unused on this node that the age rule will remove, and in how many seconds (0: at the next check). Disk pressure removes them sooner, oldest first. Images kept for rollback are not listed. tier: old or pressure.",
+		"Images unused on this node that the cleanup will remove, and in how many seconds (0: at the next check), by tier: old or pressure (the age rule; disk pressure removes them sooner, oldest first), or retention (this node holds the cluster's retention copy; removed when it expires, never for disk pressure).",
 		"node", "image", "tier",
 	)
 	gcCandidates = metrics.NewGaugeVec(
 		"angryduck_worker_gc_candidates",
-		"Images the cleanup could remove, by tier (old, pressure, rollback). old goes on its own; pressure and rollback only while cleaning.",
+		"Images the cleanup could remove, by tier (old, pressure). old goes on its own; pressure only while cleaning.",
 		"node", "tier",
+	)
+	gcRetained = metrics.NewGaugeVec(
+		"angryduck_worker_gc_retained_images",
+		"Images this node keeps as the cluster's retention copy (labeled "+RetainLabel+"), not yet expired. The cleanup leaves them alone, disk pressure included, until they expire.",
+		"node",
 	)
 )
 
+// RetainLabel marks an image as the cluster's retention copy, on the one
+// node the controller picked. Its value is when the copy expires, in Unix
+// seconds. The cleanup never removes a marked image before then, whatever
+// the disk, and removes it right after.
+const RetainLabel = "angryduck.io/last-survivor"
+
 // ImageStore is what the cleanup needs from containerd. ContainerdStore has it.
 type ImageStore interface {
-	ImageTargets(ctx context.Context) (map[string]string, error)
+	// ImageTargetsLabeled maps every image name to its target digest and,
+	// from the same listing, every target carrying label to its value.
+	ImageTargetsLabeled(ctx context.Context, label string) (targets, labeled map[string]string, err error)
 	DeleteImages(ctx context.Context, names ...string) error
+	// SetImageLabel sets label on names, or removes it with value "".
+	SetImageLabel(ctx context.Context, label, value string, names ...string) error
 }
 
 // GCConfig holds the cleanup's tunables.
@@ -65,7 +84,7 @@ type GCConfig struct {
 	Interval          time.Duration // how often usage is sampled and the disk checked
 	High, Low         float64       // start above High, stop at Low (0-1)
 	UnusedFor         time.Duration // an image is removable once no container used it for this long
-	RollbackKeep      int           // newest removable images per repo kept until nothing else is left
+	Retention         bool          // honor RetainLabel and report image state (GC_RETENTION_ENABLED)
 	Batch             int           // images removed before re-measuring the disk
 	Settle            time.Duration // wait after a batch for containerd to free the space
 	ProtectSubstrings []string      // never remove images whose name contains one of these
@@ -80,18 +99,21 @@ type GCConfig struct {
 // image or one being pulled or received. Any other image is removed when
 // EITHER of these holds:
 //
-//   - it has been unused for UnusedFor (6h by default): no container
+//   - it has been unused for UnusedFor (1h by default): no container
 //     on this node used it for that long, counting from when
 //     this node got it if it never ran here. This happens whatever the
 //     disk usage;
 //   - the disk is above High (70%): unused images go oldest first, however
-//     recently they ran, until the disk is back down to Low (60%).
+//     recently they ran, until the disk is back down to Low (40%).
 //
-// Per repo, the newest RollbackKeep (3) unused images are kept for a quick
-// rollback: the age rule never removes them, and disk pressure removes
-// them only after every other candidate is gone and the disk is still
-// above High. Removal happens in small batches, re-measuring the disk
-// after each while under pressure.
+// Removal happens in small batches, re-measuring the disk after each
+// while under pressure.
+//
+// Retention (with Retention on): an image carrying RetainLabel is the
+// cluster's one retention copy of an image nothing runs anymore, put here
+// by the controller. Neither rule above touches it, disk pressure
+// included. It goes as soon as the label's time is up, and loses the
+// label if a container here starts using it again.
 //
 // Every name of an image (tag, repo@digest, image ID) goes together, so
 // containerd's own garbage collector really frees its layers; layers
@@ -124,6 +146,20 @@ type ImageGC struct {
 	removed  map[string]removal // target digest -> when, under which name
 	returned map[string]*churn  // target digest -> how often it came back
 	churnPub bool               // returned changed since last published
+
+	// Retention: retained is every target carrying RetainLabel and when
+	// its copy expires, from the last listing plus the controller's orders
+	// since. inUseNow is the last sample's in-use targets. Both under mu.
+	retained map[string]time.Time
+	inUseNow map[string]bool
+	// orders is the controller's retain orders not yet sure to be in a
+	// listing: a listing started before an order must not undo it.
+	orders map[string]retainOrder
+	// What was last handed to onState, to hand it again only on a change.
+	pubInUse    map[string]string // target digest -> name
+	pubRetained map[string]int64
+	onState     func(inUse []model.ImageRef, retained map[string]int64)
+	pubMu       sync.Mutex // one publish at a time, so they arrive in order
 }
 
 // A batch that frees less than gcMinFree of the disk means the disk isn't
@@ -152,11 +188,15 @@ type churn struct {
 
 // NewImageGC builds the cleanup and loads saved usage times.
 func NewImageGC(store ImageStore, inUse func() ([]string, error), util func() (float64, error), busy func([]string) bool, nodeID string, cfg GCConfig) *ImageGC {
-	for _, tier := range []string{"old", "pressure", "rollback", "error"} {
+	for _, tier := range []string{"old", "pressure", "error"} {
 		imagesDeletedTotal.Add(0, nodeID, tier)
 	}
-	for _, tier := range []string{"old", "pressure", "rollback"} {
+	for _, tier := range []string{"old", "pressure"} {
 		gcCandidates.Set(0, nodeID, tier)
+	}
+	if cfg.Retention {
+		imagesDeletedTotal.Add(0, nodeID, "retention")
+		gcRetained.Set(0, nodeID)
 	}
 	gcCleaning.Set(0, nodeID)
 	gcStalled.Set(0, nodeID)
@@ -174,10 +214,17 @@ func NewImageGC(store ImageStore, inUse func() ([]string, error), util func() (f
 // Kick, so the controller sees the freed space right away).
 func (g *ImageGC) OnDone(fn func()) { g.onDone = fn }
 
+// OnState registers fn to receive this node's in-use images and retention
+// copies whenever either changes (the reporter's SetImageState). Only
+// with Retention on. Call before Run.
+func (g *ImageGC) OnState(fn func(inUse []model.ImageRef, retained map[string]int64)) {
+	g.onState = fn
+}
+
 // Run blocks, ticking until ctx is done.
 func (g *ImageGC) Run(ctx context.Context) {
-	logging.Infof("angryduck-worker[%s]: image cleanup started: interval=%s high=%.2f low=%.2f unused_for=%s rollback_keep=%d batch=%d protect=%v state=%s",
-		g.nodeID, g.cfg.Interval, g.cfg.High, g.cfg.Low, g.cfg.UnusedFor, g.cfg.RollbackKeep, g.cfg.Batch, g.cfg.ProtectSubstrings, g.cfg.StatePath)
+	logging.Infof("angryduck-worker[%s]: image cleanup started: interval=%s high=%.2f low=%.2f unused_for=%s retention=%t batch=%d protect=%v state=%s",
+		g.nodeID, g.cfg.Interval, g.cfg.High, g.cfg.Low, g.cfg.UnusedFor, g.cfg.Retention, g.cfg.Batch, g.cfg.ProtectSubstrings, g.cfg.StatePath)
 	t := time.NewTicker(g.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -195,15 +242,20 @@ func (g *ImageGC) Run(ctx context.Context) {
 type candidate struct {
 	digest string
 	names  []string
-	repo   string
-	age    time.Duration
-	tier   string // old, pressure or rollback
+	age    time.Duration // unused for this long; for retention, expired for this long
+	tier   string        // old, pressure or retention
 }
 
 // sample updates usage times and returns the names per digest, and which
-// digests are in use.
+// digests are in use. With Retention on it also refreshes g.retained from
+// the same listing.
 func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string][]string, inUse map[string]bool, err error) {
-	targets, err := g.store.ImageTargets(ctx)
+	label := ""
+	if g.cfg.Retention {
+		label = RetainLabel
+	}
+	listedAt := time.Now()
+	targets, labeled, err := g.store.ImageTargetsLabeled(ctx, label)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -211,11 +263,8 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 	if err != nil {
 		return nil, nil, err // without it nothing is safe to judge
 	}
-	groups = map[string][]string{}
-	for name, d := range targets {
-		groups[d] = append(groups[d], name)
-	}
-	inUse = map[string]bool{}
+	groups = namesByTarget(targets, false)
+	inUse = make(map[string]bool, len(used))
 	for _, r := range used {
 		if d, ok := targets[r]; ok {
 			inUse[d] = true
@@ -243,11 +292,75 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 			g.dirty = true
 		}
 	}
+	if g.cfg.Retention {
+		g.inUseNow = inUse
+		var retained map[string]time.Time
+		for d, v := range labeled {
+			sec, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || sec <= 0 {
+				continue // not ours to judge: an ordinary image
+			}
+			if retained == nil {
+				retained = make(map[string]time.Time, len(labeled))
+			}
+			retained[d] = time.Unix(sec, 0)
+		}
+		// Orders that came in while listing win over it; older ones are
+		// in it.
+		for d, o := range g.orders {
+			if !o.at.After(listedAt) {
+				delete(g.orders, d)
+				continue
+			}
+			if o.until.IsZero() {
+				delete(retained, d)
+				continue
+			}
+			if retained == nil {
+				retained = map[string]time.Time{}
+			}
+			retained[d] = o.until
+		}
+		g.retained = retained
+	}
 	return groups, inUse, nil
 }
 
-// Tick samples usage, removes images unused for UnusedFor, and, if the
-// disk is too full, removes more, oldest first.
+// namesByTarget returns the names of each target digest, sorted, without
+// Angry Duck's own temporary ones if skipTemp. Most images have two or
+// three names (tag, repo@digest, ID): every name goes into one backing
+// array, cut per digest, rather than a slice each.
+func namesByTarget(targets map[string]string, skipTemp bool) map[string][]string {
+	type pair struct{ d, n string }
+	pairs := make([]pair, 0, len(targets))
+	for n, d := range targets {
+		if skipTemp && strings.HasPrefix(n, tempImageHost) {
+			continue
+		}
+		pairs = append(pairs, pair{d, n})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].d != pairs[j].d {
+			return pairs[i].d < pairs[j].d
+		}
+		return pairs[i].n < pairs[j].n
+	})
+	names := make([]string, len(pairs))
+	groups := make(map[string][]string, len(pairs)/2+1)
+	for i := 0; i < len(pairs); {
+		j := i
+		for j < len(pairs) && pairs[j].d == pairs[i].d {
+			names[j] = pairs[j].n
+			j++
+		}
+		groups[pairs[i].d] = names[i:j:j] // full slice: an append can't spill into the next digest's names
+		i = j
+	}
+	return groups
+}
+
+// Tick samples usage, removes expired retention copies and images unused
+// for UnusedFor, and, if the disk is too full, removes more, oldest first.
 func (g *ImageGC) Tick(ctx context.Context) {
 	defer memlimit.Soon()
 	now := time.Now()
@@ -258,6 +371,11 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	}
 	defer g.save(false)
 	defer g.publishChurn(now)
+
+	if g.cfg.Retention {
+		g.unretainInUse(ctx, groups, inUse)
+		g.publishState(groups, inUse)
+	}
 
 	// Disk pressure is judged only with a fresh reading; the age rule
 	// doesn't need one.
@@ -295,7 +413,7 @@ func (g *ImageGC) Tick(ctx context.Context) {
 		gcCleaning.Set(0, g.nodeID)
 	}
 
-	unused, rollback := g.plan(groups, inUse, now)
+	unused, expired, kept := g.plan(groups, inUse, now)
 	var old []candidate
 	for _, c := range unused {
 		if c.tier == "old" {
@@ -310,37 +428,40 @@ func (g *ImageGC) Tick(ctx context.Context) {
 		}
 		gcImageRemoval.Set(left, g.nodeID, displayName(c.names), c.tier)
 	}
+	for _, k := range kept {
+		gcImageRemoval.Set(k.left.Seconds(), g.nodeID, displayName(k.names), "retention")
+	}
 	gcCandidates.Set(float64(len(old)), g.nodeID, "old")
 	gcCandidates.Set(float64(len(unused)-len(old)), g.nodeID, "pressure")
-	gcCandidates.Set(float64(len(rollback)), g.nodeID, "rollback")
+	if g.cfg.Retention {
+		gcRetained.Set(float64(len(kept)), g.nodeID)
+	}
 
-	var removed int
+	// An expired retention copy goes whatever the disk: it was kept only
+	// for its time.
+	removed, _, _ := g.remove(ctx, expired, nil, nil)
 	if !cleaning || stalled {
 		// Age rule only: everything unused for UnusedFor goes.
 		if len(old) > 0 {
 			logging.Infof("angryduck-worker[%s]: image cleanup: removing %d image(s) unused for %s", g.nodeID, len(old), g.cfg.UnusedFor)
 		}
-		removed, _, _ = g.remove(ctx, old, nil, nil)
+		n, _, _ := g.remove(ctx, old, nil, nil)
+		removed += n
 	} else {
 		// Disk pressure: unused images oldest first (the age-rule ones are
-		// the oldest, so they go first), down to Low; then rollback images,
-		// only while still above High. Either stops as soon as a batch
-		// frees (almost) nothing.
+		// the oldest, so they go first), down to Low. It stops as soon as a
+		// batch frees (almost) nothing. Retention copies are never part of it.
 		start := u
 		n, ok, futile := g.remove(ctx, unused, &u, func(u float64) bool { return u <= g.cfg.Low })
-		removed = n
-		if ok && !futile {
-			n, ok, futile = g.remove(ctx, rollback, &u, func(u float64) bool { return u < g.cfg.High })
-			removed += n
-		}
+		removed += n
 		switch {
 		case futile:
 			g.stall(now, u)
-			logging.Warnf("angryduck-worker[%s]: image cleanup: removed %d image(s) but the disk only went from %.1f%% to %.1f%%: it's filled by something else (running images, volumes, logs). Leaving the rest, rollback images included; trying again in %s or once the disk grows by %.0f%%",
-				g.nodeID, removed, start*100, u*100, gcStallFor, gcStallRegrow*100)
-		case ok && removed == 0 && u >= g.cfg.High:
+			logging.Warnf("angryduck-worker[%s]: image cleanup: removed %d image(s) but the disk only went from %.1f%% to %.1f%%: it's filled by something else (running images, volumes, logs). Leaving the rest; trying again in %s or once the disk grows by %.0f%%",
+				g.nodeID, n, start*100, u*100, gcStallFor, gcStallRegrow*100)
+		case ok && n == 0 && u >= g.cfg.High:
 			g.stall(now, u)
-			logging.Warnf("angryduck-worker[%s]: image cleanup: disk at %.1f%% but nothing is removable (every image is in use, protected or being pulled); looking again in %s or once the disk grows by %.0f%%",
+			logging.Warnf("angryduck-worker[%s]: image cleanup: disk at %.1f%% but nothing is removable (every image is in use, protected, being pulled or a retention copy); looking again in %s or once the disk grows by %.0f%%",
 				g.nodeID, u*100, gcStallFor, gcStallRegrow*100)
 		}
 	}
@@ -371,8 +492,11 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 		if n > len(list) {
 			n = len(list)
 		}
-		batch := list[:n]
+		batch := g.notRetained(list[:n])
 		list = list[n:]
+		if len(batch) == 0 {
+			continue
+		}
 		var names []string
 		for _, c := range batch {
 			names = append(names, c.names...)
@@ -387,13 +511,20 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 		g.mu.Lock()
 		for _, c := range batch {
 			g.removed[c.digest] = removal{name: displayName(c.names), at: now}
+			if c.tier == "retention" {
+				delete(g.retained, c.digest)
+			}
 		}
 		g.mu.Unlock()
 		for _, c := range batch {
 			imagesDeletedTotal.Add(1, g.nodeID, c.tier)
 			gcImageRemoved.Set(float64(now.Unix()), g.nodeID, displayName(c.names), c.tier)
 			gcImageRemoval.Delete(g.nodeID, displayName(c.names), c.tier)
-			logging.Infof("angryduck-worker[%s]: image cleanup: removed %s (%s tier, unused for %s)", g.nodeID, strings.Join(c.names, " "), c.tier, c.age.Round(time.Minute))
+			if c.tier == "retention" {
+				logging.Infof("angryduck-worker[%s]: image cleanup: removed %s (retention copy, expired %s ago)", g.nodeID, strings.Join(c.names, " "), c.age.Round(time.Second))
+			} else {
+				logging.Infof("angryduck-worker[%s]: image cleanup: removed %s (%s tier, unused for %s)", g.nodeID, strings.Join(c.names, " "), c.tier, c.age.Round(time.Minute))
+			}
 		}
 		if u == nil && len(list) == 0 {
 			break // nothing to measure and nothing left to pace
@@ -418,47 +549,68 @@ func (g *ImageGC) remove(ctx context.Context, list []candidate, u *float64, stop
 	return removed, true, false
 }
 
-// plan returns every image that isn't in use, protected or busy, oldest
-// first, split in two: the newest RollbackKeep per repo (rollback tier)
-// and the rest (old tier if unused for UnusedFor, else pressure tier).
-func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now time.Time) (unused, rollback []candidate) {
+// notRetained drops from batch every image that became a retention copy
+// after the plan was made (an order from the controller in between):
+// the last look before anything is removed.
+func (g *ImageGC) notRetained(batch []candidate) []candidate {
+	if !g.cfg.Retention {
+		return batch
+	}
+	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	byRepo := map[string][]candidate{}
+	out := batch[:0:0]
+	for _, c := range batch {
+		if until, ok := g.retained[c.digest]; ok && now.Before(until) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// retainOrder is one order from the controller, as HandleRetain applied it.
+type retainOrder struct {
+	at    time.Time
+	until time.Time // zero: unmarked
+}
+
+// keptCopy is a retention copy not yet expired, for the metrics.
+type keptCopy struct {
+	names []string
+	left  time.Duration
+}
+
+// plan returns every image that isn't in use, protected or busy, oldest
+// first: unused (old tier if unused for UnusedFor, else pressure tier) and
+// expired retention copies. Retention copies not yet expired are in
+// neither; kept lists them.
+func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now time.Time) (unused, expired []candidate, kept []keptCopy) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	unused = make([]candidate, 0, len(groups)-len(inUse))
 	for d, names := range groups {
 		if inUse[d] || g.protected(names) || (g.busy != nil && g.busy(names)) {
+			continue
+		}
+		if until, ok := g.retained[d]; ok {
+			if now.Before(until) {
+				kept = append(kept, keptCopy{names: names, left: until.Sub(now)})
+			} else {
+				expired = append(expired, candidate{digest: d, names: names, age: now.Sub(until), tier: "retention"})
+			}
 			continue
 		}
 		last := g.firstSeen[d]
 		if u := g.lastUsed[d]; u.After(last) {
 			last = u
 		}
-		sort.Strings(names)
-		c := candidate{digest: d, names: names, repo: repoOf(names, d), age: now.Sub(last)}
-		byRepo[c.repo] = append(byRepo[c.repo], c)
-	}
-	for _, cs := range byRepo {
-		sort.Slice(cs, func(i, j int) bool { return cs[i].age < cs[j].age }) // newest first
-		k := g.cfg.RollbackKeep
-		if k < 0 {
-			k = 0
+		age := now.Sub(last)
+		tier := "pressure"
+		if age >= g.cfg.UnusedFor {
+			tier = "old"
 		}
-		if k > len(cs) {
-			k = len(cs)
-		}
-		for i := range cs {
-			switch {
-			case i < k:
-				cs[i].tier = "rollback"
-				rollback = append(rollback, cs[i])
-			case cs[i].age >= g.cfg.UnusedFor:
-				cs[i].tier = "old"
-				unused = append(unused, cs[i])
-			default:
-				cs[i].tier = "pressure"
-				unused = append(unused, cs[i])
-			}
-		}
+		unused = append(unused, candidate{digest: d, names: names, age: age, tier: tier})
 	}
 	oldestFirst := func(cs []candidate) {
 		sort.Slice(cs, func(i, j int) bool {
@@ -469,8 +621,207 @@ func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now ti
 		})
 	}
 	oldestFirst(unused)
-	oldestFirst(rollback)
-	return unused, rollback
+	oldestFirst(expired)
+	return unused, expired, kept
+}
+
+// unretainInUse takes RetainLabel off every image a container here uses
+// again: it is no longer a copy kept for nothing.
+func (g *ImageGC) unretainInUse(ctx context.Context, groups map[string][]string, inUse map[string]bool) {
+	g.mu.Lock()
+	var back []string
+	for d := range g.retained {
+		if inUse[d] {
+			back = append(back, d)
+		}
+	}
+	g.mu.Unlock()
+	for _, d := range back {
+		if err := g.store.SetImageLabel(ctx, RetainLabel, "", groups[d]...); err != nil {
+			logging.Warnf("angryduck-worker[%s]: image cleanup: unmarking retention copy %s: %v", g.nodeID, d, err)
+			continue
+		}
+		g.mu.Lock()
+		delete(g.retained, d)
+		g.mu.Unlock()
+		logging.Infof("angryduck-worker[%s]: image cleanup: %s is in use here again: no longer a retention copy", g.nodeID, displayName(groups[d]))
+	}
+}
+
+// publishState hands onState this node's in-use images and retention
+// copies, only when either changed since the last time.
+func (g *ImageGC) publishState(groups map[string][]string, inUse map[string]bool) {
+	if g.onState == nil {
+		return
+	}
+	g.pubMu.Lock()
+	defer g.pubMu.Unlock()
+	g.mu.Lock()
+	same := len(inUse) == len(g.pubInUse) && len(g.retained) == len(g.pubRetained)
+	if same {
+		for d := range inUse {
+			if _, ok := g.pubInUse[d]; !ok {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		for d, t := range g.retained {
+			if g.pubRetained[d] != t.Unix() {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		g.mu.Unlock()
+		return
+	}
+	pubInUse := make(map[string]string, len(inUse))
+	refs := make([]model.ImageRef, 0, len(inUse))
+	for d := range inUse {
+		name := g.pubInUse[d] // an unchanged image keeps its name
+		if name == "" {
+			name = displayName(groups[d]) // sorted by namesByTarget
+		}
+		pubInUse[d] = name
+		refs = append(refs, model.ImageRef{Digest: d, Name: name})
+	}
+	var retained map[string]int64
+	if len(g.retained) > 0 {
+		retained = make(map[string]int64, len(g.retained))
+		for d, t := range g.retained {
+			retained[d] = t.Unix()
+		}
+	}
+	g.pubInUse, g.pubRetained = pubInUse, retained
+	fn := g.onState
+	g.mu.Unlock()
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Digest < refs[j].Digest })
+	fn(refs, retained)
+}
+
+// Register mounts /images/retain, the controller's retention orders,
+// behind the shared token. Only with Retention on.
+func (g *ImageGC) Register(token string) func(*http.ServeMux) {
+	return func(mux *http.ServeMux) {
+		mux.HandleFunc("/images/retain", sharedtoken.Require(token, g.HandleRetain))
+	}
+}
+
+// HandleRetain marks an image as the cluster's retention copy until the
+// order's time, or unmarks it (Until 0). Every name of the digest is
+// marked, so the mark goes wherever the image goes.
+func (g *ImageGC) HandleRetain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !g.cfg.Retention {
+		http.Error(w, "retention is off on this node", http.StatusConflict)
+		return
+	}
+	var o model.RetainOrder
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&o); err != nil || !strings.HasPrefix(o.Digest, "sha256:") || o.Until < 0 {
+		http.Error(w, "invalid order", http.StatusBadRequest)
+		return
+	}
+	targets, _, err := g.store.ImageTargetsLabeled(r.Context(), "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	var names []string
+	for n, d := range targets {
+		if d == o.Digest {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		if o.Until == 0 {
+			w.WriteHeader(http.StatusOK) // nothing to unmark
+			return
+		}
+		http.Error(w, "no such image here", http.StatusNotFound)
+		return
+	}
+	sort.Strings(names)
+	value := ""
+	if o.Until > 0 {
+		value = strconv.FormatInt(o.Until, 10)
+		// Recorded before the label lands: a cleanup running meanwhile
+		// must not remove what is about to be kept.
+		g.mu.Lock()
+		if g.retained == nil {
+			g.retained = map[string]time.Time{}
+		}
+		g.retained[o.Digest] = time.Unix(o.Until, 0)
+		g.recordOrderLocked(o.Digest, time.Unix(o.Until, 0))
+		g.mu.Unlock()
+	}
+	if err := g.store.SetImageLabel(r.Context(), RetainLabel, value, names...); err != nil {
+		if o.Until > 0 {
+			g.mu.Lock()
+			delete(g.retained, o.Digest)
+			delete(g.orders, o.Digest)
+			g.mu.Unlock()
+		}
+		logging.Warnf("angryduck-worker[%s]: retention: marking %s: %v", g.nodeID, displayName(names), err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	g.mu.Lock()
+	if o.Until == 0 {
+		delete(g.retained, o.Digest)
+		g.recordOrderLocked(o.Digest, time.Time{})
+	}
+	inUse := g.inUseNow
+	g.mu.Unlock()
+	if o.Until > 0 {
+		logging.Infof("angryduck-worker[%s]: retention: keeping %s as the cluster's copy until %s", g.nodeID, displayName(names), time.Unix(o.Until, 0).UTC().Format(time.RFC3339))
+	} else {
+		logging.Infof("angryduck-worker[%s]: retention: %s is no longer the cluster's copy", g.nodeID, displayName(names))
+	}
+	// Tell the controller now rather than at the next cleanup tick.
+	groups := map[string][]string{o.Digest: names}
+	for d := range inUse {
+		if d != o.Digest {
+			groups[d] = nil // names only matter for images not published yet
+		}
+	}
+	g.publishState(groups, inUse)
+	w.WriteHeader(http.StatusOK)
+}
+
+// recordOrderLocked notes an order, so a listing that started before it
+// can't undo it (see sample). Holds g.mu.
+func (g *ImageGC) recordOrderLocked(digest string, until time.Time) {
+	if g.orders == nil {
+		g.orders = map[string]retainOrder{}
+	}
+	g.orders[digest] = retainOrder{at: time.Now(), until: until}
+}
+
+// Unretain removes RetainLabel from every image carrying it. The worker
+// calls it at startup with retention off (or the cleanup off), so no
+// mark outlives the feature.
+func Unretain(ctx context.Context, store ImageStore, nodeID string) {
+	targets, labeled, err := store.ImageTargetsLabeled(ctx, RetainLabel)
+	if err != nil || len(labeled) == 0 {
+		return
+	}
+	var names []string
+	for n, d := range targets {
+		if _, ok := labeled[d]; ok {
+			names = append(names, n)
+		}
+	}
+	if err := store.SetImageLabel(ctx, RetainLabel, "", names...); err != nil {
+		logging.Warnf("angryduck-worker[%s]: retention off: unmarking %d image name(s): %v", nodeID, len(names), err)
+		return
+	}
+	logging.Infof("angryduck-worker[%s]: retention off: unmarked %d retention cop(y/ies); the cleanup treats them as any other image", nodeID, len(labeled))
 }
 
 func (g *ImageGC) protected(names []string) bool {
@@ -551,18 +902,6 @@ func displayName(names []string) string {
 		return names[0]
 	}
 	return ""
-}
-
-// repoOf names the repo an image belongs to, for the rollback tier.
-func repoOf(names []string, digest string) string {
-	for _, n := range names {
-		if !strings.HasPrefix(n, "sha256:") {
-			if r := imageref.Repo(n); r != "" {
-				return r
-			}
-		}
-	}
-	return digest
 }
 
 type gcState struct {

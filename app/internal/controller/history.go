@@ -38,6 +38,11 @@ var (
 		"Bytes a node received for the image, by path: registry, peer (spread blobs), image (spread's whole-image fallback), propagate, rescue. Set once the node got the image, or when its spread ended without it.",
 		"image", "node", "path",
 	)
+	imageRetention = metrics.NewRecentGaugeVec(
+		"angryduck_controller_image_retention_timestamp_seconds",
+		"When something happened to the image's retention copy, as Unix time, by event: unused (it went unused in the cluster: a copy is due; node empty), kept (node keeps the copy), copied (it was copied to node first, which had room), used (it runs again: no copy needed), lost (node went away or dropped it), gone (no node holds it anymore; node empty), expired (node's copy ran out of time and is removed).",
+		"image", "node", "event",
+	)
 	imageTransferSeconds = metrics.NewRecentGaugeVec(
 		"angryduck_controller_image_transfer_seconds",
 		"Seconds a node spent receiving the image, by path, summed over its transfers. Parallel transfers each count. Set with the bytes.",
@@ -65,6 +70,15 @@ func recordDelivery(image, node, via string, since, at time.Time) {
 	}
 	imageDelivered.Set(float64(at.Unix()), image, node, via)
 	imageDeliverySeconds.Set(took, image, node, via)
+}
+
+// recordRetention adds a retention event to the image's history. Copies
+// adopted after a controller restart have no name and leave none.
+func recordRetention(image, node, event string, at time.Time) {
+	if image == "" {
+		return
+	}
+	imageRetention.Set(float64(at.Unix()), image, node, event)
 }
 
 func recordTransfer(image, node, path string, bytes int64, seconds float64) {

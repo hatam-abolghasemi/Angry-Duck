@@ -449,17 +449,7 @@ func hasDigest(m map[string]bool, k digestKey) bool {
 // groupByTarget maps each target digest to its names, sorted, without
 // Angry Duck's own temporary ones.
 func groupByTarget(targets map[string]string) map[string][]string {
-	out := map[string][]string{}
-	for name, d := range targets {
-		if strings.HasPrefix(name, tempImageHost) {
-			continue
-		}
-		out[d] = append(out[d], name)
-	}
-	for _, names := range out {
-		sort.Strings(names)
-	}
-	return out
+	return namesByTarget(targets, true)
 }
 
 // mainName is the name an image is labeled, imported and fetched under:

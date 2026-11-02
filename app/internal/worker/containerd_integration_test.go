@@ -426,6 +426,42 @@ func TestContainerd_StoreBasics(t *testing.T) {
 	}
 }
 
+// The retention mark goes on and off through containerd's own image
+// labels, leaves every other label alone, and shows in the listing.
+func TestContainerd_RetainLabel(t *testing.T) {
+	c := testClient(t)
+	ctx := context.Background()
+	s := NewContainerdStore(c, testNS(t, "retain"), "overlayfs")
+	img := buildImage(t, testImage, baseLayer, appLayer)
+	if err := s.Import(ctx, bytes.NewReader(img.archive), "linux/amd64"); err != nil {
+		t.Fatal(err)
+	}
+	nsCtx := namespaces.WithNamespace(ctx, s.namespace)
+	if _, err := c.ImageService().Update(nsCtx, images.Image{Name: testImage, Labels: map[string]string{"other": "kept"}}, "labels.other"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetImageLabel(ctx, RetainLabel, "1999999999", testImage, "never-existed:1"); err != nil {
+		t.Fatalf("SetImageLabel: %v", err)
+	}
+	targets, labeled, err := s.ImageTargetsLabeled(ctx, RetainLabel)
+	if err != nil || targets[testImage] != img.manifest || labeled[img.manifest] != "1999999999" {
+		t.Fatalf("listing: %v %v %v", targets, labeled, err)
+	}
+	if err := s.SetImageLabel(ctx, RetainLabel, "", testImage); err != nil {
+		t.Fatalf("removing: %v", err)
+	}
+	got, err := c.ImageService().Get(nsCtx, testImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Labels[RetainLabel]; ok || got.Labels["other"] != "kept" {
+		t.Fatalf("labels after removal: %v", got.Labels)
+	}
+	if _, labeled, _ := s.ImageTargetsLabeled(ctx, RetainLabel); len(labeled) != 0 {
+		t.Fatalf("still listed as labeled: %v", labeled)
+	}
+}
+
 // The discard_unpacked_layers case, end to end through the real rescue
 // code: the app layer exists only as a snapshot on the source, travels as
 // a containerd diff, is applied by containerd on the receiver, and the

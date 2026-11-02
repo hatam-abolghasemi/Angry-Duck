@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -35,11 +36,15 @@ func heapFleet(nodes int) []model.WorkerReport {
 	for n := 0; n < nodes; n++ {
 		r := rand.New(rand.NewSource(int64(n)))
 		rep := model.WorkerReport{NodeID: fmt.Sprintf("node-%03d", n), Address: "x", Timestamp: time.Now()}
-		for _, i := range r.Perm(len(pool))[:300] {
+		for k, i := range r.Perm(len(pool))[:300] {
 			tag := fmt.Sprintf("%s:1.%d.0", pool[i], i%7)
 			rep.Images = append(rep.Images, tag, pool[i]+"@"+dgT(tag))
 			rep.Repos = append(rep.Repos, pool[i])
+			if k < 60 { // what its containers run
+				rep.InUse = append(rep.InUse, model.ImageRef{Digest: dgT(tag), Name: tag})
+			}
 		}
+		rep.ImageState = true
 		ls := &model.LayerSync{Epoch: rep.NodeID, Seq: 1, Full: true}
 		for _, i := range r.Perm(len(blobPool))[:5000] {
 			ls.AddBlobs = append(ls.AddBlobs, blobPool[i])
@@ -71,6 +76,10 @@ func TestHeapFootprint(t *testing.T) {
 			for _, s := range r.Repos {
 				c.Repos = append(c.Repos, string([]byte(s)))
 			}
+			c.ImageState = r.ImageState
+			for _, ref := range r.InUse {
+				c.InUse = append(c.InUse, model.ImageRef{Digest: string([]byte(ref.Digest)), Name: string([]byte(ref.Name))})
+			}
 		}
 		if withLayers {
 			l := *r.Layers
@@ -89,11 +98,20 @@ func TestHeapFootprint(t *testing.T) {
 		lay.Update(clone(r, true, false))
 	}
 	b2 := heap()
+	// Retention's own state on top: which images run anywhere, each node's
+	// last in-use list.
+	rt := NewRetainer(inv, "", RetainerConfig{TTL: time.Hour, MaxUtilization: 0.7})
+	rt.Sweep(context.Background())
+	b3 := heap()
 	runtime.KeepAlive(reps)
 	runtime.KeepAlive(inv)
 	runtime.KeepAlive(lay)
-	invMiB, layMiB := float64(b1-b0)/(1<<20), float64(b2-b1)/(1<<20)
-	t.Logf("image inventories: %.1f MiB, layer index: %.1f MiB (150 nodes)", invMiB, layMiB)
+	runtime.KeepAlive(rt)
+	invMiB, layMiB, rtMiB := float64(b1-b0)/(1<<20), float64(b2-b1)/(1<<20), float64(b3-b2)/(1<<20)
+	t.Logf("image inventories (with in-use images): %.1f MiB, layer index: %.1f MiB, retention: %.2f MiB (150 nodes)", invMiB, layMiB, rtMiB)
+	if rtMiB > 1 {
+		t.Errorf("retention state %.2f MiB (limit 1)", rtMiB)
+	}
 	if invMiB > 5 || layMiB > 10 {
 		t.Errorf("controller state grew: inventories %.1f MiB (limit 5), layer index %.1f MiB (limit 10)", invMiB, layMiB)
 	}

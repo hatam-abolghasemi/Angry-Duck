@@ -42,8 +42,46 @@ type WorkerReport struct {
 	// Streams says this worker serves a spread blob to peers while it is
 	// still receiving it. Workers that predate it don't, and are only
 	// sent peers once they hold a blob.
-	Streams   bool      `json:"streams,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	Streams bool `json:"streams,omitempty"`
+	// ImageState says InUse and Retained are reported: the worker's image
+	// cleanup runs with retention on. Without it both are unknown, and the
+	// node takes no part in retention. Like Repos and Images, InUse and
+	// Retained are left out while InventoryOmitted.
+	ImageState bool `json:"image_state,omitempty"`
+	// InUse is every image a container on this node uses, by target
+	// digest, with a name to fetch it by. Sorted by digest.
+	InUse []ImageRef `json:"in_use,omitempty"`
+	// Retained is the images this node keeps as their cluster's retention
+	// copy: target digest to when the copy expires (Unix seconds).
+	Retained  map[string]int64 `json:"retained,omitempty"`
+	Timestamp time.Time        `json:"timestamp"`
+}
+
+// ImageRef is one image as retention tracks it: the digest its names
+// point at (an index or a manifest) and one of those names.
+type ImageRef struct {
+	Digest string `json:"digest"`
+	Name   string `json:"name"`
+}
+
+// RetainOrder tells a worker to keep an image as the cluster's retention
+// copy until Until (Unix seconds), or, with Until 0, that it no longer
+// is (POST /images/retain). 200: done; 404: no image with that digest is
+// registered here; 409: retention is off on this node.
+type RetainOrder struct {
+	Digest string `json:"digest"`
+	Until  int64  `json:"until"`
+}
+
+// RetentionStatus is the controller's view of one retention copy, for
+// /status.
+type RetentionStatus struct {
+	Digest   string    `json:"digest"`
+	Image    string    `json:"image"`
+	Node     string    `json:"node,omitempty"` // empty: no node holds it yet
+	UnusedAt time.Time `json:"unused_at"`
+	Until    time.Time `json:"until"`
+	Copying  bool      `json:"copying,omitempty"`
 }
 
 // LayerSync is one step of a worker's layer inventory: every blob digest
@@ -138,6 +176,7 @@ type ControllerStatus struct {
 	Rescues      []RescueStatus      `json:"rescues,omitempty"`
 	Propagations []PropagationStatus `json:"propagations,omitempty"`
 	Spreads      []SpreadStatus      `json:"spreads,omitempty"`
+	Retention    []RetentionStatus   `json:"retention,omitempty"`
 }
 
 // PropagationStatus is the propagator's view of one image being spread.

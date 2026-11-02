@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"angryduck/internal/imageref"
@@ -37,6 +39,29 @@ type Reporter struct {
 	// holds. While it matches, reports leave the lists out. Only the Run
 	// goroutine touches it.
 	ackedInv string
+
+	// Image state for retention (see SetImageState); stateOn once the
+	// cleanup reports it at all.
+	stateMu  sync.Mutex
+	stateOn  bool
+	inUse    []model.ImageRef
+	retained map[string]int64
+}
+
+// SetImageState hands the reporter this node's in-use images and
+// retention copies (the image cleanup's OnState), and sends a report
+// right away. The slices and map are kept as given and never modified.
+func (rp *Reporter) SetImageState(inUse []model.ImageRef, retained map[string]int64) {
+	rp.stateMu.Lock()
+	rp.stateOn, rp.inUse, rp.retained = true, inUse, retained
+	rp.stateMu.Unlock()
+	rp.Kick()
+}
+
+func (rp *Reporter) imageState() (on bool, inUse []model.ImageRef, retained map[string]int64) {
+	rp.stateMu.Lock()
+	defer rp.stateMu.Unlock()
+	return rp.stateOn, rp.inUse, rp.retained
 }
 
 // SetStreams makes reports tell the controller this node streams spread
@@ -52,17 +77,15 @@ func (rp *Reporter) SetLayerTracker(t *LayerTracker) { rp.layers = t }
 // source for others.
 func (rp *Reporter) SetExclude(fn func() map[string]bool) { rp.exclude = fn }
 
-// NewReporter builds a reporter. rt is used to list local images each
-// report tick so the controller can rank preheat targets by image
-// locality (see internal/controller/ranker.go's rankByLocality) —
-// pulling a new tag onto a node that already has an older tag of the same
-// repo is typically far cheaper than a cold pull.
-//
-// The listing goes through the shared Inventory, so a report right after
-// a recent listing reuses it instead of running the command again.
 // SetToken makes reports carry the shared token. Call before Run.
 func (rp *Reporter) SetToken(token string) { rp.token = token }
 
+// NewReporter builds a reporter. Each report carries this node's local
+// images, so the controller can rank preheat targets by image locality
+// (see internal/controller/ranker.go's rankByLocality): pulling a new tag
+// onto a node that already has an older tag of the same repo is typically
+// far cheaper than a cold pull. The listing comes from inv, the shared
+// Inventory, so a report right after a recent listing reuses it.
 func NewReporter(nodeID, selfAddress, metricsURL, controllerURL string, interval time.Duration, inv *Inventory) *Reporter {
 	return &Reporter{
 		nodeID:        nodeID,
@@ -155,7 +178,8 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		Streams:     rp.streams,
 		Timestamp:   time.Now(),
 	}
-	switch invHash := inventoryHash(repos, images); {
+	stateOn, inUse, retained := rp.imageState()
+	switch invHash := inventoryHash(repos, images, stateOn, inUse, retained); {
 	case !listed:
 		// No listing this time: keep whatever the controller holds
 		// rather than telling it this node has no images.
@@ -164,6 +188,7 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		report.InventoryHash, report.InventoryOmitted = invHash, true
 	default:
 		report.Repos, report.Images, report.InventoryHash = repos, images, invHash
+		report.ImageState, report.InUse, report.Retained = stateOn, inUse, retained
 	}
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -259,8 +284,9 @@ func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []st
 	return repos, images, true
 }
 
-// inventoryHash identifies a sorted inventory.
-func inventoryHash(repos, images []string) string {
+// inventoryHash identifies a sorted inventory, with the image state when
+// there is one (inUse sorted; retained in any order).
+func inventoryHash(repos, images []string, stateOn bool, inUse []model.ImageRef, retained map[string]int64) string {
 	h := sha256.New()
 	for _, s := range repos {
 		h.Write([]byte(s))
@@ -270,6 +296,30 @@ func inventoryHash(repos, images []string) string {
 	for _, s := range images {
 		h.Write([]byte(s))
 		h.Write([]byte{0})
+	}
+	if stateOn {
+		// Absent without image state, so a worker with retention off
+		// hashes exactly as before.
+		h.Write([]byte{2})
+		for _, r := range inUse {
+			h.Write([]byte(r.Digest))
+			h.Write([]byte{0})
+			h.Write([]byte(r.Name))
+			h.Write([]byte{0})
+		}
+		h.Write([]byte{3})
+		keys := make([]string, 0, len(retained))
+		for d := range retained {
+			keys = append(keys, d)
+		}
+		sort.Strings(keys)
+		var buf [20]byte
+		for _, d := range keys {
+			h.Write([]byte(d))
+			h.Write([]byte{0})
+			h.Write(strconv.AppendInt(buf[:0], retained[d], 10))
+			h.Write([]byte{0})
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }

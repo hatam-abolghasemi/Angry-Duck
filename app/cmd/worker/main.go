@@ -38,6 +38,7 @@ import (
 
 	"angryduck/internal/config"
 	"angryduck/internal/debugpprof"
+	"angryduck/internal/features"
 	"angryduck/internal/kube"
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
@@ -105,6 +106,14 @@ func main() {
 	stateDir := config.String("RESCUE_STATE_DIR", "/var/lib/angryduck")
 	namespace := config.String("RESCUE_CONTAINERD_NAMESPACE", "k8s.io")
 	snapshotter := config.String("CONTAINERD_SNAPSHOTTER", "overlayfs")
+	feat := features.Load()
+	log.Printf("angryduck-worker[%s]: features: %s", nodeID, feat)
+	for _, n := range feat.Notes {
+		log.Printf("angryduck-worker[%s]: %s", nodeID, n)
+	}
+	if v, ok := os.LookupEnv("GC_ROLLBACK_KEEP"); ok && v != "" {
+		log.Printf("angryduck-worker[%s]: GC_ROLLBACK_KEEP is no longer used (removed in 1.10.0): images that go unused keep one retention copy in the cluster instead (GC_RETENTION_*)", nodeID)
+	}
 
 	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s containerd=%s namespace=%s snapshotter=%s",
 		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, runtimeEndpoint, namespace, snapshotter)
@@ -156,13 +165,13 @@ func main() {
 	defer cancel()
 
 	var tracker *worker.LayerTracker
-	if store != nil && config.Bool("LAYER_INVENTORY_ENABLED", true) {
+	if store != nil && feat.LayerInventory {
 		interval := config.Duration("LAYER_SCAN_INTERVAL_S", 60)
 		log.Printf("angryduck-worker[%s]: layer inventory enabled: scan_interval=%s", nodeID, interval)
 		tracker = worker.NewLayerTracker(store, nodeID, interval)
 		reporter.SetLayerTracker(tracker)
 	}
-	if store != nil && config.Bool("INVENTORY_EVENTS_ENABLED", true) {
+	if store != nil && feat.InventoryEvents {
 		// containerd's events report pulls and removals as they happen;
 		// periodic scans then only resync.
 		scan := config.Duration("LAYER_SCAN_INTERVAL_S", 60)
@@ -190,12 +199,12 @@ func main() {
 
 	var rescue *worker.Rescue
 	var pins *worker.Pins
-	if store != nil && tokenErr == nil && config.Bool("RESCUE_ENABLED", true) {
+	if store != nil && tokenErr == nil && feat.Rescue {
 		rescue, pins = newRescue(ctx, nodeID, hostRoot, stateDir, store, token)
 		rescue.OnSuccess(reporter.Kick)
 	}
 	var extra []func(*http.ServeMux)
-	if store != nil && tokenErr == nil && config.Bool("SPREAD_ENABLED", true) {
+	if store != nil && tokenErr == nil && feat.Spread {
 		// Blob-by-blob spreading. Registry pulls by digest use the same
 		// pull secret as CRI pulls; the stream itself has no whole-request
 		// timeout, SPREAD_TRANSFER_TIMEOUT_S bounds each transfer.
@@ -207,7 +216,7 @@ func main() {
 		extra = append(extra, sp.Register)
 		// Serving blobs still arriving needs the content store mounted
 		// (their ingest files); SPREAD_STREAM_ENABLED=false turns it off.
-		streams := sp.Streams() && config.Bool("SPREAD_STREAM_ENABLED", true)
+		streams := sp.Streams() && feat.SpreadStream
 		if !streams {
 			sp.DisableStreaming()
 		}
@@ -226,7 +235,7 @@ func main() {
 		return rescue != nil && rescue.Busy(names)
 	}
 
-	if store != nil && config.Bool("IMAGE_REPAIR_ENABLED", true) {
+	if store != nil && feat.Repair {
 		platform := config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH)
 		interval := config.Duration("IMAGE_REPAIR_INTERVAL_S", 120)
 		repair := worker.NewImageRepair(store, registryclient.New(creds, 30*time.Second, 0), platform, nodeID, interval, busy, reporter.Kick)
@@ -242,7 +251,13 @@ func main() {
 		log.Printf("angryduck-worker[%s]: image repair disabled (IMAGE_REPAIR_ENABLED=false): an image that can't start containers stays until removed by hand", nodeID)
 	}
 
-	if store != nil && config.Bool("GC_ENABLED", true) {
+	if store != nil && feat.GC {
+		// Retention marks images on the controller's orders, which need
+		// the shared token; without it the cleanup runs without retention.
+		retention := feat.GCRetention && tokenErr == nil
+		if feat.GCRetention && tokenErr != nil {
+			log.Printf("angryduck-worker[%s]: WARNING: image retention off: no usable token for the controller's orders", nodeID)
+		}
 		gc := worker.NewImageGC(store,
 			rt.ListInUseImages,
 			func() (float64, error) {
@@ -254,24 +269,31 @@ func main() {
 			worker.GCConfig{
 				Interval:          config.Duration("GC_INTERVAL_S", 60),
 				High:              config.Float("GC_HIGH_UTILIZATION", 0.70),
-				Low:               config.Float("GC_LOW_UTILIZATION", 0.60),
-				UnusedFor:         config.Duration("GC_UNUSED_FOR_S", 21600),
-				RollbackKeep:      config.Int("GC_ROLLBACK_KEEP", 3),
+				Low:               config.Float("GC_LOW_UTILIZATION", 0.40),
+				UnusedFor:         config.Duration("GC_UNUSED_FOR_S", 3600),
+				Retention:         retention,
 				Batch:             config.Int("GC_BATCH", 5),
 				Settle:            config.Duration("GC_SETTLE_S", 10),
 				ProtectSubstrings: config.StringSlice("GC_PROTECT_SUBSTRINGS", []string{"pause"}),
 				StatePath:         filepath.Join(hostRoot, stateDir, "image-usage.json"),
 			})
 		gc.OnDone(reporter.Kick)
+		if retention {
+			gc.OnState(reporter.SetImageState)
+			extra = append(extra, gc.Register(token))
+		} else {
+			go unretain(ctx, store, nodeID)
+		}
 		go gc.Run(ctx)
 	} else if store != nil {
 		log.Printf("angryduck-worker[%s]: image cleanup disabled (GC_ENABLED=false): kubelet's own image GC is all there is", nodeID)
+		go unretain(ctx, store, nodeID)
 	}
 
 	var hosts *worker.HostsConfig
 	var mirrorSrv *http.Server
 	if store != nil {
-		mirrorOn := config.Bool("MIRROR_ENABLED", false) && tokenErr == nil
+		mirrorOn := feat.Mirror && tokenErr == nil
 		// The mirror listens on the pod network; containerd, on the host
 		// network, reaches it at the pod IP and sends a per-pod random
 		// token from hosts.toml, so no other pod can use it.
@@ -439,6 +461,15 @@ func newRescue(ctx context.Context, nodeID, hostRoot, stateDir string, store *wo
 	cancel()
 	go pins.Run(ctx, 5*time.Minute)
 	return worker.NewRescue(store, pins, token, nodeID, platform, maxConcurrent), pins
+}
+
+// unretain takes the retention mark off every image at startup when this
+// worker won't honor it (retention or the cleanup off), so no image is
+// left kept for a feature that no longer runs here.
+func unretain(ctx context.Context, store *worker.ContainerdStore, nodeID string) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	worker.Unretain(ctx, store, nodeID)
 }
 
 // listenPort extracts the port from a listen address like ":18081".

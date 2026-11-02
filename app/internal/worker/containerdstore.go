@@ -38,11 +38,10 @@ import (
 // ContainerdStore is blobship.Store (and the mirror's, cleanup's and layer
 // tracker's store) backed by containerd's own gRPC API, over its socket.
 //
-// It replaces running the node's ctr and tar chrooted into /proc/1/root:
-// everything that needs privileges on the node (unpacking layers, mounting
-// snapshots, writing files with their owners and whiteouts) now happens
-// inside the containerd daemon, which already has them. The worker only
-// needs the socket.
+// Everything that needs privileges on the node (unpacking layers, mounting
+// snapshots, writing files with their owners and whiteouts) happens inside
+// the containerd daemon, which already has them. The worker only needs the
+// socket.
 type ContainerdStore struct {
 	client      *containerd.Client
 	namespace   string // kubelet's images live in k8s.io
@@ -858,20 +857,57 @@ func (s *ContainerdStore) ImageNames(ctx context.Context) ([]string, error) {
 
 // ImageTargets maps every image name to the digest it points at.
 func (s *ContainerdStore) ImageTargets(ctx context.Context) (map[string]string, error) {
+	targets, _, err := s.ImageTargetsLabeled(ctx, "")
+	return targets, err
+}
+
+// ImageTargetsLabeled is ImageTargets plus, from the same listing, the
+// value of label on every target that carries it on any of its names.
+// labeled is nil when no image carries it.
+func (s *ContainerdStore) ImageTargetsLabeled(ctx context.Context, label string) (targets, labeled map[string]string, err error) {
 	release, err := acquireListing(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer release()
 	imgs, err := s.client.ImageService().List(s.ns(ctx))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	targets := make(map[string]string, len(imgs))
+	targets = make(map[string]string, len(imgs))
 	for _, img := range imgs {
-		targets[img.Name] = img.Target.Digest.String()
+		d := img.Target.Digest.String()
+		targets[img.Name] = d
+		if v := img.Labels[label]; label != "" && v != "" {
+			if labeled == nil {
+				labeled = map[string]string{}
+			}
+			labeled[d] = v
+		}
 	}
-	return targets, nil
+	return targets, labeled, nil
+}
+
+// SetImageLabel sets label to value on image names, or removes it with
+// value "". Only that label changes. Names already gone are skipped.
+func (s *ContainerdStore) SetImageLabel(ctx context.Context, label, value string, names ...string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	ctx = s.ns(ctx)
+	is := s.client.ImageService()
+	var errs []error
+	for _, n := range names {
+		img := images.Image{Name: n}
+		if value != "" {
+			img.Labels = map[string]string{label: value}
+		}
+		// A field path naming a label absent from img.Labels removes it.
+		if _, err := is.Update(ctx, img, "labels."+label); err != nil && !errdefs.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("%s: %w", n, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // DeleteImages removes image names. containerd's garbage collector then

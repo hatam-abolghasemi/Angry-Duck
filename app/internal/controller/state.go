@@ -33,6 +33,12 @@ type workerEntry struct {
 	LastSeen time.Time
 	// Streams: the worker serves spread blobs it is still receiving.
 	Streams bool
+	// Image state for retention, when the worker reports it (ImageState):
+	// the images its containers use (sorted by digest, strings interned)
+	// and the retention copies it keeps. Replaced, never modified.
+	ImageState bool
+	InUse      []model.ImageRef
+	Retained   map[string]int64
 }
 
 // hasSorted reports whether sorted list contains s.
@@ -75,6 +81,17 @@ type Registry struct {
 	names interner
 	// onNewNode runs, under mu, for every node the first time it reports.
 	onNewNode []func(node string)
+	// onImageState runs, outside mu, after a report changed a node's
+	// image state.
+	onImageState func()
+}
+
+// OnImageState registers fn to run after any report that changed a
+// node's in-use images or retention copies. fn must not block.
+func (r *Registry) OnImageState(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onImageState = fn
 }
 
 // interner keeps one copy of each string held by any worker's inventory,
@@ -143,6 +160,49 @@ func (in *interner) internList(old, list []string) []string {
 	return out
 }
 
+// internRefs is internList for image refs: refs sorted by digest, with
+// both strings interned. old is returned, and no references change, when
+// refs equals it.
+func (in *interner) internRefs(old, refs []model.ImageRef) []model.ImageRef {
+	if len(refs) == len(old) {
+		same := true
+		for i := range refs {
+			if refs[i] != old[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return old
+		}
+	}
+	var out []model.ImageRef
+	if len(refs) > 0 {
+		out = make([]model.ImageRef, len(refs))
+		for i, ref := range refs {
+			out[i] = model.ImageRef{Digest: in.intern(ref.Digest), Name: in.intern(ref.Name)}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Digest < out[j].Digest })
+	}
+	for _, ref := range old {
+		in.release(ref.Digest)
+		in.release(ref.Name)
+	}
+	return out
+}
+
+func equalRetained(a, b map[string]int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -208,7 +268,14 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 		ack.LayersSeq = r.layers.Seq(rep.NodeID)
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var stateChanged bool
+	defer func() {
+		fn := r.onImageState
+		r.mu.Unlock()
+		if stateChanged && fn != nil {
+			fn()
+		}
+	}()
 	w, ok := r.workers[rep.NodeID]
 	if !ok {
 		w = &workerEntry{NodeID: rep.NodeID}
@@ -234,6 +301,18 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 		w.Repos = r.names.internList(w.Repos, rep.Repos)
 		w.Images = r.names.internList(w.Images, rep.Images)
 		w.invHash = rep.InventoryHash
+		inUse := r.names.internRefs(w.InUse, rep.InUse)
+		retained := rep.Retained
+		if len(retained) == 0 {
+			retained = nil
+		}
+		if rep.ImageState != w.ImageState || len(inUse) != len(w.InUse) || (len(inUse) > 0 && &inUse[0] != &w.InUse[0]) || !equalRetained(retained, w.Retained) {
+			stateChanged = true
+		}
+		w.ImageState, w.InUse = rep.ImageState, inUse
+		if !equalRetained(retained, w.Retained) {
+			w.Retained = retained
+		}
 	}
 	ack.InventoryHash = w.invHash
 	return ack

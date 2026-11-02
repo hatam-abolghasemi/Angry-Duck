@@ -19,6 +19,7 @@ import (
 	"angryduck/internal/config"
 	"angryduck/internal/controller"
 	"angryduck/internal/debugpprof"
+	"angryduck/internal/features"
 	"angryduck/internal/kube"
 	"angryduck/internal/logging"
 	"angryduck/internal/memlimit"
@@ -56,6 +57,11 @@ func main() {
 	// metrics turn their registry-host label on or off together.
 	labelRegistry := config.Bool("METRICS_LABEL_REGISTRY", false)
 
+	feat := features.Load()
+	log.Printf("angryduck-controller: features: %s", feat)
+	for _, n := range feat.Notes {
+		log.Printf("angryduck-controller: %s", n)
+	}
 	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v metrics_label_registry=%v",
 		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 
@@ -105,12 +111,12 @@ func main() {
 	// other, and the workers only accept that with the shared token.
 	token, tokenErr := sharedtoken.Load(config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token"))
 	if tokenErr != nil {
-		log.Printf("angryduck-controller: WARNING: no usable rescue token, so rescue and propagation are off: %v", tokenErr)
+		log.Printf("angryduck-controller: WARNING: no usable rescue token, so rescue, propagation and image retention are off: %v", tokenErr)
 	} else {
 		server.SetToken(token)
 		ranker.SetToken(token)
 		log.Printf("angryduck-controller: /report requires the shared token (AUTH_MODE=%s)", authMode)
-		rescuer, pods := newRescuer(registry, token)
+		rescuer, pods := newRescuer(registry, token, feat.Rescue)
 		if rescuer != nil {
 			if resolver != nil {
 				rescuer.SetLayerResolver(resolver, platform)
@@ -119,7 +125,7 @@ func main() {
 			go pods.Run(ctx)
 			go rescuer.Run(ctx)
 		}
-		if propagator := newPropagator(registry, token, excludeNodeSubstrings, platform); propagator != nil {
+		if propagator := newPropagator(registry, token, excludeNodeSubstrings, platform, feat.Propagate); propagator != nil {
 			propagator.SetSeeds(ranker.Seeds)
 			if rescuer != nil {
 				propagator.SetWaiting(rescuer.Waiting)
@@ -130,12 +136,19 @@ func main() {
 			server.SetPropagator(propagator)
 			go propagator.Run(ctx)
 		}
-		if spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN); spreader != nil {
+		if spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN, feat); spreader != nil {
 			if rescuer != nil {
 				spreader.SetWaiting(rescuer.Waiting)
 			}
 			server.SetSpreader(spreader)
 			go spreader.Run(ctx)
+		}
+		if retainer := newRetainer(registry, token, platform, feat); retainer != nil {
+			if resolver != nil {
+				retainer.SetLayerResolver(resolver)
+			}
+			server.SetRetainer(retainer)
+			go retainer.Run(ctx)
 		}
 	}
 
@@ -184,8 +197,8 @@ func main() {
 // with a log line saying why. Rescue is on by default but needs two things
 // the base install didn't: a service account allowed to list pods, and the
 // shared token the workers check.
-func newRescuer(registry *controller.Registry, token string) (*controller.Rescuer, *kube.PodWatch) {
-	if !config.Bool("RESCUE_ENABLED", true) {
+func newRescuer(registry *controller.Registry, token string, enabled bool) (*controller.Rescuer, *kube.PodWatch) {
+	if !enabled {
 		log.Println("angryduck-controller: rescue disabled (RESCUE_ENABLED=false)")
 		return nil, nil
 	}
@@ -217,8 +230,8 @@ func newRescuer(registry *controller.Registry, token string) (*controller.Rescue
 
 // newPropagator sets up spreading each pushed image to every eligible node
 // from peers, or returns nil when it's turned off.
-func newPropagator(registry *controller.Registry, token string, rankExclude []string, platform string) *controller.Propagator {
-	if !config.Bool("PROPAGATE_ENABLED", true) {
+func newPropagator(registry *controller.Registry, token string, rankExclude []string, platform string, enabled bool) *controller.Propagator {
+	if !enabled {
 		log.Println("angryduck-controller: propagation disabled (PROPAGATE_ENABLED=false)")
 		return nil
 	}
@@ -247,8 +260,8 @@ func newPropagator(registry *controller.Registry, token string, rankExclude []st
 // when it's off or can't work: it reads each image's layers from its
 // registry, so it needs RANK_BY_LAYERS. Without it, preheats seed whole
 // images and propagation spreads them.
-func newSpreader(registry *controller.Registry, rc *registryclient.Client, token string, rankExclude []string, platform string, topN int) *controller.Spreader {
-	if !config.Bool("SPREAD_ENABLED", true) {
+func newSpreader(registry *controller.Registry, rc *registryclient.Client, token string, rankExclude []string, platform string, topN int, feat features.Flags) *controller.Spreader {
+	if !feat.Spread {
 		log.Println("angryduck-controller: blob-by-blob spreading disabled (SPREAD_ENABLED=false): seeding and propagating whole images")
 		return nil
 	}
@@ -271,7 +284,7 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		ResolveTimeout:  config.Duration("RANK_RESOLVE_TIMEOUT_S", 5),
 		Window:          config.Duration("PROPAGATE_WINDOW_S", 0),
 		Platform:        platform,
-		Stream:          config.Bool("SPREAD_STREAM_ENABLED", true),
+		Stream:          feat.SpreadStream,
 		StreamMinBytes:  int64(config.Int("SPREAD_STREAM_MIN_MB", 32)) << 20,
 		StreamMaxDepth:  config.Int("SPREAD_STREAM_MAX_DEPTH", 0),
 		ExpressMaxBytes: int64(config.Int("SPREAD_EXPRESS_MAX_MB", 32)) << 20,
@@ -292,4 +305,29 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		log.Printf("angryduck-controller: blobs up to %d MiB have their own per-source slots, beside large transfers", cfg.ExpressMaxBytes>>20)
 	}
 	return controller.NewSpreader(registry, rc, token, cfg)
+}
+
+// newRetainer sets up keeping one copy of every image that went unused,
+// or returns nil when retention or the image cleanup is off.
+func newRetainer(registry *controller.Registry, token, platform string, feat features.Flags) *controller.Retainer {
+	if !feat.GCRetention {
+		log.Println("angryduck-controller: image retention disabled (GC_RETENTION_ENABLED=false or GC_ENABLED=false)")
+		return nil
+	}
+	cfg := controller.RetainerConfig{
+		TTL: config.Duration("GC_RETENTION_TTL_S", 86400),
+		// The workers' disk-pressure mark, unless set on its own.
+		MaxUtilization: config.Float("GC_RETENTION_MAX_UTILIZATION", config.Float("GC_HIGH_UTILIZATION", 0.70)),
+		Interval:       config.Duration("GC_RETENTION_INTERVAL_S", 30),
+		CopyTimeout:    config.Duration("RESCUE_TIMEOUT_S", 600),
+		// Copying to a node that doesn't hold the image goes through the
+		// workers' rescue endpoint.
+		Copy:     feat.Rescue,
+		Platform: platform,
+	}
+	if cfg.TTL <= 0 {
+		log.Println("angryduck-controller: image retention disabled (GC_RETENTION_TTL_S=0)")
+		return nil
+	}
+	return controller.NewRetainer(registry, token, cfg)
 }

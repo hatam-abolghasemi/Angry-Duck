@@ -20,6 +20,7 @@ type Server struct {
 	rescuer    *Rescuer    // nil when rescue is off
 	propagator *Propagator // nil when propagation is off
 	spreader   *Spreader   // nil when spreading is off
+	retainer   *Retainer   // nil when retention is off
 	auth       *sharedtoken.Auth
 	webhook    *sharedtoken.Auth // CI's token for /webhook/preheat
 	mux        *http.ServeMux
@@ -71,6 +72,9 @@ func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
 
 // SetRescuer adds the rescuer's state to /status.
 func (s *Server) SetRescuer(rs *Rescuer) { s.rescuer = rs }
+
+// SetRetainer adds the retention copies to /status.
+func (s *Server) SetRetainer(rt *Retainer) { s.retainer = rt }
 
 // NewServer builds a Server with routes registered.
 func NewServer(registry *Registry, ranker *Ranker) *Server {
@@ -196,6 +200,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.propagator != nil {
 		status.Propagations = s.propagator.Status()
+	}
+	if s.retainer != nil {
+		status.Retention = s.retainer.Status()
 	}
 	if s.spreader != nil {
 		status.Spreads = s.spreader.Status()
