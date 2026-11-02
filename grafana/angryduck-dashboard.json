@@ -3263,7 +3263,7 @@
         "spec": {
           "id": 118,
           "title": "Next Removal In",
-          "description": "When the age rule removes the image next, on the soonest node. Disk pressure removes it sooner.",
+          "description": "When the cleanup removes the image next, on the soonest node: by the age rule (disk pressure removes it sooner), or, for the node keeping its retention copy, when that copy expires.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -6566,7 +6566,7 @@
         "spec": {
           "id": 124,
           "title": "Removed from Nodes",
-          "description": "Images the cleanup removed, from which node, when and by which tier: old (unused for GC_UNUSED_FOR_S), pressure (disk above GC_HIGH), rollback (a newest tag, only under pressure). Hidden when the cleanup removed none of the selected images in the range.",
+          "description": "Images the cleanup removed, from which node, when and by which tier: old (unused for GC_UNUSED_FOR_S), pressure (disk above GC_HIGH), retention (an expired retention copy: the one node keeping an image the cluster stopped running, for GC_RETENTION_TTL_S). Hidden when the cleanup removed none of the selected images in the range.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -6885,10 +6885,10 @@
                                 "index": 1,
                                 "text": "pressure"
                               },
-                              "rollback": {
+                              "retention": {
                                 "color": "#9b759b",
                                 "index": 2,
-                                "text": "rollback"
+                                "text": "retention"
                               }
                             },
                             "type": "value"
@@ -6943,7 +6943,7 @@
         "spec": {
           "id": 125,
           "title": "Coming Up for Removal",
-          "description": "Unused images the age rule will remove, from which node and in how long. Disk pressure removes them sooner, oldest first. Images kept for rollback are not listed. Hidden when none of the selected images is due for removal.",
+          "description": "Unused images the cleanup will remove, from which node and in how long: old and pressure by the age rule (disk pressure removes them sooner, oldest first), retention when a retention copy expires. Hidden when none of the selected images is due for removal.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -7262,10 +7262,10 @@
                                 "index": 1,
                                 "text": "pressure"
                               },
-                              "rollback": {
+                              "retention": {
                                 "color": "#9b759b",
                                 "index": 2,
-                                "text": "rollback"
+                                "text": "retention"
                               }
                             },
                             "type": "value"
@@ -8088,7 +8088,7 @@
         "spec": {
           "id": 130,
           "title": "The Image on Each Node",
-          "description": "What happened to the image on each node over time: waiting for it, receiving it, pods running it, stuck pulling it, or broken. Click a row to focus on its node.",
+          "description": "What happened to the image on each node over time: waiting for it, receiving it, pods running it, stuck pulling it, broken, or kept for rollbacks (the cluster's one retention copy, once nothing runs it). Click a row to focus on its node.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -8106,7 +8106,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "max by (node) (\n  (count by (node) (max by (image, kind, component, namespace, pod, node) (\n  (\n  (group by (k8s_source_cluster, namespace, pod, container, image) (label_replace(kube_pod_container_info{k8s_source_cluster=~\"$cluster\", image_spec=~\"$image\", image_spec=~\"($registry)/.*\"}, \"image\", \"$1\", \"image_spec\", \"(.+)\"))\n  and on (image) group by (image) (last_over_time({__name__=~\"angryduck_controller_(spread_nodes|propagation_nodes|rescue_stuck_pods|origin_unavailable|image_spread_started_timestamp_seconds|image_delivered_timestamp_seconds)|angryduck_worker_(broken_image|gc_image_returns|image_pull_seconds|image_repair_seconds|gc_image_removed_timestamp_seconds|gc_image_removal_seconds)\", k8s_source_cluster=~\"$cluster\", image=~\"$image\", image=~\"($registry)/.*\"}[$__range])))\n  * on (k8s_source_cluster, namespace, pod) group_left (node) group by (k8s_source_cluster, namespace, pod, node) (kube_pod_info{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})\n  * on (k8s_source_cluster, namespace, pod) group_left (kind, component) (\n    group by (k8s_source_cluster, namespace, pod, kind, component) (\n      label_replace(kube_pod_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"ReplicaSet\"}, \"replicaset\", \"$1\", \"owner_name\", \"(.+)\")\n      * on (k8s_source_cluster, namespace, replicaset) group_left (kind, component)\n      group by (k8s_source_cluster, namespace, replicaset, kind, component) (label_replace(label_replace(kube_replicaset_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"Deployment\"}, \"kind\", \"$1\", \"owner_kind\", \"(.+)\"), \"component\", \"$1\", \"owner_name\", \"(.+)\")))\n    or on (k8s_source_cluster, namespace, pod) group by (k8s_source_cluster, namespace, pod, kind, component) (\n      label_replace(kube_pod_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"Job\"}, \"job_name\", \"$1\", \"owner_name\", \"(.+)\")\n      * on (k8s_source_cluster, namespace, job_name) group_left (kind, component)\n      group by (k8s_source_cluster, namespace, job_name, kind, component) (label_replace(label_replace(kube_job_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"CronJob\"}, \"kind\", \"$1\", \"owner_kind\", \"(.+)\"), \"component\", \"$1\", \"owner_name\", \"(.+)\")))\n    or on (k8s_source_cluster, namespace, pod) group by (k8s_source_cluster, namespace, pod, kind, component) (label_replace(label_replace(kube_pod_owner{k8s_source_cluster=~\"$cluster\"}, \"kind\", \"$1\", \"owner_kind\", \"(.+)\"), \"component\", \"$1\", \"owner_name\", \"(.+)\"))\n  )\n)\n  * on (k8s_source_cluster, namespace, pod, container) group_left\n  max by (k8s_source_cluster, namespace, pod, container) (\n    (kube_pod_container_status_running{k8s_source_cluster=~\"$cluster\"} == 1)\n    or 2 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason=\"ContainerCreating\"}\n    or 3 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason=~\"ImagePullBackOff|ErrImagePull\"}\n    or 4 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason=\"CreateContainerError\"}\n    or 5 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason!~\"ContainerCreating|ImagePullBackOff|ErrImagePull|CreateContainerError\"}\n    or 6 * (kube_pod_container_status_terminated{k8s_source_cluster=~\"$cluster\"} == 1)\n  )\n) == 1) * 0 + 1)\n  or (sum by (node) (angryduck_controller_spread_node_missing_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 2)\n  or (sum by (node) (angryduck_controller_spread_transfer_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 3)\n  or (sum by (node) (angryduck_controller_rescue_stuck_pods{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 4)\n  or (max by (node) (angryduck_worker_broken_image{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 5)\n)",
+                        "expr": "max by (node) (\n  (count by (node) (max by (image, kind, component, namespace, pod, node) (\n  (\n  (group by (k8s_source_cluster, namespace, pod, container, image) (label_replace(kube_pod_container_info{k8s_source_cluster=~\"$cluster\", image_spec=~\"$image\", image_spec=~\"($registry)/.*\"}, \"image\", \"$1\", \"image_spec\", \"(.+)\"))\n  and on (image) group by (image) (last_over_time({__name__=~\"angryduck_controller_(spread_nodes|propagation_nodes|rescue_stuck_pods|origin_unavailable|image_spread_started_timestamp_seconds|image_delivered_timestamp_seconds)|angryduck_worker_(broken_image|gc_image_returns|image_pull_seconds|image_repair_seconds|gc_image_removed_timestamp_seconds|gc_image_removal_seconds)\", k8s_source_cluster=~\"$cluster\", image=~\"$image\", image=~\"($registry)/.*\"}[$__range])))\n  * on (k8s_source_cluster, namespace, pod) group_left (node) group by (k8s_source_cluster, namespace, pod, node) (kube_pod_info{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})\n  * on (k8s_source_cluster, namespace, pod) group_left (kind, component) (\n    group by (k8s_source_cluster, namespace, pod, kind, component) (\n      label_replace(kube_pod_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"ReplicaSet\"}, \"replicaset\", \"$1\", \"owner_name\", \"(.+)\")\n      * on (k8s_source_cluster, namespace, replicaset) group_left (kind, component)\n      group by (k8s_source_cluster, namespace, replicaset, kind, component) (label_replace(label_replace(kube_replicaset_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"Deployment\"}, \"kind\", \"$1\", \"owner_kind\", \"(.+)\"), \"component\", \"$1\", \"owner_name\", \"(.+)\")))\n    or on (k8s_source_cluster, namespace, pod) group by (k8s_source_cluster, namespace, pod, kind, component) (\n      label_replace(kube_pod_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"Job\"}, \"job_name\", \"$1\", \"owner_name\", \"(.+)\")\n      * on (k8s_source_cluster, namespace, job_name) group_left (kind, component)\n      group by (k8s_source_cluster, namespace, job_name, kind, component) (label_replace(label_replace(kube_job_owner{k8s_source_cluster=~\"$cluster\", owner_kind=\"CronJob\"}, \"kind\", \"$1\", \"owner_kind\", \"(.+)\"), \"component\", \"$1\", \"owner_name\", \"(.+)\")))\n    or on (k8s_source_cluster, namespace, pod) group by (k8s_source_cluster, namespace, pod, kind, component) (label_replace(label_replace(kube_pod_owner{k8s_source_cluster=~\"$cluster\"}, \"kind\", \"$1\", \"owner_kind\", \"(.+)\"), \"component\", \"$1\", \"owner_name\", \"(.+)\"))\n  )\n)\n  * on (k8s_source_cluster, namespace, pod, container) group_left\n  max by (k8s_source_cluster, namespace, pod, container) (\n    (kube_pod_container_status_running{k8s_source_cluster=~\"$cluster\"} == 1)\n    or 2 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason=\"ContainerCreating\"}\n    or 3 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason=~\"ImagePullBackOff|ErrImagePull\"}\n    or 4 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason=\"CreateContainerError\"}\n    or 5 * kube_pod_container_status_waiting_reason{k8s_source_cluster=~\"$cluster\", reason!~\"ContainerCreating|ImagePullBackOff|ErrImagePull|CreateContainerError\"}\n    or 6 * (kube_pod_container_status_terminated{k8s_source_cluster=~\"$cluster\"} == 1)\n  )\n) == 1) * 0 + 1)\n  or (sum by (node) (angryduck_controller_spread_node_missing_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 2)\n  or (sum by (node) (angryduck_controller_spread_transfer_bytes{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 3)\n  or (sum by (node) (angryduck_controller_rescue_stuck_pods{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 4)\n  or (max by (node) (angryduck_worker_broken_image{k8s_source_cluster=~\"$cluster\", node=~\"$node\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0 + 5)\n  or (max by (node) (angryduck_worker_gc_image_removal_seconds{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier=\"retention\", image=~\"$image\", image=~\"($registry)/.*\"}) * 0)\n)",
                         "legendFormat": "{{node}}",
                         "range": true
                       }
@@ -8177,6 +8177,11 @@
                           "text": "broken",
                           "color": "#e0566b",
                           "index": 4
+                        },
+                        "0": {
+                          "text": "kept for rollbacks",
+                          "color": "#9b759b",
+                          "index": 5
                         }
                       }
                     }
@@ -22785,7 +22790,7 @@
         "spec": {
           "id": 79,
           "title": "Removable Now",
-          "description": "Images the cleanup could remove right now, across tiers.",
+          "description": "Images the cleanup could remove right now, across tiers. Retention copies are not counted: they go only when they expire.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -23488,7 +23493,7 @@
         "spec": {
           "id": 83,
           "title": "Cleanup Status",
-          "description": "Per node: cleanup state (idle; cleaning = disk above GC_HIGH, removing unused images until GC_LOW; stalled = removing images frees nothing). old / pressure / rollback = images removable right now per tier. removed, errors and came back (re-pulled within an hour of removal) count the time range. Stalled nodes first.",
+          "description": "Per node: cleanup state (idle; cleaning = disk above GC_HIGH, removing unused images until GC_LOW; stalled = removing images frees nothing). old / pressure = images removable right now per tier; retained = retention copies the node keeps (never removed before they expire). removed, errors and came back (re-pulled within an hour of removal) count the time range. Stalled nodes first.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -23579,14 +23584,14 @@
                       "spec": {
                         "editorMode": "code",
                         "exemplar": false,
-                        "expr": "sum by (node) (angryduck_worker_gc_candidates{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier=\"rollback\"})",
+                        "expr": "sum by (node) (angryduck_worker_gc_retained_images{k8s_source_cluster=~\"$cluster\", node=~\"$node\"})",
                         "format": "table",
                         "instant": true,
                         "legendFormat": "__auto",
                         "range": false
                       }
                     },
-                    "refId": "rollback",
+                    "refId": "retained",
                     "hidden": false
                   }
                 },
@@ -23704,7 +23709,7 @@
                           "Value #state",
                           "Value #old",
                           "Value #pressure",
-                          "Value #rollback",
+                          "Value #retained",
                           "Value #removed",
                           "Value #errors",
                           "Value #back"
@@ -23726,7 +23731,7 @@
                         "Value #old": 2,
                         "Value #pressure": 3,
                         "Value #removed": 5,
-                        "Value #rollback": 4,
+                        "Value #retained": 4,
                         "Value #state": 1,
                         "node": 0
                       },
@@ -23736,7 +23741,7 @@
                         "Value #old": "old",
                         "Value #pressure": "pressure",
                         "Value #removed": "removed",
-                        "Value #rollback": "rollback",
+                        "Value #retained": "retained",
                         "Value #state": "state"
                       }
                     }
@@ -23959,7 +23964,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "rollback"
+                      "options": "retained"
                     },
                     "properties": [
                       {
@@ -24276,7 +24281,7 @@
         "spec": {
           "id": 85,
           "title": "Images Removed by Tier",
-          "description": "Images removed per minute, by tier: old (unused for a while), pressure (disk above GC_HIGH), rollback (a newest tag, only under pressure), error.",
+          "description": "Images removed per minute, by tier: old (unused for a while), pressure (disk above GC_HIGH), retention (an expired retention copy: the one node keeping an image the cluster stopped running, for GC_RETENTION_TTL_S), error.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -24428,7 +24433,7 @@
                     "matcher": {
                       "id": "byName",
                       "scope": "series",
-                      "options": "rollback"
+                      "options": "retention"
                     },
                     "properties": [
                       {
@@ -24468,7 +24473,7 @@
         "spec": {
           "id": 86,
           "title": "Removable Images by Tier",
-          "description": "Images the cleanup could remove right now, per tier. old: unused past the age limit; pressure: removable when the disk is above GC_HIGH; rollback: kept for rollbacks, removed only under pressure. Log scale: the rollback tier is usually far larger than the others.",
+          "description": "Images the cleanup could remove right now, per tier. old: unused past the age limit; pressure: removable when the disk is above GC_HIGH; retention copies are not candidates: they go only when they expire. Log scale.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -24613,22 +24618,6 @@
                         "id": "color",
                         "value": {
                           "fixedColor": "#e0a960",
-                          "mode": "fixed"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "scope": "series",
-                      "options": "rollback"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "fixedColor": "purple",
                           "mode": "fixed"
                         }
                       }
@@ -25154,7 +25143,7 @@
         "spec": {
           "id": 89,
           "title": "Images Removed",
-          "description": "Images the cleanup removed, from which node, when and by which tier: old (unused for GC_UNUSED_FOR_S), pressure (disk above GC_HIGH), rollback (a newest tag, only under pressure).",
+          "description": "Images the cleanup removed, from which node, when and by which tier: old (unused for GC_UNUSED_FOR_S), pressure (disk above GC_HIGH), retention (an expired retention copy: the one node keeping an image the cluster stopped running, for GC_RETENTION_TTL_S).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -25482,10 +25471,10 @@
                                 "index": 1,
                                 "text": "pressure"
                               },
-                              "rollback": {
+                              "retention": {
                                 "color": "#9b759b",
                                 "index": 2,
-                                "text": "rollback"
+                                "text": "retention"
                               }
                             },
                             "type": "value"
@@ -25806,7 +25795,7 @@
         "spec": {
           "id": 90,
           "title": "Images Coming Up for Removal",
-          "description": "Unused images the age rule will remove, from which node and in how long. Disk pressure removes them sooner, oldest first. Images kept for rollback are not listed.",
+          "description": "Unused images the cleanup will remove, from which node and in how long: old and pressure by the age rule (disk pressure removes them sooner, oldest first), retention when a retention copy expires.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -25917,7 +25906,7 @@
                   "color": {
                     "mode": "thresholds"
                   },
-                  "noValue": "No unused image is due for removal by age",
+                  "noValue": "No unused image is due for removal",
                   "custom": {
                     "align": "auto",
                     "cellOptions": {
@@ -26134,10 +26123,10 @@
                                 "index": 1,
                                 "text": "pressure"
                               },
-                              "rollback": {
+                              "retention": {
                                 "color": "#9b759b",
                                 "index": 2,
-                                "text": "rollback"
+                                "text": "retention"
                               }
                             },
                             "type": "value"
@@ -27596,6 +27585,1983 @@
           },
           "transparent": true
         }
+      },
+      "panel-135": {
+        "kind": "Panel",
+        "spec": {
+          "id": 135,
+          "title": "Copies Kept",
+          "description": "Images the cluster stopped running, each kept on one node for GC_RETENTION_TTL_S after it went unused, so a rollback finds it on a peer instead of the registry.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(angryduck_controller_retention_copies{k8s_source_cluster=~\"$cluster\", state=\"held\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "#9b759b"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-136": {
+        "kind": "Panel",
+        "spec": {
+          "id": 136,
+          "title": "Copies Waiting",
+          "description": "Images that went unused but have no node keeping them yet: no node below GC_RETENTION_MAX_UTILIZATION holds them, or they are being copied to one that has room.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(angryduck_controller_retention_copies{k8s_source_cluster=~\"$cluster\", state=~\"pending|copying\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "#7fb87a"
+                      },
+                      {
+                        "value": 1,
+                        "color": "#e0a960"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-137": {
+        "kind": "Panel",
+        "spec": {
+          "id": 137,
+          "title": "Retention Paused",
+          "description": "Yes while every node is at or above GC_RETENTION_MAX_UTILIZATION: no copy is kept until a node has room again; the images that went unused meanwhile then get theirs, within their GC_RETENTION_TTL_S.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "max(angryduck_controller_retention_paused{k8s_source_cluster=~\"$cluster\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "#7fb87a"
+                      },
+                      {
+                        "value": 1,
+                        "color": "#e0566b"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0",
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "no",
+                          "color": "#7fb87a",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "yes",
+                          "color": "#e0566b",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-138": {
+        "kind": "Panel",
+        "spec": {
+          "id": 138,
+          "title": "Kept in Range",
+          "description": "Times a node was picked to keep an image's retention copy in the time range.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "round(sum(increase(angryduck_controller_retention_events_total{k8s_source_cluster=~\"$cluster\", event=\"kept\"}[$__range]))) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "#9b759b"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-139": {
+        "kind": "Panel",
+        "spec": {
+          "id": 139,
+          "title": "Used Again in Range",
+          "description": "Images that ran again while their retention copy was kept, in the time range: rollbacks (or jobs) that found the image on a node.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "round(sum(increase(angryduck_controller_retention_events_total{k8s_source_cluster=~\"$cluster\", event=\"used\"}[$__range]))) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "#74afe3"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-140": {
+        "kind": "Panel",
+        "spec": {
+          "id": 140,
+          "title": "Copies Lost in Range",
+          "description": "Retention copies whose node went away or no longer had the image (removed by hand, kubelet's image GC), in the time range. Another node is picked each time.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "round(sum(increase(angryduck_controller_retention_events_total{k8s_source_cluster=~\"$cluster\", event=\"lost\"}[$__range]))) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "#7fb87a"
+                      },
+                      {
+                        "value": 1,
+                        "color": "#e0a960"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-141": {
+        "kind": "Panel",
+        "spec": {
+          "id": 141,
+          "title": "Retention Copies",
+          "description": "Every image the cluster stopped running, the one node keeping it, and when its copy expires (it is then removed at once). The cleanup leaves these alone until then, disk pressure included. A rollback in the meantime pulls through the mirror from that node.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "min by (node, image) (angryduck_worker_gc_image_removal_seconds{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier=\"retention\", image=~\"$cleanup_image\", image=~\"($registry)/.*\"})",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "node",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterFieldsByName",
+                  "spec": {
+                    "options": {
+                      "include": {
+                        "names": [
+                          "node",
+                          "image",
+                          "Value"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {},
+                      "includeByName": {},
+                      "indexByName": {
+                        "Value": 2,
+                        "image": 1,
+                        "node": 0
+                      },
+                      "renameByName": {
+                        "Value": "expires in"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": false,
+                    "displayName": "expires in"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No retention copy is kept",
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "filterable": false,
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "node"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 235
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter node to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-node}&var-node=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#c9c4b6",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "image"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter image to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-cleanup_image}&var-cleanup_image=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#d5dbe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": "docker\\.io/.+",
+                              "result": {
+                                "color": "#5fa8d3",
+                                "index": 0
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "registry\\.k8s\\.io/.+",
+                              "result": {
+                                "color": "#9b8fd6",
+                                "index": 1
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "ghcr\\.io/.+",
+                              "result": {
+                                "color": "#c58fe0",
+                                "index": 2
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "quay\\.io/.+",
+                              "result": {
+                                "color": "#d97796",
+                                "index": 3
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "([a-z0-9-]+\\.)?gcr\\.io/.+|[a-z0-9-]+\\.pkg\\.dev/.+",
+                              "result": {
+                                "color": "#6fb7a8",
+                                "index": 4
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "public\\.ecr\\.aws/.+|[0-9]+\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/.+",
+                              "result": {
+                                "color": "#e0a36b",
+                                "index": 5
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "mcr\\.microsoft\\.com/.+",
+                              "result": {
+                                "color": "#8fb35f",
+                                "index": 6
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "cr\\.kgateway\\.dev/.+",
+                              "result": {
+                                "color": "#86c5b5",
+                                "index": 7
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "expires in"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 115
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-142": {
+        "kind": "Panel",
+        "spec": {
+          "id": 142,
+          "title": "Retention Events",
+          "description": "Retention events per minute: went unused (nothing in the cluster runs the image anymore: a copy is due), kept (a node keeps it), copied (first copied to a node with room), used again (it runs again: no copy needed), lost (its node went away or dropped it), gone (no node holds it anymore), expired.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum by (event) (rate(angryduck_controller_retention_events_total{k8s_source_cluster=~\"$cluster\"}[$__rate_interval])) * 60",
+                        "legendFormat": "{{event}}",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cpm",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "unused"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#808080",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "went unused"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "kept"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "kept"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "copied"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#b877d9",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "copied"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "used"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "used again"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "lost"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "lost"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "gone"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#bfbfa4",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "gone"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "expired"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#a4bea1",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "expired"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-143": {
+        "kind": "Panel",
+        "spec": {
+          "id": 143,
+          "title": "Retention History",
+          "description": "What happened to each image's retention copy, when, and on which node: went unused (nothing in the cluster runs it anymore; no node), kept, copied (to a node with room first), used again, lost (its node went away or dropped it), gone (no node holds it anymore; no node), expired.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "max by (node, image, event) (last_over_time(angryduck_controller_image_retention_timestamp_seconds{k8s_source_cluster=~\"$cluster\", node=~\"$node|\", image=~\"$cleanup_image\", image=~\"($registry)/.*\"}[$__range])) * 1000",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "node",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterFieldsByName",
+                  "spec": {
+                    "options": {
+                      "include": {
+                        "names": [
+                          "node",
+                          "image",
+                          "event",
+                          "Value"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {},
+                      "includeByName": {},
+                      "indexByName": {
+                        "Value": 3,
+                        "event": 2,
+                        "image": 1,
+                        "node": 0
+                      },
+                      "renameByName": {
+                        "Value": "when"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "when"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No retention event in this time range",
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "filterable": false,
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "node"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 235
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter node to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-node}&var-node=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#c9c4b6",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "image"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter image to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-cleanup_image}&var-cleanup_image=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#d5dbe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": "docker\\.io/.+",
+                              "result": {
+                                "color": "#5fa8d3",
+                                "index": 0
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "registry\\.k8s\\.io/.+",
+                              "result": {
+                                "color": "#9b8fd6",
+                                "index": 1
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "ghcr\\.io/.+",
+                              "result": {
+                                "color": "#c58fe0",
+                                "index": 2
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "quay\\.io/.+",
+                              "result": {
+                                "color": "#d97796",
+                                "index": 3
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "([a-z0-9-]+\\.)?gcr\\.io/.+|[a-z0-9-]+\\.pkg\\.dev/.+",
+                              "result": {
+                                "color": "#6fb7a8",
+                                "index": 4
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "public\\.ecr\\.aws/.+|[0-9]+\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/.+",
+                              "result": {
+                                "color": "#e0a36b",
+                                "index": 5
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "mcr\\.microsoft\\.com/.+",
+                              "result": {
+                                "color": "#8fb35f",
+                                "index": 6
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "cr\\.kgateway\\.dev/.+",
+                              "result": {
+                                "color": "#86c5b5",
+                                "index": 7
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "event"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 105
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "pill"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "unused": {
+                                "color": "#808080",
+                                "index": 0,
+                                "text": "went unused"
+                              },
+                              "kept": {
+                                "color": "#9b759b",
+                                "index": 1,
+                                "text": "kept"
+                              },
+                              "copied": {
+                                "color": "#b877d9",
+                                "index": 2,
+                                "text": "copied"
+                              },
+                              "used": {
+                                "color": "#74afe3",
+                                "index": 3,
+                                "text": "used again"
+                              },
+                              "lost": {
+                                "color": "#e0a960",
+                                "index": 4,
+                                "text": "lost"
+                              },
+                              "gone": {
+                                "color": "#bfbfa4",
+                                "index": 5,
+                                "text": "gone"
+                              },
+                              "expired": {
+                                "color": "#a4bea1",
+                                "index": 6,
+                                "text": "expired"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "when"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 125
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#bfbfa4",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "dateTimeFromNow"
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-144": {
+        "kind": "Panel",
+        "spec": {
+          "id": 144,
+          "title": "Kept for Rollbacks",
+          "description": "The image's retention copy: when it went unused in the cluster, which node kept it, and when it was used again, lost, gone or expired. Hidden when nothing happened to its copy in the range.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "max by (node, image, event) (last_over_time(angryduck_controller_image_retention_timestamp_seconds{k8s_source_cluster=~\"$cluster\", node=~\"$node|\", image=~\"$image\", image=~\"($registry)/.*\"}[$__range])) * 1000",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "node",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterFieldsByName",
+                  "spec": {
+                    "options": {
+                      "include": {
+                        "names": [
+                          "node",
+                          "image",
+                          "event",
+                          "Value"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {},
+                      "includeByName": {},
+                      "indexByName": {
+                        "Value": 3,
+                        "event": 2,
+                        "image": 1,
+                        "node": 0
+                      },
+                      "renameByName": {
+                        "Value": "when"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "when"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "filterable": false,
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "node"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 235
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter node to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-node}&var-node=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#c9c4b6",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "image"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter image to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-image}&var-image=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#d5dbe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": "docker\\.io/.+",
+                              "result": {
+                                "color": "#5fa8d3",
+                                "index": 0
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "registry\\.k8s\\.io/.+",
+                              "result": {
+                                "color": "#9b8fd6",
+                                "index": 1
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "ghcr\\.io/.+",
+                              "result": {
+                                "color": "#c58fe0",
+                                "index": 2
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "quay\\.io/.+",
+                              "result": {
+                                "color": "#d97796",
+                                "index": 3
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "([a-z0-9-]+\\.)?gcr\\.io/.+|[a-z0-9-]+\\.pkg\\.dev/.+",
+                              "result": {
+                                "color": "#6fb7a8",
+                                "index": 4
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "public\\.ecr\\.aws/.+|[0-9]+\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/.+",
+                              "result": {
+                                "color": "#e0a36b",
+                                "index": 5
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "mcr\\.microsoft\\.com/.+",
+                              "result": {
+                                "color": "#8fb35f",
+                                "index": 6
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "cr\\.kgateway\\.dev/.+",
+                              "result": {
+                                "color": "#86c5b5",
+                                "index": 7
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "event"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 105
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "pill"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "unused": {
+                                "color": "#808080",
+                                "index": 0,
+                                "text": "went unused"
+                              },
+                              "kept": {
+                                "color": "#9b759b",
+                                "index": 1,
+                                "text": "kept"
+                              },
+                              "copied": {
+                                "color": "#b877d9",
+                                "index": 2,
+                                "text": "copied"
+                              },
+                              "used": {
+                                "color": "#74afe3",
+                                "index": 3,
+                                "text": "used again"
+                              },
+                              "lost": {
+                                "color": "#e0a960",
+                                "index": 4,
+                                "text": "lost"
+                              },
+                              "gone": {
+                                "color": "#bfbfa4",
+                                "index": 5,
+                                "text": "gone"
+                              },
+                              "expired": {
+                                "color": "#a4bea1",
+                                "index": 6,
+                                "text": "expired"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "when"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 125
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#bfbfa4",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "dateTimeFromNow"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
       }
     },
     "layout": {
@@ -28311,6 +30277,30 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-125"
+                                  },
+                                  "conditionalRendering": {
+                                    "kind": "ConditionalRenderingGroup",
+                                    "spec": {
+                                      "visibility": "show",
+                                      "condition": "and",
+                                      "items": [
+                                        {
+                                          "kind": "ConditionalRenderingData",
+                                          "spec": {
+                                            "value": true
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-144"
                                   },
                                   "conditionalRendering": {
                                     "kind": "ConditionalRenderingGroup",
@@ -30058,6 +32048,137 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-88"
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "RowsLayoutRow",
+                      "spec": {
+                        "title": "Retention copies",
+                        "collapse": false,
+                        "layout": {
+                          "kind": "GridLayout",
+                          "spec": {
+                            "items": [
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-135"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 4,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-136"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 8,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-137"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-138"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 16,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-139"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 20,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-140"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 4,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-141"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 4,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-142"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 14,
+                                  "width": 24,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-143"
                                   }
                                 }
                               }
