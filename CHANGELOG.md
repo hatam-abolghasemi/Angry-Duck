@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Dashboard: an Impact tab.** What Angry Duck changes for the pods and
+  what it costs, from kubelet, cAdvisor, kube-state-metrics and node-exporter
+  next to Angry Duck's own metrics. Kubelet's numbers don't depend on Angry
+  Duck, so a cluster that doesn't run it fills most of the tab too, as a
+  baseline to compare against.
+  - *Activity*: new image versions, pod starts, kubelet's own pulls, pulls
+    per pod start, pulls Angry Duck saved (images it delivered to a node
+    that then ran them), container restarts, starts, pulls and restarts per
+    minute, and the workloads creating the most pods.
+  - *Pulls & pod start*: time spent pulling and its share of pod start,
+    kubelet's pull p95, bytes kept off the registry, failed pulls, disk
+    pressure time, containers waiting on images, and image delivery against
+    all inbound node traffic.
+  - *Kubelet image pulls*: pull time as a heatmap and as p50, p90, p99 and
+    average, pulls by image size, and pull time per image size and per node.
+  - *Disk*: containerd's disk per node; disk pressure, evictions and
+    kubelet's image GC, shown only when they happened.
+  - *What it costs the node*: Angry Duck's CPU throttling and memory against
+    its limits, and how busy each node's disk is.
+
 ## 1.10.0
 
 Rollbacks without keeping old images everywhere: when the cluster stops
