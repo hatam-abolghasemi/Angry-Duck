@@ -29,6 +29,7 @@ yours there).
 | Tab | Answers |
 |---|---|
 | **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up out of the nodes the DaemonSet should run on, images that can't be pulled and images that can't start, spreads in the time range, mirror hit ratio, bytes from peers; a node table, worst first (uptime, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); where delivered image bytes came from, and all of them against the registry's share, added up over the range; stuck and broken images and the mirror hit ratio per node; the nodes that lost containerd's events in the time range, if any. |
+| **Impact** | What Angry Duck changes for the pods, and what it costs. Activity: new image versions, pod starts, kubelet's own pulls, pulls per pod start, pulls Angry Duck saved, restarts, and the workloads creating the most pods. Pulls and pod start: time spent pulling, its share of pod start, kubelet's pull p95, bytes kept off the registry, failed pulls, disk pressure, containers waiting on images, image delivery against all inbound node traffic. Kubelet pulls: pull time as a heatmap and as percentiles, pulls by image size, and pull time per image size and per node. Disk: containerd's disk per node, and disk pressure, evictions and kubelet's image GC if they happened. The node: Angry Duck's CPU throttling and memory against its limits, and disk busy. |
 | **Image** | Everything about one image (pick it in **Image**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side; the components and pods using it, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the same tables list every recent image. |
 | **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, streaming and the slow-chain guard, seed pulls; preheat and propagation in collapsed rows. |
 | **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
@@ -110,6 +111,36 @@ names (`nginx`) don't match. *Workers Up* compares with the worker
 DaemonSet's `kube_daemonset_status_desired_number_scheduled`. CPU comes from cAdvisor
 (`container_cpu_usage_seconds_total`, containers `worker` and `controller`).
 Without them, those panels stay empty and everything else works.
+
+The **Impact** tab also reads kubelet's own metrics
+(`kubelet_image_pull_duration_seconds`, `kubelet_pod_start_duration_seconds`,
+`kubelet_runtime_operations_errors_total`, `kubelet_evictions`,
+`kubelet_image_garbage_collected_total`; the last ones only exist on recent
+Kubernetes versions), cAdvisor's CPU throttling and working set,
+kube-state-metrics' `kube_pod_created`, `kube_node_status_condition` and
+`kube_pod_container_resource_limits`, and node-exporter's filesystem, network
+and disk series. Kubelet series are filtered on a `node` label, as the
+kube-prometheus-stack scrape adds it; node-exporter series are tied to nodes
+through `node_uname_info`'s `nodename`, which has to equal the Kubernetes node
+name. A panel whose metrics are missing stays empty.
+
+Read it top to bottom. *Activity* is the context: how many new image versions
+and pod starts the cluster had decides how many pulls there could be. *Pulls
+Saved by Angry Duck* next to *Kubelet Pulls* is the score: many saved and few
+made means preheat and spreads keep up with the churn; many made means images
+arrive that were never spread (a pipeline that doesn't call the webhook, Jobs
+from another registry) or keep leaving the nodes (check *Images Coming Back*
+on the Disk Cleanup tab), or containers ask the registry every time
+(`imagePullPolicy: Always`). *Busiest Workloads* names the likely sources; a
+CronJob near the top usually explains a high *Pulls per Pod Start* on its own.
+A steady *failed pulls* line is pods stuck on an image nobody has, not a
+rollout: find them on the Rescue & Repair tab.
+
+Kubelet doesn't say which pod a pull was for, or how long it queued before
+pulling (only its events do), and its pull histogram jumps from 1 to 2 minutes,
+so a p95 of 1.8 minutes means "between one and two". The *last hour* charts
+leave a gap, rather than a 0, where nothing started or pulled in the hour
+before: an average of 0 seconds would read as instant.
 
 Annotations, toggled from the dashboard controls: Angry Duck versions rolling
 out and process restarts, on every chart; rescue failures and repair failures,
