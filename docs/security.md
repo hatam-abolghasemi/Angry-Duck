@@ -43,6 +43,13 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
   on the node, private images included, to anyone holding the shared token.
   Without a token, rescue, spreading, propagation and the mirror stay off
   rather than serve unauthenticated.
+- **Pull secrets guard the first pull into the cluster, not the copies.**
+  With `MIRROR_RESOLVE_ENABLED`, a tag some node holds is served to any pod on
+  any node, without that pod's pull secret ever reaching the registry, even
+  when the registry refuses it or no longer has the tag (rescue does the same
+  for pods already stuck). Where per-namespace registry permissions must hold
+  inside the cluster, turn `MIRROR_RESOLVE_ENABLED` off: tags then resolve at
+  the registry with the pod's own credentials.
 - **Spread content is verified, never trusted.** A blob a worker fetches,
   from the registry or a peer, is committed only if its size and SHA-256
   match the digest the controller read from the registry; a mismatch is

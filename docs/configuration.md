@@ -34,6 +34,7 @@ SPREAD_ENABLED              blob-by-blob spreading
 PROPAGATE_ENABLED           whole-image propagation
 RESCUE_ENABLED              rescue of pods stuck on pulls
 MIRROR_ENABLED              the pull-only registry mirror
+└─ MIRROR_RESOLVE_ENABLED   resolving tags, the newest node copy when the registry can't
 IMAGE_REPAIR_ENABLED        in-place repair of broken images
 LAYER_INVENTORY_ENABLED     layer inventory reports
 INVENTORY_EVENTS_ENABLED    following containerd's events
@@ -92,6 +93,7 @@ Whether the registries still serve the images the nodes hold. See
 |---|---|---|
 | `ORIGIN_CHECK_INTERVAL_S` | `3600` | How often the controller asks each held image's registry for its manifest (a `HEAD`, with `REGISTRY_CREDENTIALS_PATH`). Images it didn't serve are asked four times as often. `0` turns the check off. |
 | `ORIGIN_CHECK_DELAY_S` | `120` | Wait after the controller starts before the first check. |
+| `ORIGIN_CHECK_TIMEOUT_S` | `5` | How long one check waits for the registry, token request included, before counting it `unreachable`. |
 | `ORIGIN_CHECK_REGISTRIES` | *(empty)* | Comma-separated substrings; only registry hosts containing one are checked. Empty checks every registry. Useful when the controller can't reach public registries the nodes reach through a mirror. |
 
 ## Spread
@@ -187,6 +189,12 @@ The whole-image fallback, and the limits spread shares.
 | `MIRROR_ADVERTISE_ADDR` | `$POD_IP:<port>` | The address written into `hosts.toml`. |
 | `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | Where `hosts.toml` files are written. containerd's CRI registry `config_path` must point here. |
 | `MIRROR_REGISTRIES` | *(empty)* | Registries to mirror even before the node uses them. |
+| `MIRROR_RESOLVE_ENABLED` | `true` | Resolve tags too: the registry's answer when it gives one, else the newest copy a node holds (see [Mirror](mirror.md#tags)). |
+| `MIRROR_RESOLVE_TIMEOUT_MS` | `1000` | How long the mirror waits for the registry to say what a tag points at, token request included. |
+| `MIRROR_RESOLVE_UNREACHABLE_TTL_S` | `30` | After a registry gave no answer, how long this node's mirror goes straight to the newest node copy for its tags. `0` asks every time. |
+| `MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS` | `3000` | How long the mirror waits for the controller's answers about a tag: whether a node holds it, and the newest copy's digest. |
+| `MIRROR_RESOLVE_NEWEST_CACHE_S` | `30` | Controller: how long the newest copy's digest found for a tag is reused for every mirror asking. |
+| `MIRROR_RESOLVE_NEWEST_TIMEOUT_MS` | `2000` | Controller: how long the holders get to say what a tag points at on each. Keep it below `MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS`. |
 
 ## Image cleanup
 

@@ -73,10 +73,11 @@ imageGCLowThresholdPercent: 80
   fails it. See [Installation](installation.md#integrate-with-ci).
 - **Give every build its own tag** (a version or commit SHA). A tag that moves,
   such as `latest`, makes kubelet ask the registry every time.
-- **Use `imagePullPolicy: IfNotPresent`.** With `Always`, kubelet still asks
-  the registry for the manifest before it starts a container, so preheated
-  layers help but a registry outage still blocks the pod, and rescue can't
-  help it. `latest` and untagged images default to `Always`.
+- **Use `imagePullPolicy: IfNotPresent`.** With `Always`, kubelet asks for
+  the manifest before every container start. The mirror answers it during a
+  registry outage only if some node holds the tag (with
+  `MIRROR_RESOLVE_ENABLED`), and rescue skips such pods. `latest` and untagged
+  images default to `Always`.
 - **Keep `PROPAGATE_MAX_UTILIZATION` and `GC_*` consistent.** Propagation
   skips nodes above `PROPAGATE_MAX_UTILIZATION` until cleanup makes room.
 

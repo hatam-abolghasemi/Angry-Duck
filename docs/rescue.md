@@ -1,9 +1,14 @@
 # Rescue
 
 Sometimes a node can't pull an image from the registry, because of a broken
-route or firewall rule, a registry outage, or an image deleted upstream, while
-the same image is sitting on other nodes. The rescuer copies it over. It works
-for any image, whether or not it was preheated.
+route or firewall rule, a registry outage, an image deleted upstream, or a
+pull secret the registry refuses, while the same image is sitting on other
+nodes. Most of the time the [mirror](mirror.md) serves it from a peer before
+the pull fails. Rescue is for what is left: no node holds the image's blobs
+(containerd dropped them after unpacking, see
+[`discard_unpacked_layers`](node-settings.md)) and the registry can't give it.
+The rescuer copies the image over, from a running container's snapshot if
+need be. It works for any image, whether or not it was preheated.
 
 ```mermaid
 sequenceDiagram
@@ -30,6 +35,10 @@ sequenceDiagram
   after an error, or every `RESCUE_RESYNC_INTERVAL_S` as a safety net. It
   needs `watch` on pods; with only `list`, pods are listed every
   `RESCUE_INTERVAL_S` instead.
+- **Cause.** Why the pull failed is read from kubelet's message when the
+  pull first fails (its back-off message may not repeat it): `missing` (the
+  registry doesn't have the image), `denied` (the pod's pull secret was
+  refused), `unreachable` (no usable answer from the registry) or `other`.
 - **Sources.** Up to `RESCUE_MAX_SOURCES` nodes holding the exact image are
   offered, lowest disk utilization first. The worker tries them in order.
 - **Transfer.** Only the layers the node lacks are fetched; see
@@ -60,11 +69,12 @@ sequenceDiagram
 curl -s localhost:8080/status | jq '.rescues'
 ```
 
-Each entry lists the node, image, pods, last result or error, failures in a
-row and the next attempt. The key metrics are
+Each entry lists the node, image, pods, why the pull failed, last result or
+error, failures in a row and the next attempt. The key metrics are
 `angryduck_controller_rescue_stuck_images`,
 `angryduck_controller_rescues_total{result}` (`success`, `failure`,
-`no_source`, `no_target`, `pull_policy_always`) and
+`no_source`, `no_target`, `pull_policy_always`),
+`angryduck_controller_rescues_by_cause_total{cause, result}` and
 `angryduck_controller_rescue_consecutive_failures`.
 
 ## Settings

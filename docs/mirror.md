@@ -1,9 +1,10 @@
 # Mirror
 
 Each worker can run a **pull-only** OCI registry mirror for its node's
-containerd. containerd asks the mirror first for every manifest and blob by
-digest, for every image, whether or not it was preheated. The mirror answers
-from the node or a peer, or tells containerd to go to the registry.
+containerd. containerd asks the mirror first for every tag, manifest and blob,
+for every image, whether or not it was preheated. The mirror answers from the
+node or a peer, or tells containerd to go to the registry. It never downloads
+from a registry itself: that stays containerd's job.
 
 The mirror is on by default (`MIRROR_ENABLED=true`). It needs containerd's
 `config_path` (see [Requirements](#requirements)); without it containerd
@@ -26,7 +27,7 @@ writes a `hosts.toml` for each registry the node has images from, plus
 server = "https://registry.example.com"
 
 [host."http://10.233.64.7:18082"]
-  capabilities = ["pull"]
+  capabilities = ["pull", "resolve"]
   [host."http://10.233.64.7:18082".header]
     Authorization = "Bearer <random per-pod token>"
 ```
@@ -43,7 +44,7 @@ at a dead pod IP until the replacement starts; containerd then falls back to
 the registry, immediately with Calico, after its dial timeout on CNIs that
 don't reject unreachable pod IPs.
 
-For each request, the mirror:
+For each manifest or blob, by digest, the mirror:
 
 1. serves it from the node's own content store, if present, reading the
    blob file directly (see [`CONTAINERD_ROOT`](configuration.md#worker));
@@ -65,12 +66,44 @@ included.
 
 containerd verifies every digest, so a peer can't slip in different content.
 
+### Tags
+
+With `MIRROR_RESOLVE_ENABLED` (on by default), containerd asks the mirror what
+a tag points at too. The mirror:
+
+1. asks the controller whether any fresh node holds that exact tag
+   (`GET /images/tag`). If none does, it answers `404` straight away, without
+   asking the registry, and containerd resolves the tag there as it would
+   without the mirror;
+2. asks the tag's registry, with a `HEAD` and Angry Duck's credentials,
+   waiting at most `MIRROR_RESOLVE_TIMEOUT_MS`. Its answer wins: that digest
+   is served from the node or a peer, or, when no node holds it (the tag moved
+   to something the cluster doesn't have yet), `404`, and containerd pulls it
+   from the registry;
+3. when the registry gives no digest (down, too slow, refusing Angry Duck's
+   credentials, or no longer knowing the tag), serves the newest copy a node
+   holds. The controller asks the holders what the tag points at on each and
+   since when (giving them `MIRROR_RESOLVE_NEWEST_TIMEOUT_MS`), once per tag
+   for every mirror asking within `MIRROR_RESOLVE_NEWEST_CACHE_S`.
+
+A registry that gave no answer is left alone on that node for
+`MIRROR_RESOLVE_UNREACHABLE_TTL_S`, so pulls during an outage don't each wait
+for the timeout.
+
 ## Design choices
 
-- **Tags always resolve at the registry.** The mirror has no `resolve`
-  capability, so a moved tag such as `latest` is never served stale. During a
-  registry outage, kubelet can't resolve the tag, the pull fails, and
-  [rescue](rescue.md) takes over.
+- **The registry decides while it can answer.** A tag resolves to what the
+  registry says whenever it says it, so a moved tag such as `latest` is never
+  served stale. When it can't, freshness never stops peers from sharing: the
+  newest copy in the cluster is served, `imagePullPolicy: Always` pods
+  included. `angryduck_worker_mirror_resolves_total{origin}` shows how often
+  the registry was `missing`, `denied` or `unreachable` while a peer's copy was
+  served.
+- **The mirror decides, containerd pulls.** The mirror sends the registry one
+  `HEAD` per tag and nothing else. What does come from the registry is
+  containerd's own pull, with the pod's pull secret. A tag a node holds no
+  longer reaches the registry with the pod's pull secret, so a broken pull
+  secret shows only where no node has the image yet.
 - **Blobs only.** Peers that hold only snapshots (nodes with
   `discard_unpacked_layers = true`) can't serve mirror requests; containerd
   then uses the registry.
@@ -106,9 +139,13 @@ it.
 | `angryduck_worker_mirror_requests_total{kind, result}` | Requests served `local`, from a `peer`, a `miss` (registry), or `error`. |
 | `angryduck_worker_mirror_bytes_total{source}` | Bytes served, each one not downloaded from the registry. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | Bytes this node served to other nodes' mirrors. |
+| `angryduck_worker_mirror_resolves_total{origin, result}` | Tags resolved, by the registry's answer (`ok`, `missing`, `denied`, `unreachable`, or `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). |
 
 ## Settings
 
 `MIRROR_ENABLED`, `MIRROR_LISTEN_ADDR`, `MIRROR_CONTAINERD_CONFIG_DIR`,
-`MIRROR_REGISTRIES`. The mirror needs the shared token for peer fetches. See
+`MIRROR_REGISTRIES`, `MIRROR_RESOLVE_ENABLED`, `MIRROR_RESOLVE_TIMEOUT_MS`,
+`MIRROR_RESOLVE_UNREACHABLE_TTL_S`, `MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS`,
+`MIRROR_RESOLVE_NEWEST_CACHE_S`, `MIRROR_RESOLVE_NEWEST_TIMEOUT_MS`. The mirror
+needs the shared token for peer fetches. See
 [Configuration](configuration.md#mirror).

@@ -113,11 +113,13 @@ failure for images the cluster already has.
   whole fleet.
 - **Serve containerd from peers.** With the [mirror](mirror.md) on,
   containerd's own pulls, kubelet's included, are answered by the node or a
-  neighbor before the registry is asked.
-- **Rescue what's stuck.** When a pull fails anyway (an outage, a broken
-  route, an image deleted upstream), the controller sees the stuck pod and
-  copies the image from a node that has it. kubelet's next retry finds it
-  locally.
+  neighbor before the registry is asked, tags included: when the registry
+  can't say what a tag points at (an outage, refused credentials, a deleted
+  tag), the newest copy in the cluster is served.
+- **Rescue what's stuck.** When a pull fails anyway (no node holds the
+  image's blobs and the registry can't give it), the controller sees the
+  stuck pod and copies the image from a node that has it, snapshots
+  included. kubelet's next retry finds it locally.
 
 ## Rollbacks are deploys too
 
@@ -155,9 +157,11 @@ a separate tool, and the two halves share one view:
 
 ## Safe by construction
 
-- **The registry stays the source of truth.** Tags always resolve at the
-  registry, so a moved tag is never served stale. Only content addressed by
-  digest moves between nodes.
+- **The registry decides while it can answer.** The mirror asks it what a
+  tag points at, so a moved tag is never served stale. Only when it can't
+  answer is the newest copy in the cluster served: freshness is for
+  reliability, never a reason not to share. Only content addressed by digest
+  moves between nodes.
 - **Verify what can be verified.** Layers travel as blobs, and containerd
   checks every digest. Unpacked snapshots are shipped only as a last resort,
   with their own checksum.

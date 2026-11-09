@@ -32,8 +32,8 @@ yours there).
 | **Impact** | What Angry Duck changes for the pods, and what it costs. Activity: new image versions, pod starts, kubelet's own pulls, pulls per pod start, pulls Angry Duck saved, restarts, and the workloads creating the most pods. Pulls and pod start: time spent pulling, its share of pod start, kubelet's pull p95, bytes kept off the registry, failed pulls, disk pressure, containers waiting on images, image delivery against all inbound node traffic. Kubelet pulls: pull time as a heatmap and as percentiles, pulls by image size, and pull time per image size and per node. Disk: containerd's disk per node, and disk pressure, evictions and kubelet's image GC if they happened. The node: Angry Duck's CPU throttling and memory against its limits, and disk busy. |
 | **Image** | Everything about one image (pick it in **Image**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side; the components and pods using it, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the same tables list every recent image. |
 | **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, streaming and the slow-chain guard, seed pulls; preheat and propagation in collapsed rows. |
-| **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
-| **Mirror & Registry** | The mirror's hit ratio, requests and bytes; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
+| **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with why the pull failed, rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
+| **Mirror & Registry** | The mirror's hit ratio, requests and bytes; tags it resolved, by what the registry answered and where the manifest came from; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
 | **Disk Cleanup** | Cleanup state per node over time, images removable per tier, images removed, failed removals, images coming back after removal; image by image, what was removed from which node and what comes up next, and when. |
 | **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method, inventory events, the controller's layer index and work in flight. |
 
@@ -178,7 +178,8 @@ the first event too.
 | `angryduck_controller_rescue_stuck_images` | gauge | `node` | Images each node can't pull right now. |
 | `angryduck_controller_rescue_consecutive_failures` | gauge | `node`, `image` | Failed attempts in a row, for pairs with at least one failure. |
 | `angryduck_controller_rescues_in_flight` | gauge | | Rescues running now. |
-| `angryduck_controller_rescue_stuck_pods` | gauge | `node`, `image`, `in_flight` | Pods stuck per node and image; `in_flight` 1 while a rescue runs for it. Only pairs stuck now. |
+| `angryduck_controller_rescue_stuck_pods` | gauge | `node`, `image`, `cause`, `in_flight` | Pods stuck per node and image, and why the pull failed (`cause`, as below); `in_flight` 1 while a rescue runs for it. Only pairs stuck now. |
+| `angryduck_controller_rescues_by_cause_total` | counter | `cause`, `result` | Rescue decisions across the cluster by why the pull failed, read from kubelet's message: `missing` (the registry doesn't have it), `denied` (the pod's pull secret was refused), `unreachable` (no usable answer), `other`. `result` as in `rescues_total`. |
 | `angryduck_controller_repair_orders_total` | counter | `node`, `result` | Repair orders sent because a container failed to start on a broken image (`CreateContainerError`): `sent`, `failed`, `no_worker`. |
 | `angryduck_controller_retention_copies` | gauge | `state` | [Retention copies](image-cleanup.md#retention-copies): `held` (a node keeps it), `pending` (no node picked yet), `copying` (being copied to a node with room). |
 | `angryduck_controller_retention_paused` | gauge | | 1 while copies wait because every node is at or above `GC_RETENTION_MAX_UTILIZATION`. |
@@ -227,6 +228,7 @@ what is moving, not history:
 | `angryduck_worker_mirror_requests_total` | counter | `node`, `kind`, `result` | Mirror requests (`blob`, `manifest`): `local`, `peer`, `miss`, `error`. |
 | `angryduck_worker_mirror_bytes_total` | counter | `node`, `source` | Bytes the mirror served, `local` or `peer`. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | counter | `node` | Bytes served to other nodes' mirrors. |
+| `angryduck_worker_mirror_resolves_total` | counter | `node`, `origin`, `result` | Tags the mirror resolved: the registry's answer (`ok`, `missing`, `denied`, `unreachable`; `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). Any `origin` but `ok` with `local` or `peer` is a pull the registry alone would have failed. |
 | `angryduck_worker_inventory_events_total` | counter | `node`, `topic` | containerd events that changed what the node can serve; each burst settles into one inventory report. |
 | `angryduck_worker_inventory_watch_up` | gauge | `node` | 1 while the node follows containerd's events, 0 while it falls back to periodic layer scans. |
 | `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `retention` (an expired [retention copy](image-cleanup.md#retention-copies)), or `error`. |
@@ -342,8 +344,8 @@ shows within minutes. The answers:
 |---|---|
 | `ok` | The registry serves the manifest. |
 | `missing` | The registry says it doesn't exist: the tag, manifest or repository is gone. |
-| `denied` | The registry refused Angry Duck's credentials, or wants credentials and none are configured for it. A whole registry turning `denied` usually means its pull secret changed. The controller reads the secret at startup, so after rotating it, restart the controller. |
-| `unreachable` | No usable answer: network errors, timeouts, rate limits, server errors. |
+| `denied` | The registry refused Angry Duck's credentials, or wants credentials and none are configured for it. A whole registry turning `denied` usually means its pull secret changed. The controller reads the secret at startup, so after rotating it, restart the controller. While a registry denies Angry Duck, the mirror still serves its tags from the newest node copy. |
+| `unreachable` | No usable answer within `ORIGIN_CHECK_TIMEOUT_S`: network errors, timeouts, rate limits, server errors. |
 
 What it costs: one `HEAD` (no download) per image per interval, plus a token
 request where the registry uses them, sent one at a time and spread evenly

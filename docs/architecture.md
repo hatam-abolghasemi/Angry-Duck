@@ -92,8 +92,9 @@ content store when it is mounted, and through the content API otherwise.
 
 ## Scope
 
-- **It doesn't resolve tags.** The mirror serves content by digest only.
-  Registry outages that block tag resolution are covered by rescue.
+- **It doesn't pull from registries for containerd.** The mirror resolves
+  tags with a `HEAD` and serves what the nodes hold; anything only the
+  registry has, containerd downloads itself, with the pod's pull secret.
 - **It doesn't replace kubelet's image GC.** kubelet still acts at disk
   pressure as the last line of defense. Angry Duck's cleanup runs well before
   it.

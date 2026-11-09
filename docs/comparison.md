@@ -15,7 +15,7 @@ in one tool.
 | **Peer-to-peer during a pull** | Yes, mirror (on by default) | Yes | Yes | Yes | No | No | No | No | No |
 | **Registry load per new image** | About `RANK_TOP_N` pulls, changed layers only | One per layer, then peers | One per piece via seed peers | Via origin cluster | One per node | One per node | n/a | n/a | n/a |
 | **Rescues `ImagePullBackOff` from peers** | Yes, any image | Indirectly, if the pull retries through the mirror | Indirectly, if in cache | Indirectly, if in cache | No | No | No | No | Routes to another registry |
-| **Registry outage, image already in cluster** | Pods start, pinned tags with `IfNotPresent` | Digest pulls; tags need `resolveTags` | From cache | From cache | Only where already cached | Only where already pulled | n/a | n/a | If a replica registry is up |
+| **Registry outage, image already in cluster** | Pods start, tags resolved from the newest node copy, `Always` included | Digest pulls; tags need `resolveTags` | From cache | From cache | Only where already cached | Only where already pulled | n/a | n/a | If a replica registry is up |
 | **Image cleanup** | Yes, age and disk based | No | Its own cache only | Its own cache only | No | No | Yes, list or scanner based | At disk pressure | No |
 | **Keeps rollback images** | Yes, one copy per image that went unused, cluster-wide, for `GC_RETENTION_TTL_S` | n/a | n/a | n/a | n/a | n/a | No | No | n/a |
 | **Needs `discard_unpacked_layers = false`** | No, snapshots as last resort | Yes | No | No | No | No | No | No | No |
