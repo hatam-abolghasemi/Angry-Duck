@@ -3,4 +3,4 @@
 package version
 
 // Version is the release this binary was built from.
-const Version = "1.10.0"
+const Version = "1.11.0"

@@ -1,9 +1,66 @@
 # Changelog
 
-## Unreleased
+## 1.11.0
+
+Peers share even when the registry can't say what a tag means. The mirror
+resolves tags: the registry decides while it answers, and when it can't (a
+refused pull secret, a deleted tag, an outage), the newest copy in the cluster
+is served, so a node holding the image keeps pods out of `ImagePullBackOff`.
+Rescue is left for what the mirror can't serve, and says why each pull
+failed. The dashboard has an Impact tab.
 
 ### Added
 
+- **The mirror resolves tags.** containerd now asks the mirror what a tag
+  points at too (`capabilities = ["pull", "resolve"]` in the `hosts.toml`
+  files, which each worker rewrites). Before, the tag lookup always went to
+  the registry with the pod's pull secret, so a pull whose lookup failed (a
+  refused pull secret, an outage) never reached the mirror, even with every
+  blob on a peer: the pod went to `ImagePullBackOff`, and rescue copied the
+  image, logged and counted as a rescue. Now that pull is a mirror hit.
+  - The registry decides while it can answer: the mirror asks it with a
+    `HEAD` and Angry Duck's credentials, waiting at most
+    `MIRROR_RESOLVE_TIMEOUT_MS` (1000), and serves that digest from the node
+    or a peer, or answers `404` when no node holds it, so a moved tag is never
+    served stale.
+  - When the registry gives no digest (down, too slow, refusing Angry Duck's
+    credentials, or no longer knowing the tag), the newest copy a node holds
+    is served. The controller asks the holders what the tag points at and
+    since when (`GET /images/tag` on the controller, `GET /mirror/tag` on the
+    workers), once per tag for every mirror asking within
+    `MIRROR_RESOLVE_NEWEST_CACHE_S` (30), giving them
+    `MIRROR_RESOLVE_NEWEST_TIMEOUT_MS` (2000) to answer; the mirror waits
+    `MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS` (3000) for the controller.
+  - A tag no node holds is a `404` at once, without asking the registry: one
+    request to the controller, then containerd goes to the registry as
+    before. A registry that gave no answer is left alone on that node for
+    `MIRROR_RESOLVE_UNREACHABLE_TTL_S` (30), so pulls during an outage don't
+    each wait for the timeout.
+  - The mirror only decides. It sends one `HEAD` per tag and never downloads
+    from a registry; whatever only the registry has, containerd still pulls,
+    with the pod's pull secret. No new goroutine or timer runs while nothing
+    is pulled.
+  - `MIRROR_RESOLVE_ENABLED` (on by default) turns it off; it is under
+    `MIRROR_ENABLED`. New metric
+    `angryduck_worker_mirror_resolves_total{node, origin, result}`: the
+    registry's answer (`ok`, `missing`, `denied`, `unreachable`, or
+    `unchecked` when no node holds the tag) and where the manifest came from
+    (`local`, `peer`, `miss`).
+- **Why a pull failed, on rescues.** The controller reads it from kubelet's
+  message when the pull first fails and keeps it through the back-off
+  messages that don't repeat it: `missing` (the registry doesn't have the
+  image), `denied` (the pod's pull secret was refused), `unreachable` (no
+  usable answer) or `other`. It is in `/status` (`cause`), in the rescue log
+  lines, on `angryduck_controller_rescue_stuck_pods` (a `cause` label), and in
+  the new `angryduck_controller_rescues_by_cause_total{cause, result}`,
+  cluster-wide so it adds 20 series whatever the number of nodes.
+- **`ORIGIN_CHECK_TIMEOUT_S`** (5): how long one origin check waits for the
+  registry, token request included. It was a fixed 10 seconds.
+- **Dashboard.** *Mirror & Registry* has a *Tag resolves* row: tags resolved
+  by the registry's answer, and where their manifests came from. *Rescue &
+  Repair* has *Rescue Attempts by Cause* and *Pulls the Mirror Kept from
+  Getting Stuck* (tags the registry couldn't resolve, served by a node
+  instead), and *Stuck Pulls* shows why each pull failed.
 - **Dashboard: an Impact tab.** What Angry Duck changes for the pods and
   what it costs, from kubelet, cAdvisor, kube-state-metrics and node-exporter
   next to Angry Duck's own metrics. Kubelet's numbers don't depend on Angry
@@ -23,6 +80,33 @@
     kubelet's image GC, shown only when they happened.
   - *What it costs the node*: Angry Duck's CPU throttling and memory against
     its limits, and how busy each node's disk is.
+
+### Changed
+
+- **The origin check gives up after 5 seconds** (was 10). A registry that
+  takes longer to answer a `HEAD` counts as `unreachable` and is asked again
+  four times as often, as before.
+- Reading why a pull failed costs the rescuer one copy of kubelet's message
+  per stuck image: 20 stuck pods on one image take as long as before (about
+  6 µs a look) with one allocation more.
+
+### Upgrade notes
+
+- **Pull secrets guard the first pull into the cluster, not the copies.** A
+  tag some node holds no longer reaches the registry with the pod's pull
+  secret, so a broken pull secret shows only where no node has the image yet
+  (as it did with rescue, minus the `ImagePullBackOff` first). Where
+  per-namespace registry permissions must hold inside the cluster, set
+  `MIRROR_RESOLVE_ENABLED: "false"`. See [Security](docs/security.md).
+- `imagePullPolicy: Always` pods are covered during a registry outage now,
+  when a node holds the tag; rescue still skips them.
+- A tag the registry moved to a digest no node holds yet costs the registry
+  two `HEAD`s instead of one: the mirror's, then containerd's own.
+- Either side can be upgraded first. A 1.11 mirror whose controller doesn't
+  know `/images/tag` leaves every tag to the registry, as before; a 1.11
+  controller just gets no answer from holders still on 1.10.
+- Alerts or panels grouping `angryduck_controller_rescue_stuck_pods` by all
+  its labels get a `cause` label.
 
 ## 1.10.0
 
