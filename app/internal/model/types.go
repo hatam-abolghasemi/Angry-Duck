@@ -197,6 +197,7 @@ type RescueStatus struct {
 	Node                string    `json:"node"`
 	Image               string    `json:"image"`
 	Pods                []string  `json:"pods"`
+	Cause               string    `json:"cause"`       // why the pull failed: missing, denied, unreachable, other
 	StuckSince          time.Time `json:"stuck_since"` // when the rescuer first saw it
 	InFlight            bool      `json:"in_flight"`
 	LastResult          string    `json:"last_result,omitempty"`
@@ -279,6 +280,21 @@ type BlobExportRequest struct {
 type Holder struct {
 	NodeID  string `json:"node_id"`
 	Address string `json:"address"`
+}
+
+// TagHolders is the controller's answer to a mirror resolving a tag
+// (/images/tag): how many fresh nodes hold it and, when asked for, the
+// digest the newest of their copies points at.
+type TagHolders struct {
+	Holders int    `json:"holders"`
+	Digest  string `json:"digest,omitempty"`
+}
+
+// TagTarget is what a tag points at on one node, and since when
+// (a worker's /mirror/tag).
+type TagTarget struct {
+	Digest  string    `json:"digest"`
+	Updated time.Time `json:"updated"`
 }
 
 // Spread: an image is spread blob by blob. The controller assigns each

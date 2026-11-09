@@ -328,16 +328,41 @@ func (c *Client) OpenManifest(ctx context.Context, image, digest string) (body i
 // Nothing is downloaded and nothing is cached. Availability classifies
 // the error.
 func (c *Client) CheckManifest(ctx context.Context, image string) error {
+	_, _, err := c.headManifest(ctx, image)
+	return err
+}
+
+// ManifestDigest asks image's registry what its tag points at now: the
+// digest of the index or manifest, from the HEAD answer's
+// Docker-Content-Digest, else from the manifest itself (a few KB) for a
+// registry that leaves the header out. Nothing is cached. Availability
+// classifies the error.
+func (c *Client) ManifestDigest(ctx context.Context, image string) (string, error) {
+	ref, h, err := c.headManifest(ctx, image)
+	if err != nil {
+		return "", err
+	}
+	if d := h.Get("Docker-Content-Digest"); strings.HasPrefix(d, "sha256:") {
+		return d, nil
+	}
+	body, _, err := c.get(ctx, ref, "manifests/"+ref.Reference, acceptManifests)
+	if err != nil {
+		return "", err
+	}
+	return sha256Digest(body), nil
+}
+
+func (c *Client) headManifest(ctx context.Context, image string) (Ref, http.Header, error) {
 	ref, err := ParseRef(image)
 	if err != nil {
-		return err
+		return ref, nil, err
 	}
 	resp, err := c.do(ctx, c.http, http.MethodHead, ref, "manifests/"+ref.Reference, acceptManifests)
 	if err != nil {
-		return err
+		return ref, nil, err
 	}
 	resp.Body.Close()
-	return nil
+	return ref, resp.Header, nil
 }
 
 // errDenied marks an auth failure: no credentials for a registry that

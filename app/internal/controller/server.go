@@ -21,6 +21,7 @@ type Server struct {
 	propagator *Propagator // nil when propagation is off
 	spreader   *Spreader   // nil when spreading is off
 	retainer   *Retainer   // nil when retention is off
+	tags       *tagLookup  // nil when mirror resolve is off
 	auth       *sharedtoken.Auth
 	webhook    *sharedtoken.Auth // CI's token for /webhook/preheat
 	mux        *http.ServeMux

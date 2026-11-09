@@ -13,6 +13,7 @@
 //	PROPAGATE_ENABLED           whole-image propagation
 //	RESCUE_ENABLED              rescue of pods stuck on pulls
 //	MIRROR_ENABLED              the pull-only registry mirror
+//	  MIRROR_RESOLVE_ENABLED    resolving tags, peers' copies when the registry can't
 //	IMAGE_REPAIR_ENABLED        in-place repair of broken images
 //	LAYER_INVENTORY_ENABLED     layer inventory reports
 //	INVENTORY_EVENTS_ENABLED    following containerd's events
@@ -37,6 +38,7 @@ type Flags struct {
 	Propagate       bool
 	Rescue          bool
 	Mirror          bool
+	MirrorResolve   bool
 	Repair          bool
 	LayerInventory  bool
 	InventoryEvents bool
@@ -62,6 +64,7 @@ var tree = []switchDef{
 	{"PROPAGATE_ENABLED", true, "", func(f *Flags, v bool) { f.Propagate = v }},
 	{"RESCUE_ENABLED", true, "", func(f *Flags, v bool) { f.Rescue = v }},
 	{"MIRROR_ENABLED", true, "", func(f *Flags, v bool) { f.Mirror = v }},
+	{"MIRROR_RESOLVE_ENABLED", true, "MIRROR_ENABLED", func(f *Flags, v bool) { f.MirrorResolve = v }},
 	{"IMAGE_REPAIR_ENABLED", true, "", func(f *Flags, v bool) { f.Repair = v }},
 	{"LAYER_INVENTORY_ENABLED", true, "", func(f *Flags, v bool) { f.LayerInventory = v }},
 	{"INVENTORY_EVENTS_ENABLED", true, "", func(f *Flags, v bool) { f.InventoryEvents = v }},
@@ -89,6 +92,6 @@ func resolve(get func(key string, def bool) bool) Flags {
 
 // String lists every switch as resolved, for the startup log.
 func (f Flags) String() string {
-	return fmt.Sprintf("gc=%t gc_retention=%t spread=%t spread_stream=%t propagate=%t rescue=%t mirror=%t repair=%t layer_inventory=%t inventory_events=%t",
-		f.GC, f.GCRetention, f.Spread, f.SpreadStream, f.Propagate, f.Rescue, f.Mirror, f.Repair, f.LayerInventory, f.InventoryEvents)
+	return fmt.Sprintf("gc=%t gc_retention=%t spread=%t spread_stream=%t propagate=%t rescue=%t mirror=%t mirror_resolve=%t repair=%t layer_inventory=%t inventory_events=%t",
+		f.GC, f.GCRetention, f.Spread, f.SpreadStream, f.Propagate, f.Rescue, f.Mirror, f.MirrorResolve, f.Repair, f.LayerInventory, f.InventoryEvents)
 }

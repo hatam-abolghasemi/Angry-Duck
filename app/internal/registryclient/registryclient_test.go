@@ -31,6 +31,7 @@ type fakeRegistry struct {
 	tags        map[string]string
 	scheme      string // "bearer" or "basic"
 	wantUser    string
+	digestHdr   bool // send Docker-Content-Digest with manifests
 	layers      []string
 	diffIDs     []string
 }
@@ -103,6 +104,9 @@ func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", f.contentType[ref])
+	if f.digestHdr && kind == "manifests" {
+		w.Header().Set("Docker-Content-Digest", ref)
+	}
 	_, _ = w.Write(b)
 }
 
@@ -229,6 +233,24 @@ func TestOpenBlobStreamsOneLayerWithAuth(t *testing.T) {
 	}
 	if _, _, err := c.OpenBlob(context.Background(), image, dig([]byte("absent"))); err == nil {
 		t.Fatal("expected an error for a missing blob")
+	}
+}
+
+func TestManifestDigestWithAndWithoutTheHeader(t *testing.T) {
+	for _, hdr := range []bool{true, false} {
+		f := newFake(t, "bearer")
+		f.digestHdr = hdr
+		c, image := client(t, f)
+		d, err := c.ManifestDigest(context.Background(), image)
+		if err != nil || d != f.tags["v1"] {
+			t.Fatalf("header %t: %s %v, want %s", hdr, d, err, f.tags["v1"])
+		}
+	}
+	f := newFake(t, "bearer")
+	c, _ := client(t, f)
+	host := strings.TrimPrefix(f.srv.URL, "https://")
+	if _, err := c.ManifestDigest(context.Background(), host+"/team/app:gone"); Availability(err) != "missing" {
+		t.Fatalf("deleted tag: %v", err)
 	}
 }
 

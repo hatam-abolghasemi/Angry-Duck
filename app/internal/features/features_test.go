@@ -16,7 +16,7 @@ func resolveWith(vals map[string]bool) Flags {
 
 func TestDefaultsAllOn(t *testing.T) {
 	f := resolveWith(nil)
-	if !(f.GC && f.GCRetention && f.Spread && f.SpreadStream && f.Propagate && f.Rescue && f.Mirror && f.Repair && f.LayerInventory && f.InventoryEvents) {
+	if !(f.GC && f.GCRetention && f.Spread && f.SpreadStream && f.Propagate && f.Rescue && f.Mirror && f.MirrorResolve && f.Repair && f.LayerInventory && f.InventoryEvents) {
 		t.Fatalf("every feature is on by default, got %s", f)
 	}
 	if len(f.Notes) != 0 {
@@ -35,6 +35,10 @@ func TestParentOffTurnsChildrenOff(t *testing.T) {
 	f = resolveWith(map[string]bool{"SPREAD_ENABLED": false})
 	if f.Spread || f.SpreadStream {
 		t.Fatalf("spread off must turn streaming off, got %s", f)
+	}
+	f = resolveWith(map[string]bool{"MIRROR_ENABLED": false})
+	if f.Mirror || f.MirrorResolve {
+		t.Fatalf("mirror off must turn resolve off, got %s", f)
 	}
 }
 
@@ -74,7 +78,7 @@ func TestEachSwitchIsIndependentOfItsSiblings(t *testing.T) {
 func flagOn(f, probe Flags) bool {
 	return (probe.GC && f.GC) || (probe.GCRetention && f.GCRetention) || (probe.Spread && f.Spread) ||
 		(probe.SpreadStream && f.SpreadStream) || (probe.Propagate && f.Propagate) || (probe.Rescue && f.Rescue) ||
-		(probe.Mirror && f.Mirror) || (probe.Repair && f.Repair) || (probe.LayerInventory && f.LayerInventory) ||
+		(probe.Mirror && f.Mirror) || (probe.MirrorResolve && f.MirrorResolve) || (probe.Repair && f.Repair) || (probe.LayerInventory && f.LayerInventory) ||
 		(probe.InventoryEvents && f.InventoryEvents)
 }
 

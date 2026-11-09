@@ -11,6 +11,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MemStore is an in-memory Store for tests. Its Import behaves like
@@ -22,6 +23,7 @@ type MemStore struct {
 	mu         sync.Mutex
 	blobs      map[string][]byte
 	images     map[string][2]string // name -> {mediaType, digest}
+	updated    map[string]time.Time // name -> when Tag last pointed it somewhere
 	snaps      map[string]memSnap   // chainID -> snapshot
 	Imports    [][]string           // blob digests carried by each Import, in order
 	Applied    []string             // chainIDs created by ApplySnapshot, in order
@@ -38,7 +40,7 @@ type memSnap struct {
 
 // NewMemStore returns an empty MemStore.
 func NewMemStore() *MemStore {
-	return &MemStore{blobs: map[string][]byte{}, images: map[string][2]string{}, snaps: map[string]memSnap{}, Pinned: map[string]bool{}}
+	return &MemStore{blobs: map[string][]byte{}, images: map[string][2]string{}, updated: map[string]time.Time{}, snaps: map[string]memSnap{}, Pinned: map[string]bool{}}
 }
 
 // HasSnapshot reports whether chainID exists.
@@ -208,7 +210,20 @@ func (m *MemStore) HasImage(name string) bool {
 func (m *MemStore) Tag(name, mediaType, digest string) {
 	m.mu.Lock()
 	m.images[name] = [2]string{mediaType, digest}
+	m.updated[name] = time.Now()
 	m.mu.Unlock()
+}
+
+// Target implements the mirror's store: what image points at, and since
+// when.
+func (m *MemStore) Target(_ context.Context, image string) (string, time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	img, ok := m.images[image]
+	if !ok {
+		return "", time.Time{}, fmt.Errorf("image %s not found", image)
+	}
+	return img[1], m.updated[image], nil
 }
 
 // Resolve implements Store.

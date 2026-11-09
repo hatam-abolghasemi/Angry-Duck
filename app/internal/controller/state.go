@@ -251,6 +251,20 @@ func (r *Registry) ImageHolders() map[string]int {
 	return out
 }
 
+// ImageHolderList returns every fresh worker that holds exactly image.
+func (r *Registry) ImageHolderList(image string) []model.Holder {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	now := time.Now()
+	var out []model.Holder
+	for _, w := range r.workers {
+		if r.isFresh(w, now) && w.HasImage(image) {
+			out = append(out, model.Holder{NodeID: w.NodeID, Address: w.Address})
+		}
+	}
+	return out
+}
+
 // Layers returns the layer index.
 func (r *Registry) Layers() *layerindex.Index { return r.layers }
 

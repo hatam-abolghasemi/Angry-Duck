@@ -21,6 +21,7 @@ import (
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
 )
 
@@ -40,6 +41,11 @@ var (
 		"Bytes this node served to other nodes' mirrors.",
 		"node",
 	)
+	mirrorResolvesTotal = metrics.NewCounterVec(
+		"angryduck_worker_mirror_resolves_total",
+		"Tags containerd asked this node's mirror to resolve, by what the registry answered (origin: ok, missing, denied, unreachable; unchecked: no node holds the tag, so nobody asked) and where the manifest came from (result: local, peer, miss: containerd asks the registry itself). With any origin but ok, the newest copy a node holds was served.",
+		"node", "origin", "result",
+	)
 )
 
 // MirrorStore is what the mirror needs from containerd. ContainerdStore has it.
@@ -47,16 +53,23 @@ type MirrorStore interface {
 	Digests(ctx context.Context) (map[string]bool, error)
 	ReadBlob(ctx context.Context, digest string, max int64) ([]byte, error)
 	OpenContent(ctx context.Context, digest string) (io.ReadCloser, int64, error)
+	Target(ctx context.Context, image string) (digest string, updated time.Time, err error)
 }
 
-// Mirror is a pull-only OCI registry mirror for this node's containerd,
-// on 127.0.0.1 only. containerd asks it first for every manifest and blob
-// by digest (tags are still resolved at the real registry, so a moved tag
-// is never served stale). The mirror answers from this node's content
-// store, else streams the content from a peer node that has it (the
-// controller's layer inventory says which), else answers 404 and
+// TagOrigin asks a tag's registry what the tag points at
+// (registryclient.Client).
+type TagOrigin interface {
+	ManifestDigest(ctx context.Context, image string) (string, error)
+}
+
+// Mirror is a pull-only OCI registry mirror for this node's containerd.
+// containerd asks it first for every manifest and blob by digest, and,
+// with resolve on, for every tag. The mirror answers from this node's
+// content store, else streams the content from a peer node that has it
+// (the controller's layer inventory says which), else answers 404 and
 // containerd goes to the registry as usual. containerd verifies every
-// digest, so a peer can't slip in anything else.
+// digest, so a peer can't slip in anything else. The mirror never
+// downloads from a registry: that stays containerd's.
 //
 // It covers every image, announced or not (third-party images too): the
 // difference with preheat and propagation is only that nothing is spread
@@ -69,8 +82,14 @@ type Mirror struct {
 	controllerURL string
 	client        *http.Client
 
+	origin         TagOrigin // nil: tags are left to the registry
+	resolveTimeout time.Duration
+	downFor        time.Duration
+	askTimeout     time.Duration // for the controller's answers about tags
+
 	mu      sync.Mutex
 	holders map[string]holderEntry
+	down    map[string]time.Time // registry host -> when to ask it again
 }
 
 type holderEntry struct {
@@ -108,6 +127,21 @@ func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 	}
 }
 
+// EnableResolve makes the mirror resolve tags (see resolve). Each
+// registry answer waits at most timeout; a registry that gave none is
+// left alone for downFor (0: asked every time). The controller's answers
+// about a tag wait at most askTimeout.
+func (m *Mirror) EnableResolve(origin TagOrigin, timeout, downFor, askTimeout time.Duration) {
+	m.origin, m.resolveTimeout, m.downFor, m.askTimeout = origin, timeout, downFor, askTimeout
+	m.down = map[string]time.Time{}
+	mirrorResolvesTotal.Add(0, m.nodeID, "unchecked", "miss")
+	for _, o := range []string{"ok", "missing", "denied", "unreachable"} {
+		for _, r := range []string{"local", "peer", "miss"} {
+			mirrorResolvesTotal.Add(0, m.nodeID, o, r)
+		}
+	}
+}
+
 // Handler serves the registry API containerd talks to.
 func (m *Mirror) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,13 +158,41 @@ func (m *Mirror) Handler() http.Handler {
 			_, _ = w.Write([]byte("{}"))
 			return
 		}
-		kind, digest, ok := parseMirrorPath(r.URL.Path)
-		if !ok {
-			http.NotFound(w, r) // tags and everything else: the registry answers
+		if kind, digest, ok := parseMirrorPath(r.URL.Path); ok {
+			m.serve(w, r, kind, digest)
 			return
 		}
-		m.serve(w, r, kind, digest)
+		// containerd names the registry in ns when it asks a mirror.
+		host := r.URL.Query().Get("ns")
+		if repo, tag, ok := parseTagPath(r.URL.Path); ok && m.origin != nil && host != "" {
+			m.resolve(w, r, imageref.Normalize(host+"/"+repo+":"+tag), host)
+			return
+		}
+		http.NotFound(w, r) // everything else: the registry answers
 	})
+}
+
+// parseTagPath reads /v2/<name>/manifests/<tag>.
+func parseTagPath(p string) (repo, tag string, ok bool) {
+	i := strings.LastIndex(p, "/manifests/")
+	if !strings.HasPrefix(p, "/v2/") || i <= len("/v2/") {
+		return "", "", false
+	}
+	repo, tag = p[len("/v2/"):i], p[i+len("/manifests/"):]
+	return repo, tag, validTag(tag)
+}
+
+// validTag follows the distribution spec: [a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}.
+func validTag(t string) bool {
+	if t == "" || len(t) > 128 || t[0] == '.' || t[0] == '-' {
+		return false
+	}
+	for _, c := range t {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseMirrorPath reads /v2/<name>/{blobs,manifests}/sha256:<hex>.
@@ -175,14 +237,16 @@ func (m *Mirror) hasLocal(ctx context.Context, digest string) bool {
 	return err == nil && have[digest]
 }
 
-func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest string) {
+// serve answers digest from this node or a peer, else 404, and returns
+// which: local, peer, miss or error.
+func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest string) string {
 	kindLabel := strings.TrimSuffix(kind, "s")
 	if m.hasLocal(r.Context(), digest) {
 		n, err := m.serveLocal(w, r, kind, digest)
 		if err == nil {
 			mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "local")
 			mirrorBytesTotal.Add(n, m.nodeID, "local")
-			return
+			return "local"
 		}
 		// Nothing was sent (serveLocal cuts the connection otherwise): go on
 		// as if the node didn't have it, to the peers and then a 404, the
@@ -196,11 +260,11 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 			if err != nil {
 				mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "error")
 				logging.Warnf("angryduck-worker[%s]: mirror: %s %s from node=%s broke after %d bytes: %v", m.nodeID, kindLabel, digest, h.NodeID, n, err)
-				return
+				return "error"
 			}
 			mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "peer")
 			mirrorBytesTotal.Add(n, m.nodeID, "peer")
-			return
+			return "peer"
 		}
 		if err != nil {
 			logging.Debugf("angryduck-worker[%s]: mirror: node=%s couldn't serve %s: %v", m.nodeID, h.NodeID, digest, err)
@@ -209,6 +273,87 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 	m.forget(digest)
 	mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "miss")
 	http.NotFound(w, r)
+	return "miss"
+}
+
+// resolve answers a tag. The registry decides what the tag means when it
+// answers within resolveTimeout, so a moved tag is never served stale.
+// When it can't (down, refusing Angry Duck's credentials, or no longer
+// knowing the tag), the newest copy a node holds is served: freshness
+// never stops peers from sharing. A tag no node holds is a 404 without
+// asking the registry, so containerd goes there itself, as it would
+// without the mirror.
+func (m *Mirror) resolve(w http.ResponseWriter, r *http.Request, image, host string) {
+	if m.askTag(r.Context(), image, false).Holders == 0 {
+		mirrorResolvesTotal.Inc(m.nodeID, "unchecked", "miss")
+		http.NotFound(w, r)
+		return
+	}
+	origin, digest := m.atOrigin(r.Context(), image, host)
+	if origin != "ok" {
+		digest = m.askTag(r.Context(), image, true).Digest
+	}
+	result := "miss"
+	if digest != "" {
+		result = m.serve(w, r, "manifests", digest)
+	} else {
+		http.NotFound(w, r)
+	}
+	mirrorResolvesTotal.Inc(m.nodeID, origin, result)
+	if origin != "ok" {
+		logging.Infof("angryduck-worker[%s]: mirror: image=%s: registry answered %s; newest node copy %q: %s", m.nodeID, image, origin, digest, result)
+	}
+}
+
+// atOrigin asks host what image's tag points at, unless host gave no
+// answer less than downFor ago. It returns registryclient.Availability's
+// verdict and, when ok, the digest.
+func (m *Mirror) atOrigin(ctx context.Context, image, host string) (string, string) {
+	m.mu.Lock()
+	until, down := m.down[host]
+	m.mu.Unlock()
+	if down && time.Now().Before(until) {
+		return "unreachable", ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, m.resolveTimeout)
+	defer cancel()
+	digest, err := m.origin.ManifestDigest(ctx, image)
+	status := registryclient.Availability(err)
+	m.mu.Lock()
+	if status == "unreachable" && m.downFor > 0 {
+		m.down[host] = time.Now().Add(m.downFor)
+	} else {
+		delete(m.down, host)
+	}
+	m.mu.Unlock()
+	return status, digest
+}
+
+// askTag asks the controller how many fresh nodes hold image and, with
+// newest, which digest the newest of their copies points at.
+func (m *Mirror) askTag(ctx context.Context, image string, newest bool) model.TagHolders {
+	ctx, cancel := context.WithTimeout(ctx, m.askTimeout)
+	defer cancel()
+	u := m.controllerURL + "/images/tag?image=" + url.QueryEscape(image)
+	if newest {
+		u += "&newest=1"
+	}
+	var ans model.TagHolders
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return ans
+	}
+	sharedtoken.Set(req, m.token)
+	resp, err := m.client.Do(req)
+	if err != nil {
+		logging.Debugf("angryduck-worker[%s]: mirror: asking the controller about %s: %v", m.nodeID, image, err)
+		return ans
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&ans)
+	}
+	return ans
 }
 
 // serveLocal answers from this node's content store.
@@ -353,9 +498,20 @@ func (m *Mirror) fromPeer(w http.ResponseWriter, r *http.Request, h model.Holder
 	return n, true, nil
 }
 
-// RegisterPeer mounts /mirror/content/<digest>, which serves this node's
-// own content to other nodes' mirrors, behind the token.
+// RegisterPeer mounts, behind the token, /mirror/content/<digest>, which
+// serves this node's own content to other nodes' mirrors, and
+// /mirror/tag?image=, which tells the controller what a tag points at
+// here and since when.
 func (m *Mirror) RegisterPeer(mux *http.ServeMux) {
+	mux.HandleFunc("/mirror/tag", sharedtoken.Require(m.token, func(w http.ResponseWriter, r *http.Request) {
+		digest, updated, err := m.store.Target(r.Context(), r.URL.Query().Get("image"))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(model.TagTarget{Digest: digest, Updated: updated})
+	}))
 	mux.HandleFunc("/mirror/content/", sharedtoken.Require(m.token, func(w http.ResponseWriter, r *http.Request) {
 		digest := strings.TrimPrefix(r.URL.Path, "/mirror/content/")
 		if !validDigest(digest) || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
@@ -396,6 +552,7 @@ type HostsConfig struct {
 	Mirror    string   // the mirror's address, as containerd reaches it: "<pod IP>:18082"
 	Token     string   // sent by containerd to the mirror (hosts.toml header); "" sends none
 	Extra     []string // registries to configure even before an image of theirs is local
+	Resolve   bool     // containerd asks the mirror for tags too
 	NodeID    string
 
 	mu     sync.Mutex
@@ -493,7 +650,7 @@ func (h *HostsConfig) Sync(images []string, enabled bool) {
 	}
 	sort.Strings(names)
 	for _, host := range names {
-		want := hostsToml(host, h.Mirror, h.Token)
+		want := hostsToml(host, h.Mirror, h.Token, h.Resolve)
 		p := filepath.Join(root, host, "hosts.toml")
 		b, err := os.ReadFile(p)
 		switch {
@@ -518,17 +675,20 @@ func (h *HostsConfig) Sync(images []string, enabled bool) {
 	}
 }
 
-func hostsToml(host, mirror, token string) string {
+func hostsToml(host, mirror, token string, resolve bool) string {
 	server := "https://" + host
 	if host == "docker.io" {
 		server = "https://registry-1.docker.io"
 	}
+	tags, capabilities := "# Pull-only: tags resolve at the registry; content comes from\n", `["pull"]`
+	if resolve {
+		tags, capabilities = "# Pull-only: the mirror resolves tags with the registry, or a node's\n# newest copy when the registry can't answer; content comes from\n", `["pull", "resolve"]`
+	}
 	return hostsMarker + ": rewritten by the worker, removed when MIRROR_ENABLED=false.\n" +
-		"# Pull-only: tags still resolve at the registry; content comes from\n" +
-		"# this node or a peer when one has it, else from the registry.\n" +
+		tags + "# this node or a peer when one has it, else from the registry.\n" +
 		"server = \"" + server + "\"\n\n" +
 		"[host.\"http://" + mirror + "\"]\n" +
-		"  capabilities = [\"pull\"]\n" + tokenHeader(mirror, token)
+		"  capabilities = " + capabilities + "\n" + tokenHeader(mirror, token)
 }
 
 func tokenHeader(mirror, token string) string {

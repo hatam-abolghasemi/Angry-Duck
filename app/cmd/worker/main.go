@@ -6,7 +6,7 @@
 //   - ships images to and from peer workers (rescue and propagation),
 //     blobs first, snapshots only as a last resort;
 //   - runs a pull-only registry mirror for its own containerd, answering
-//     from this node or a peer before the registry;
+//     from this node or a peer before the registry, tags included;
 //   - cleans up images nothing has run here for a while, when the disk is
 //     getting full.
 //   - repairs, in place, images registered here that can't start a
@@ -313,11 +313,17 @@ func main() {
 			Mirror:    mirrorAddr,
 			Token:     randomToken(),
 			Extra:     config.StringSlice("MIRROR_REGISTRIES", nil),
+			Resolve:   feat.MirrorResolve,
 			NodeID:    nodeID,
 		}
 		if mirrorOn {
 			m := worker.NewMirror(store, nodeID, token, controllerURL)
 			m.RequireClientToken(hosts.Token)
+			if feat.MirrorResolve {
+				timeout := time.Duration(config.Int("MIRROR_RESOLVE_TIMEOUT_MS", 1000)) * time.Millisecond
+				m.EnableResolve(registryclient.New(creds, timeout, 0), timeout, config.Duration("MIRROR_RESOLVE_UNREACHABLE_TTL_S", 30),
+					time.Duration(config.Int("MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS", 3000))*time.Millisecond)
+			}
 			extra = append(extra, m.RegisterPeer)
 			mirrorSrv = &http.Server{Addr: mirrorListen, Handler: memlimit.AfterEach(m.Handler()), ReadHeaderTimeout: 10 * time.Second}
 			go func() {

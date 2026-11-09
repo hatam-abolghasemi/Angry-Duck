@@ -53,7 +53,7 @@ func TestHostsConfig_TokenHeaderAndRemoveOwn(t *testing.T) {
 	// Another worker pod's file (surge rollout) and a hand-written one stay.
 	other := filepath.Join(dir, "other.example.com", "hosts.toml")
 	os.MkdirAll(filepath.Dir(other), 0o755)
-	os.WriteFile(other, []byte(hostsToml("other.example.com", "10.233.64.99:18082", "x")), 0o600)
+	os.WriteFile(other, []byte(hostsToml("other.example.com", "10.233.64.99:18082", "x", true)), 0o600)
 	manual := filepath.Join(dir, "manual.example.com", "hosts.toml")
 	os.MkdirAll(filepath.Dir(manual), 0o755)
 	os.WriteFile(manual, []byte(`server = "https://manual.example.com"`), 0o644)

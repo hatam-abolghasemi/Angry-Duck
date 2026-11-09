@@ -528,6 +528,15 @@ func (s *ContainerdStore) Resolve(ctx context.Context, image string) (string, st
 	return img.Target.MediaType, img.Target.Digest.String(), nil
 }
 
+// Target returns the digest image points at and when it last changed.
+func (s *ContainerdStore) Target(ctx context.Context, image string) (string, time.Time, error) {
+	img, err := s.client.ImageService().Get(s.ns(ctx), image)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return img.Target.Digest.String(), img.UpdatedAt, nil
+}
+
 // Import imports an OCI archive the way `ctr images import --platform`
 // does: names come from index.json, then each image is unpacked for the
 // platform. Unpacking skips every layer whose chainID snapshot already
