@@ -221,3 +221,45 @@ func TestRescuer_SkipsDoNotBackOff(t *testing.T) {
 type fakePodsMut struct{ pods []kube.Pod }
 
 func (f *fakePodsMut) ListPods(context.Context, string) ([]kube.Pod, error) { return f.pods, nil }
+
+func TestPullCause(t *testing.T) {
+	for _, c := range []struct{ msg, want string }{
+		{`failed to pull and unpack image "registry.example.com/team/app:v57": failed to resolve reference "registry.example.com/team/app:v57": failed to authorize: failed to fetch oauth token: unexpected status from GET request to https://git.example.com/jwt/auth?scope=repository%3Ateam%2Fapp%3Apull&service=container_registry: 401 Unauthorized`, "denied"},
+		{`failed to pull and unpack image "x": failed to resolve reference "x": pull access denied, repository does not exist or may require authorization`, "denied"},
+		{`failed to pull and unpack image "x": failed to resolve reference "x": registry.example.com/team/app:gone: not found`, "missing"},
+		{`failed to pull and unpack image "x": failed to resolve reference "x": failed to authorize: failed to fetch anonymous token: unexpected status: 503 Service Unavailable`, "unreachable"},
+		{`failed to pull and unpack image "x": failed to resolve reference "x": failed to do request: Head "https://registry.example.com/v2/team/app/manifests/v1": dial tcp 10.0.0.1:443: i/o timeout`, "unreachable"},
+		{`failed to pull and unpack image "x": failed to extract layer: no space left on device`, "other"},
+		{`Back-off pulling image "registry.example.com/team/app:not-found-404-denied"`, ""},
+		{`Back-off pulling image "x": ErrImagePull: failed to pull and unpack image "x": failed to resolve reference "x": not found`, "missing"},
+	} {
+		if got := pullCause(c.msg); got != c.want {
+			t.Errorf("pullCause(%.60q...) = %q, want %q", c.msg, got, c.want)
+		}
+	}
+}
+
+// The cause read from ErrImagePull survives kubelet's back-off message,
+// which doesn't repeat it, and labels the rescue.
+func TestRescuer_KeepsThePullCause(t *testing.T) {
+	reg := NewRegistry(time.Minute, time.Minute)
+	report(reg, "stuck", "127.0.0.1:1", 0.5)
+	pod := stuckPod("ns", "p", "stuck", img, "ErrImagePull", "IfNotPresent")
+	pod.Status.ContainerStatuses[0].State.Waiting.Message = `failed to pull and unpack image "` + img + `": 401 Unauthorized`
+	pods := &fakePods{[]kube.Pod{pod}}
+	const series = `angryduck_controller_rescues_by_cause_total{cause="denied",result="no_source"}`
+	before := metricValue(t, series)
+	rs := NewRescuer(reg, pods, rescueToken, RescuerConfig{Interval: time.Hour, RetryAfter: 0, Timeout: time.Second, MaxConcurrent: 1, MaxSources: 1})
+	rs.tick(context.Background())
+	backoff := stuckPod("ns", "p", "stuck", img, "ImagePullBackOff", "IfNotPresent")
+	backoff.Status.ContainerStatuses[0].State.Waiting.Message = `Back-off pulling image "` + img + `"`
+	pods.pods = []kube.Pod{backoff}
+	rs.tick(context.Background())
+	st := rs.Status()
+	if len(st) != 1 || st[0].Cause != "denied" || st[0].LastResult != "no_source" {
+		t.Fatalf("status %+v, want one pair, cause denied, skipped for no source", st)
+	}
+	if got := metricValue(t, series) - before; got != 2 {
+		t.Errorf("%s went up by %v, want 2", series, got)
+	}
+}

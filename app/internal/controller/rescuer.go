@@ -25,6 +25,9 @@ import (
 // no_target (no fresh worker on the stuck pod's node), pull_policy_always
 // (kubelet would ignore a local copy anyway).
 var (
+	rescueResults = []string{"success", "failure", "no_source", "no_target", "pull_policy_always"}
+	rescueCauses  = []string{"missing", "denied", "unreachable", "other"}
+
 	rescuesTotal = metrics.NewCounterVec(
 		"angryduck_controller_rescues_total",
 		"ImagePullBackOff rescues decided by the controller, by target node and result.",
@@ -42,8 +45,13 @@ var (
 	)
 	rescueStuckPods = metrics.NewGaugeVec(
 		"angryduck_controller_rescue_stuck_pods",
-		"Pods stuck pulling an image on a node, per node and image, and whether a rescue is running for it (in_flight 1 or 0). Only pairs stuck as of the last rescuer tick.",
-		"node", "image", "in_flight",
+		"Pods stuck pulling an image on a node, per node and image, why the pull failed (cause, see rescues_by_cause_total), and whether a rescue is running for it (in_flight 1 or 0). Only pairs stuck as of the last rescuer tick.",
+		"node", "image", "cause", "in_flight",
+	)
+	rescuesByCause = metrics.NewCounterVec(
+		"angryduck_controller_rescues_by_cause_total",
+		"Rescue decisions across the cluster, by why the pull failed (cause: missing, the registry doesn't have the image; denied, the pod's pull secret was refused; unreachable, no usable answer from the registry; other) and result (as in rescues_total).",
+		"cause", "result",
 	)
 	rescuesInFlight = metrics.NewGaugeVec(
 		"angryduck_controller_rescues_in_flight",
@@ -157,8 +165,13 @@ type pairState struct {
 // NewRescuer builds a rescuer.
 func NewRescuer(registry *Registry, pods PodLister, token string, cfg RescuerConfig) *Rescuer {
 	rescuesInFlight.Set(0)
+	for _, c := range rescueCauses {
+		for _, r := range rescueResults {
+			rescuesByCause.Add(0, c, r)
+		}
+	}
 	registry.OnNewNode(func(node string) {
-		for _, r := range []string{"success", "failure", "no_source", "no_target", "pull_policy_always"} {
+		for _, r := range rescueResults {
 			rescuesTotal.Add(0, node, r)
 		}
 		for _, r := range []string{"sent", "failed", "no_worker"} {
@@ -214,6 +227,20 @@ type stuckImage struct {
 	Image      string
 	Pods       []string // namespace/name
 	PullAlways bool
+	Cause      string // see pullCause; "" until a message says
+}
+
+// count records one rescue decision for s.
+func (s stuckImage) count(result string) {
+	rescuesTotal.Inc(s.Node, result)
+	rescuesByCause.Inc(s.cause(), result)
+}
+
+func (s stuckImage) cause() string {
+	if s.Cause == "" {
+		return "other"
+	}
+	return s.Cause
 }
 
 func (s stuckImage) key() string { return s.Node + "|" + s.Image }
@@ -391,6 +418,9 @@ func (rs *Rescuer) tick(ctx context.Context) {
 			st = &pairState{since: now}
 			rs.pairs[s.key()] = st
 		}
+		if s.Cause == "" {
+			s.Cause = st.Cause // kubelet's back-off message may not repeat why
+		}
 		st.stuckImage = s // pods may have changed
 	}
 	for key, st := range rs.pairs {
@@ -484,11 +514,11 @@ func (rs *Rescuer) skip(st *pairState, result, why string) {
 	st.lastResult, st.lastError = result, why
 	st.next = time.Now().Add(rs.cfg.RetryAfter)
 	rs.mu.Unlock()
-	rescuesTotal.Inc(st.Node, result)
+	st.count(result)
 	// Log on change only: an unrescuable pod would otherwise log every
 	// RetryAfter for as long as it exists.
 	if changed {
-		logging.Infof("angryduck-controller: rescuer: not rescuing image=%s on node=%s for %s: %s", st.Image, st.Node, strings.Join(st.Pods, ","), why)
+		logging.Infof("angryduck-controller: rescuer: not rescuing image=%s on node=%s (pull %s) for %s: %s", st.Image, st.Node, st.cause(), strings.Join(st.Pods, ","), why)
 	}
 }
 
@@ -508,8 +538,8 @@ func (rs *Rescuer) send(ctx context.Context, st *pairState, s stuckImage, target
 	for i, src := range sources {
 		names[i] = src.NodeID
 	}
-	logging.Infof("angryduck-controller: rescuer: ordering node=%s to fetch image=%s from peers [%s] for %s",
-		s.Node, s.Image, strings.Join(names, ","), strings.Join(s.Pods, ","))
+	logging.Infof("angryduck-controller: rescuer: ordering node=%s to fetch image=%s (pull %s) from peers [%s] for %s",
+		s.Node, s.Image, s.cause(), strings.Join(names, ","), strings.Join(s.Pods, ","))
 
 	start := time.Now()
 	result, err := sendRescueOrder(ctx, rs.client, rs.token, target.Address, model.RescueOrder{Image: s.Image, Sources: sources, Reason: "rescue"})
@@ -525,7 +555,7 @@ func (rs *Rescuer) send(ctx context.Context, st *pairState, s stuckImage, target
 		rs.mu.Unlock()
 		logging.Warnf("angryduck-controller: rescuer: rescue of image=%s on node=%s failed after %s (%d in a row, next try in %s): %v",
 			s.Image, s.Node, time.Since(start).Round(time.Millisecond), failures, wait, err)
-		rescuesTotal.Inc(s.Node, "failure")
+		s.count("failure")
 		return
 	}
 	st.failures = 0
@@ -537,7 +567,7 @@ func (rs *Rescuer) send(ctx context.Context, st *pairState, s stuckImage, target
 	recordDelivery(s.Image, s.Node, "rescue", since, time.Now())
 	logging.Infof("angryduck-controller: rescuer: node=%s now has image=%s (from %s: %d blob(s), %d snapshot(s), %d bytes, %s); kubelet picks it up on its next retry",
 		s.Node, s.Image, orDash(result.Source), result.Blobs, result.Snapshots, result.Bytes, time.Since(start).Round(time.Millisecond))
-	rescuesTotal.Inc(s.Node, "success")
+	s.count("success")
 }
 
 // publishMetricsLocked refreshes the gauges from the pair table. Caller
@@ -558,7 +588,7 @@ func (rs *Rescuer) publishMetricsLocked() {
 			inFlight++
 			flight = "1"
 		}
-		rescueStuckPods.Set(float64(len(st.Pods)), st.Node, st.Image, flight)
+		rescueStuckPods.Set(float64(len(st.Pods)), st.Node, st.Image, st.cause(), flight)
 	}
 	for node, n := range perNode {
 		rescueStuckImages.Set(float64(n), node)
@@ -574,7 +604,7 @@ func (rs *Rescuer) Status() []model.RescueStatus {
 	for _, st := range rs.pairs {
 		out = append(out, model.RescueStatus{
 			Node: st.Node, Image: st.Image, Pods: append([]string(nil), st.Pods...),
-			StuckSince: st.since, InFlight: st.inFlight,
+			Cause: st.cause(), StuckSince: st.since, InFlight: st.inFlight,
 			LastResult: st.lastResult, LastError: st.lastError,
 			ConsecutiveFailures: st.failures, NextAttempt: st.next,
 		})
@@ -697,6 +727,9 @@ func findStuck(pods []kube.Pod) []stuckImage {
 				s = &stuckImage{Node: node, Image: image}
 				byKey[key] = s
 			}
+			if s.Cause == "" {
+				s.Cause = pullCause(cs.State.Waiting.Message)
+			}
 			s.Pods = appendUnique(s.Pods, p.Metadata.Namespace+"/"+p.Metadata.Name)
 			// kubelet defaults imagePullPolicy to Always for :latest and
 			// untagged images; the API server fills it in, so it is
@@ -712,6 +745,39 @@ func findStuck(pods []kube.Pod) []stuckImage {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
 	return out
+}
+
+// pullCause reads why a pull failed from kubelet's waiting message:
+// missing, denied (the pod's pull secret was refused), unreachable or
+// other; "" for a back-off message that doesn't repeat the error. Quoted
+// parts (image references) are left out so a name can't match.
+func pullCause(msg string) string {
+	var b strings.Builder
+	b.Grow(len(msg))
+	quoted := false
+	for i := 0; i < len(msg); i++ {
+		switch c := msg[i]; {
+		case c == '"':
+			quoted = !quoted
+		case quoted:
+		case 'A' <= c && c <= 'Z':
+			b.WriteByte(c + 'a' - 'A')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	m := strings.TrimSpace(b.String())
+	switch {
+	case m == "" || m == "back-off pulling image":
+		return ""
+	case matchesAny(m, []string{"unauthorized", "forbidden", "denied"}):
+		return "denied"
+	case matchesAny(m, []string{"not found", "manifest unknown", "name unknown"}):
+		return "missing"
+	case matchesAny(m, []string{"dial tcp", "timeout", "connection refused", "connection reset", "no such host", "no route to host", "network is unreachable", "tls handshake", "eof", "too many requests", "internal server error", "bad gateway", "service unavailable"}):
+		return "unreachable"
+	}
+	return "other"
 }
 
 func appendUnique(list []string, v string) []string {
