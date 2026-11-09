@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.11.1
+
+Dependency updates only; nothing behaves differently.
+
+### Changed
+
+- **Dependencies:** gRPC 1.85.0 (was 1.82.1), protobuf 1.36.12 (the release;
+  was a pre-release of it), `golang.org/x/sys` 0.49.0 (0.47.0), and with them
+  OpenTelemetry 1.45.0, `golang.org/x/net` 0.60.0, `x/text` 0.42.0 and
+  `x/sync` 0.23.0. Pooled content writes still go through gRPC's codec API,
+  and the worker binary is 4 KB larger.
+
 ## 1.11.0
 
 Peers share even when the registry can't say what a tag means. The mirror
