@@ -79,7 +79,7 @@ func NewOriginChecker(registry *Registry, checker ManifestChecker, cfg OriginCon
 		cfg.Tick = 30 * time.Second
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 10 * time.Second
+		cfg.Timeout = 5 * time.Second
 	}
 	for _, s := range originStatuses {
 		originChecksTotal.Add(0, s)

@@ -115,6 +115,10 @@ func main() {
 	} else {
 		server.SetToken(token)
 		ranker.SetToken(token)
+		if feat.MirrorResolve {
+			server.EnableTagLookup(config.Duration("MIRROR_RESOLVE_NEWEST_CACHE_S", 30),
+				time.Duration(config.Int("MIRROR_RESOLVE_NEWEST_TIMEOUT_MS", 2000))*time.Millisecond)
+		}
 		log.Printf("angryduck-controller: /report requires the shared token (AUTH_MODE=%s)", authMode)
 		rescuer, pods := newRescuer(registry, token, feat.Rescue)
 		if rescuer != nil {
@@ -155,9 +159,11 @@ func main() {
 	if originInterval > 0 {
 		// Its own client: its checks never queue behind, or hold up, the
 		// manifest reads preheats and spreads wait on.
-		origin := controller.NewOriginChecker(registry, registryclient.New(creds, 10*time.Second, 0), controller.OriginConfig{
+		originTimeout := config.Duration("ORIGIN_CHECK_TIMEOUT_S", 5)
+		origin := controller.NewOriginChecker(registry, registryclient.New(creds, originTimeout, 0), controller.OriginConfig{
 			Interval:   originInterval,
 			Delay:      config.Duration("ORIGIN_CHECK_DELAY_S", 120),
+			Timeout:    originTimeout,
 			Registries: config.StringSlice("ORIGIN_CHECK_REGISTRIES", nil),
 		})
 		go origin.Run(ctx)
