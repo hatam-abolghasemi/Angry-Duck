@@ -22,7 +22,7 @@ config:
 ## A large fleet
 
 Hundreds of nodes mean more holders sooner, so let each holder serve more
-than one node at a time if your node network has room, and give the
+nodes at a time if your node network has room (25G and faster), and give the
 controller more memory: it grows with the number of nodes, and peaks right
 after a restart when every worker resends its inventory.
 
@@ -33,7 +33,7 @@ controller:
     limits: {cpu: 500m, memory: 256Mi}
 
 config:
-  PROPAGATE_PER_SOURCE: "2"
+  PROPAGATE_PER_SOURCE: "6"
 ```
 
 Watch `angryduck_process_memory_bytes` for the controller after a restart and

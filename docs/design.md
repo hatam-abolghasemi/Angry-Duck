@@ -82,8 +82,9 @@ step. So Angry Duck reacts:
   included, reaches the controller in about a second.
 - The controller **watches Pending pods**, so a pod stuck in `ImagePullBackOff`
   is seen when kubelet reports it.
-- **A finished transfer starts the next one** about a second later, not at the
-  next tick.
+- **A finished transfer starts the next one** within 50 ms
+  (`WAKE_COALESCE_MS`), not at the next tick: a free slot or a new holder is
+  a link sitting idle until the next order.
 - Pull orders return at once and run in the background. Transfers stream
   straight into containerd and are never buffered to disk.
 

@@ -39,6 +39,7 @@ func main() {
 	memlimit.Apply("controller")
 	debugpprof.Start("controller")
 	metrics.SetEventTTL(config.Duration("METRICS_EVENT_TTL_S", 15))
+	controller.SetWakeCoalesce(time.Duration(config.Int("WAKE_COALESCE_MS", 50)) * time.Millisecond)
 
 	listenAddr := config.String("CONTROLLER_LISTEN_ADDR", ":8080")
 	staleAfter := config.Duration("WORKER_STALE_AFTER_S", 30)
@@ -246,7 +247,7 @@ func newPropagator(registry *controller.Registry, token string, rankExclude []st
 		// 0: until every eligible node has it, or a newer tag replaces it.
 		Window:         config.Duration("PROPAGATE_WINDOW_S", 0),
 		MaxConcurrent:  config.Int("PROPAGATE_MAX_CONCURRENT", 8),
-		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 1),
+		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 3),
 		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
 		// Same nodes preheat leaves alone (masters, typically), unless
 		// set separately.
@@ -279,7 +280,7 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		Interval:       config.Duration("PROPAGATE_INTERVAL_S", 10),
 		MaxRegistry:    config.Int("SPREAD_MAX_REGISTRY_PULLS", topN),
 		RacePerBlob:    config.Int("SPREAD_RACE_PER_BLOB", 2),
-		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 1),
+		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 3),
 		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
 		Exclude:        config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),
 		RetryAfter:     config.Duration("SPREAD_RETRY_AFTER_S", 15),

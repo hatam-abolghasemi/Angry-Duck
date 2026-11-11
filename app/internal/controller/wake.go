@@ -6,8 +6,20 @@ import (
 )
 
 // wakeCoalesce is how long an early tick waits after the first wake-up,
-// so transfers that finish together share one tick.
-var wakeCoalesce = time.Second
+// so transfers that finish together share one tick. Short: a finished
+// transfer frees a slot and makes a new holder, and every moment until
+// the next order is a moment that link sits idle. Set with
+// SetWakeCoalesce.
+var wakeCoalesce = 50 * time.Millisecond
+
+// SetWakeCoalesce sets how long every loop (spread, propagation, rescue)
+// waits after a wake-up before it looks again. Zero or less keeps the
+// default.
+func SetWakeCoalesce(d time.Duration) {
+	if d > 0 {
+		wakeCoalesce = d
+	}
+}
 
 // waker asks a ticking loop to look again before its next tick, when
 // something it was waiting for (a free transfer slot, a new holder) has
