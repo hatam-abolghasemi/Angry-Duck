@@ -28,8 +28,9 @@ var (
 )
 
 // Temporary snapshot keys created by ContainerdStore; anything with these
-// prefixes at startup was left by a worker that died mid-rescue.
-var tempSnapshotPrefixes = []string{"angryduck-rescue-", "angryduck-view-"}
+// prefixes at startup was left by a worker that died mid-rescue or
+// mid-unpack.
+var tempSnapshotPrefixes = []string{"angryduck-rescue-", "angryduck-view-", "angryduck-unpack-"}
 
 // Pins remembers which shipped snapshots are still pinned against GC, and
 // until when.

@@ -254,7 +254,7 @@ func (c *Client) resolve(ctx context.Context, image, platform string) (Resolved,
 		if !strings.HasPrefix(l.Digest, "sha256:") || l.Size <= 0 {
 			return Resolved{}, fmt.Errorf("image %s: layer %d has an unusable descriptor", image, i)
 		}
-		res.Layers[i] = layerindex.Layer{Digest: l.Digest, ChainID: chains[i], Size: l.Size}
+		res.Layers[i] = layerindex.Layer{Digest: l.Digest, ChainID: chains[i], Size: l.Size, MediaType: l.MediaType}
 	}
 	return res, nil
 }

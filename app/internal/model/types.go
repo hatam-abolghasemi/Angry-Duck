@@ -328,6 +328,19 @@ type SpreadFetch struct {
 	// per second from Peer). Otherwise the worker keeps it (409, Kept).
 	Replace    bool    `json:"replace,omitempty"`
 	ExpectRate float64 `json:"expect_rate,omitempty"`
+	// Unpack lets the node unpack the blob as soon as it and the layers
+	// below it are here, instead of all at once at finalize. Workers
+	// before 1.12.0 ignore it.
+	Unpack *SpreadUnpack `json:"unpack,omitempty"`
+}
+
+// SpreadUnpack places a layer blob in its image: the chainID its snapshot
+// is committed under, the chainID of the layer below ("" for the bottom
+// layer), and the blob's media type (its compression).
+type SpreadUnpack struct {
+	ChainID   string `json:"chain_id"`
+	Parent    string `json:"parent,omitempty"`
+	MediaType string `json:"media_type"`
 }
 
 // SpreadFetchAck is the worker's immediate answer to a SpreadFetch.

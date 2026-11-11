@@ -1135,6 +1135,86 @@ func (s *ContainerdStore) ApplySnapshot(ctx context.Context, chainID, parent str
 	return nil
 }
 
+// errParentMissing: a layer can't be unpacked before the one below it.
+var errParentMissing = errors.New("the layer below isn't unpacked yet")
+
+// LayerSpec is one layer blob already in the content store, placed in its
+// image: the chainID its snapshot is committed under and the chainID of
+// the layer below ("" for the bottom one).
+type LayerSpec struct {
+	Digest    string
+	Size      int64
+	MediaType string
+	ChainID   string
+	Parent    string
+}
+
+// ApplyLayer unpacks a layer blob that is already in the content store
+// onto the snapshot of the layer below it and commits the result under its
+// chainID, as containerd's own unpack does, so a later unpack of the image
+// finds it and skips it. Everything is created under lease: it lives until
+// the image referencing it is registered, or the lease ends.
+//
+// The snapshot is committed only when what containerd unpacked matches
+// the chainID (its uncompressed digest, chained onto the parent's): a
+// wrong snapshot under that name would break every image using the layer.
+// applied is false when the snapshot was already there. errParentMissing
+// when the layer below isn't unpacked yet.
+func (s *ContainerdStore) ApplyLayer(ctx context.Context, lease string, l LayerSpec) (applied bool, err error) {
+	ctx = leases.WithLease(s.ns(ctx), lease)
+	sn := s.snapshotterSvc()
+	if _, err := sn.Stat(ctx, l.ChainID); err == nil {
+		return false, nil
+	} else if !errdefs.IsNotFound(err) {
+		return false, err
+	}
+	key := "angryduck-unpack-" + randomSuffix()
+	mounts, err := sn.Prepare(ctx, key, l.Parent)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return false, errParentMissing
+		}
+		return false, fmt.Errorf("preparing a snapshot on %q: %w", l.Parent, err)
+	}
+	defer s.invalidate()
+	committed := false
+	defer func() {
+		if !committed {
+			removeQuietly(ctx, sn, key)
+		}
+	}()
+	desc := ocispec.Descriptor{MediaType: l.MediaType, Digest: digest.Digest(l.Digest), Size: l.Size}
+	diffID, err := s.client.DiffService().Apply(ctx, desc, mounts)
+	if err != nil {
+		return false, fmt.Errorf("unpacking %s: %w", l.Digest, err)
+	}
+	if got := chainOf(l.Parent, diffID.Digest.String()); got != l.ChainID {
+		return false, fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, got, l.ChainID)
+	}
+	if err := sn.Commit(ctx, l.ChainID, key); err != nil {
+		if errdefs.IsAlreadyExists(err) {
+			return false, nil // unpacked meanwhile (a pull, a finalize): theirs is as good
+		}
+		return false, fmt.Errorf("committing %s: %w", l.ChainID, err)
+	}
+	committed = true
+	// What containerd's unpack records too: the blob's uncompressed digest.
+	_, _ = s.client.ContentStore().Update(ctx, content.Info{Digest: desc.Digest,
+		Labels: map[string]string{uncompressedLabel: diffID.Digest.String()}}, "labels."+uncompressedLabel)
+	return true, nil
+}
+
+const uncompressedLabel = "containerd.io/uncompressed"
+
+// chainOf is a layer's chainID from the chainID below it and its own
+// uncompressed digest.
+func chainOf(parent, diffID string) string {
+	if parent == "" {
+		return diffID
+	}
+	return digest.FromString(parent + " " + diffID).String()
+}
+
 // Unpin removes the GC pin ApplySnapshot set.
 func (s *ContainerdStore) Unpin(ctx context.Context, chainID string) error {
 	_, err := s.snapshotterSvc().Update(s.ns(ctx), snapshots.Info{Name: chainID, Labels: map[string]string{gcRootLabel: ""}}, "labels."+gcRootLabel)

@@ -785,7 +785,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 		}
 		orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
 			fetch: &model.SpreadFetch{Job: j.id, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathPeer,
-				Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}, Stream: stream, ID: x.id, ExpectRate: s.rates[model.SpreadPathPeer]}})
+				Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}, Stream: stream, ID: x.id, ExpectRate: s.rates[model.SpreadPathPeer], Unpack: unpackOf(layers, best)}})
 		return true
 	}
 	// North-south: only blobs no node holds. Unstarted ones first, largest
@@ -824,7 +824,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 			regSince[best] = now
 		}
 		orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: x, layer: best, digest: layers[best].Digest,
-			fetch: &model.SpreadFetch{Job: j.id, Image: j.image, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathRegistry, ID: x.id}})
+			fetch: &model.SpreadFetch{Job: j.id, Image: j.image, Digest: layers[best].Digest, Size: layers[best].Size, Path: model.SpreadPathRegistry, ID: x.id, Unpack: unpackOf(layers, best)}})
 		return true
 	}
 	for more := true; more; {
@@ -873,7 +873,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 				load(i)[h]++
 				orders = append(orders, order{job: j, node: w.NodeID, addr: w.Address, xfer: y, layer: i, digest: layers[i].Digest,
 					fetch: &model.SpreadFetch{Job: j.id, Digest: layers[i].Digest, Size: layers[i].Size, Path: model.SpreadPathPeer,
-						Peer: &model.Holder{NodeID: h, Address: byNode[h].Address}, ID: y.id, Replace: true, ExpectRate: s.rates[model.SpreadPathPeer]}})
+						Peer: &model.Holder{NodeID: h, Address: byNode[h].Address}, ID: y.id, Replace: true, ExpectRate: s.rates[model.SpreadPathPeer], Unpack: unpackOf(layers, i)}})
 			}
 		}
 	}
@@ -1639,4 +1639,19 @@ func (s *Spreader) Status() []model.SpreadStatus {
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Image < out[b].Image })
 	return out
+}
+
+// unpackOf places layer i in its image for the receiving node, so it can
+// unpack the blob as soon as it and the layers below are there. nil when
+// the media type is unknown: the node then leaves it to finalize.
+func unpackOf(layers []layerindex.Layer, i int) *model.SpreadUnpack {
+	l := layers[i]
+	if l.MediaType == "" || l.ChainID == "" {
+		return nil
+	}
+	u := &model.SpreadUnpack{ChainID: l.ChainID, MediaType: l.MediaType}
+	if i > 0 {
+		u.Parent = layers[i-1].ChainID
+	}
+	return u
 }

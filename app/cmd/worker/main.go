@@ -72,7 +72,15 @@ func main() {
 	if selfAddress == "" {
 		log.Fatalf("angryduck-worker: SELF_ADDRESS must be set to a controller-reachable host or host:port (e.g. pod IP via downward API)")
 	}
+	// HOST_NETWORK: the worker shares the node's network (the DaemonSet's
+	// hostNetwork), so transfers skip the pod network. It then listens on
+	// the node's own address only, not every interface of the node, and
+	// the mirror on the node's loopback only.
+	hostNetwork := config.Bool("HOST_NETWORK", false)
 	listenAddr := config.String("WORKER_LISTEN_ADDR", ":18081")
+	if hostNetwork {
+		listenAddr = bindHost(listenAddr, config.String("POD_IP", ""))
+	}
 	if !strings.Contains(selfAddress, ":") {
 		selfAddress = selfAddress + ":" + listenPort(listenAddr)
 	}
@@ -221,7 +229,14 @@ func main() {
 			sp.DisableStreaming()
 		}
 		reporter.SetStreams(streams)
-		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t", nodeID, platform, timeout, streams)
+		// Unpacking layers as they arrive, instead of all at finalize;
+		// SPREAD_UNPACK_ENABLED=false leaves it all to finalize.
+		unpacks := false
+		if a, ok := any(store).(worker.LayerApplier); ok && feat.SpreadUnpack {
+			sp.EnableUnpack(a)
+			unpacks = true
+		}
+		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t unpack_on_arrival=%t", nodeID, platform, timeout, streams, unpacks)
 	}
 
 	// Images being pulled or received right now: cleanup and repair never
@@ -297,8 +312,13 @@ func main() {
 		// The mirror listens on the pod network; containerd, on the host
 		// network, reaches it at the pod IP and sends a per-pod random
 		// token from hosts.toml, so no other pod can use it.
-		mirrorListen := mirrorListenAddr(config.String("MIRROR_LISTEN_ADDR", ":18082"), nodeID)
+		mirrorListen := mirrorListenAddr(config.String("MIRROR_LISTEN_ADDR", ":18082"), nodeID, hostNetwork)
 		mirrorAddr := config.String("MIRROR_ADVERTISE_ADDR", "")
+		if host, _, _ := net.SplitHostPort(mirrorListen); mirrorAddr == "" && hostNetwork && host != "" && host != "0.0.0.0" && host != "::" {
+			// containerd shares the network too: it reaches the mirror
+			// where it listens, an address that survives worker restarts.
+			mirrorAddr = mirrorListen
+		}
 		if podIP := config.String("POD_IP", ""); mirrorAddr == "" && podIP != "" {
 			_, port, _ := net.SplitHostPort(mirrorListen)
 			mirrorAddr = net.JoinHostPort(podIP, port)
@@ -428,11 +448,22 @@ func uninstalling(ctx context.Context, nodeID string) bool {
 	return gone
 }
 
-// mirrorListenAddr turns a loopback address from a pre-1.8.6 config into a
-// pod-network one: the worker no longer shares the node's network, so
-// containerd can't reach its loopback.
-func mirrorListenAddr(addr, nodeID string) string {
+// mirrorListenAddr is where the mirror listens. On the node's network,
+// containerd reaches it on the loopback, and nothing else needs to: an
+// address without a host means 127.0.0.1. On the pod network, a loopback
+// address (from a pre-1.8.6 config) is turned into a pod-network one, as
+// containerd can't reach the pod's loopback.
+func mirrorListenAddr(addr, nodeID string, hostNetwork bool) string {
 	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host, port = "", "18082"
+	}
+	if hostNetwork {
+		if host == "" {
+			return net.JoinHostPort("127.0.0.1", port)
+		}
+		return net.JoinHostPort(host, port)
+	}
 	if err != nil {
 		return ":18082"
 	}
@@ -489,4 +520,15 @@ func listenPort(listenAddr string) string {
 		return "18081"
 	}
 	return port
+}
+
+// bindHost gives a listen address without a host (":18081") the host ip,
+// so a worker on the node's network listens on the node's own address
+// rather than on every interface of the node.
+func bindHost(addr, ip string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host != "" || ip == "" {
+		return addr
+	}
+	return net.JoinHostPort(ip, port)
 }

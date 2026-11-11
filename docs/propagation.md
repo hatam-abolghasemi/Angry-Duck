@@ -15,7 +15,7 @@ the registry, and which are receiving it from a peer.
 The **blob is the unit**: a node receives any number of different blobs at
 once, each at most once from the registry (north-south) and once from a
 peer (east-west). Whenever a transfer ends, the controller hands out new
-ones, about a second later, one new transfer per node per round until
+ones, within 50 ms (`WAKE_COALESCE_MS`), one new transfer per node per round until
 nothing more fits, so the first node in line doesn't take every free
 source:
 
@@ -43,7 +43,8 @@ source:
 - **Registering the image.** When a node holds every layer (its blob, or
   its unpacked snapshot), the controller sends it the image's metadata it
   read from the registry, checked against its digests on arrival, and the
-  node registers and unpacks the image. Kubelet then finds it locally.
+  node registers the image, unpacking whatever isn't unpacked yet (most
+  layers already are: see below). Kubelet then finds it locally.
   Different images register side by side on a node; the same image one
   finalize at a time. How fast unpacking goes is up to the CPU and IO
   containerd gets.
@@ -128,6 +129,35 @@ sequenceDiagram
     C->>A: finalize (metadata)
 ```
 
+## Unpacking as layers arrive
+
+Unpacking a layer (decompressing it and writing its files) takes about as
+long as receiving it. Done at the end, one layer after the other, it comes on
+top of the whole transfer. So each node unpacks a layer as soon as its blob
+and the layers below it are there, while the rest still arrive, and the image
+is ready almost as soon as its last layer lands.
+
+- **Bottom up, one at a time per image.** A layer is unpacked onto the
+  snapshot of the layer below and committed under its chainID, exactly as
+  containerd's own unpack does; a layer whose layer below isn't unpacked
+  yet waits for it. Every fetch order says where its layer sits in the
+  image, so the node needs nothing else.
+- **Checked like containerd checks.** The unpacked layer is committed only
+  if its uncompressed digest chains to the chainID the image's config
+  names. Anything else is dropped, and the layer is left to the image's own
+  unpack.
+- **Finalize finishes the rest.** It waits for a layer still being
+  unpacked, then containerd's unpack finds the unpacked layers and skips
+  them. A layer the node held before the push (no fetch order for it), and
+  everything above it, is unpacked there as before.
+- **Held by the job's lease**, like the blobs, so nothing is collected before
+  the image references it. A superseded or dropped job stops unpacking and
+  its lease takes the work with it.
+- `SPREAD_UNPACK_ENABLED=false` leaves all unpacking to finalize.
+  `angryduck_worker_spread_unpacks_total{result}` counts layers unpacked
+  early (`applied`), already unpacked (`present`) and left to finalize
+  (`failed`).
+
 ## Blobs held until the image exists
 
 Blobs arrive long before the image that references them, so each job's
@@ -146,8 +176,8 @@ pulls those layers locally.
 - **No layer list.** If the image's manifest can't be read (no credentials
   for that registry, say), the push is seeded and propagated **whole**:
   `RANK_TOP_N` seeds pull the image, then nodes copy it from
-  each other, each holder serving one node at a time so holders double each
-  round. `SPREAD_ENABLED=false` or `RANK_BY_LAYERS=false` always works this
+  each other, each holder serving `PROPAGATE_PER_SOURCE` nodes at a time
+  (3), so holders multiply each round. `SPREAD_ENABLED=false` or `RANK_BY_LAYERS=false` always works this
   way.
 - **A layer the registry keeps failing on.** After three failed registry
   pulls of one layer, if some node has the whole image (holding that layer

@@ -516,3 +516,20 @@ func TestSpreader_PeerTransfersLimitedOnlyPerNode(t *testing.T) {
 		seen[p.node] = true
 	}
 }
+
+func TestUnpackOfPlacesEachLayerOnTheOneBelow(t *testing.T) {
+	layers := []layerindex.Layer{
+		{Digest: "sha256:a", ChainID: "sha256:ca", MediaType: "application/vnd.oci.image.layer.v1.tar+gzip"},
+		{Digest: "sha256:b", ChainID: "sha256:cb", MediaType: "application/vnd.oci.image.layer.v1.tar+zstd"},
+		{Digest: "sha256:c", ChainID: "sha256:cc"},
+	}
+	if u := unpackOf(layers, 0); u == nil || u.Parent != "" || u.ChainID != "sha256:ca" {
+		t.Fatalf("bottom layer: %+v", u)
+	}
+	if u := unpackOf(layers, 1); u == nil || u.Parent != "sha256:ca" || u.MediaType != layers[1].MediaType {
+		t.Fatalf("second layer: %+v", u)
+	}
+	if u := unpackOf(layers, 2); u != nil {
+		t.Fatalf("a layer without a media type is left to finalize, got %+v", u)
+	}
+}

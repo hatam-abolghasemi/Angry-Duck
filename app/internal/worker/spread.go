@@ -144,6 +144,11 @@ type Spread struct {
 	arriving map[string]*arriving // by digest: blobs coming in now
 	replaced atomic.Int64         // restarts from a faster source, naming their ingests
 	peakRecv float64              // fastest finished transfer here, bytes/s: what this node's link takes; under mu
+
+	// Unpacking layers as they arrive (see spreadunpack.go): nil applier
+	// when off.
+	applier LayerApplier
+	unpacks map[string]*unpackJob // by job, under mu
 }
 
 type spreadJob struct {
@@ -219,6 +224,7 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 		xfers:      map[xferKey]*spreadXfer{},
 		finalizing: newKeyedLock(),
 		arriving:   map[string]*arriving{},
+		unpacks:    map[string]*unpackJob{},
 	}
 	if is, ok := store.(IngestStore); ok && is.CanStream() {
 		sp.ingest = is
@@ -295,6 +301,7 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.have(r.Context(), o.Digest) && s.holdPresent(r.Context(), o.Job, o.Digest) {
+		s.landed(o.Job, o)
 		writeJSON(w, http.StatusOK, model.SpreadFetchAck{Present: true})
 		return
 	}
@@ -377,6 +384,7 @@ func (s *Spread) pruneJobsLocked(now time.Time) {
 			delete(s.jobs, id)
 		}
 	}
+	s.pruneUnpacksLocked(now)
 }
 
 func (s *Spread) busyLocked(job string) bool {
@@ -470,6 +478,7 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	}
 	switch result {
 	case model.SpreadResultOK:
+		s.landed(o.Job, o)
 		logging.Infof("angryduck-worker[%s]: spread: got %s (%d bytes) from %s in %s", s.nodeID, o.Digest, n, from, took.Round(time.Millisecond))
 	case model.SpreadResultCancelled:
 		logging.Debugf("angryduck-worker[%s]: spread: stopped fetching %s from %s after %d bytes: it arrived another way first", s.nodeID, o.Digest, from, n)
@@ -623,6 +632,7 @@ func (s *Spread) HandleDrop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
+	s.unpackStop(r.Context(), d.Job, true)
 	s.release(r.Context(), d.Job)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -684,6 +694,9 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
 	defer cancel()
 	start := time.Now()
+	// Layers still being unpacked as they arrived are finished first:
+	// the import then finds them unpacked and skips them.
+	s.unpackStop(ctx, f.Job, false)
 	err = s.finalize(ctx, f, image)
 	if err != nil {
 		spreadFinalizesTotal.Inc(s.nodeID, "failure")

@@ -243,11 +243,13 @@ func (x *Index) Unique() int {
 }
 
 // Layer is one layer of an image, as the scoring needs it: its blob
-// digest, its chainID and its compressed size.
+// digest, its chainID and its compressed size. MediaType says how the blob
+// is compressed, for nodes that unpack it as it arrives.
 type Layer struct {
-	Digest  string
-	ChainID string
-	Size    int64
+	Digest    string
+	ChainID   string
+	Size      int64
+	MediaType string
 }
 
 // Missing returns the bytes of layers node lacks, counting a layer as
