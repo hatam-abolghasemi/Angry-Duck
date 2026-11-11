@@ -20,6 +20,10 @@ spec:
       serviceAccountName: angryduck-worker
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 30
+      {{- if .Values.worker.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -50,6 +54,8 @@ spec:
                   fieldPath: status.hostIP
             - name: NODE_EXPORTER_URL
               value: "http://$(HOST_IP):9100/metrics"
+            - name: HOST_NETWORK
+              value: {{ .Values.worker.hostNetwork | quote }}
           envFrom:
             - configMapRef:
                 name: angryduck-config

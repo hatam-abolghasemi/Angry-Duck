@@ -18,31 +18,34 @@ of an image while the registry is up.
 
 ## How it works
 
-The mirror listens on the worker's pod IP, port `18082`, and the worker
-writes a `hosts.toml` for each registry the node has images from, plus
-`MIRROR_REGISTRIES`:
+The mirror listens on port `18082` of the node's loopback (`127.0.0.1`) when
+the worker shares the node's network (the default), or of the worker's pod
+IP when it runs on the pod network. The worker writes a `hosts.toml` for each
+registry the node has images from, plus `MIRROR_REGISTRIES`:
 
 ```toml
 # managed by angryduck: ...
 server = "https://registry.example.com"
 
-[host."http://10.233.64.7:18082"]
+[host."http://127.0.0.1:18082"]
   capabilities = ["pull", "resolve"]
-  [host."http://10.233.64.7:18082".header]
+  [host."http://127.0.0.1:18082".header]
     Authorization = "Bearer <random per-pod token>"
 ```
 
-containerd runs on the host network, which reaches local pods directly. The
-token is generated when the worker starts and exists only in these files
-(mode `0600`), so containerd is the only client the mirror answers; any other
-pod gets `401`. A new pod writes new files with its own IP and token.
+containerd runs on the host network, so it reaches the loopback, or local
+pods, directly. The token is generated when the worker starts and exists only
+in these files (mode `0600`), so containerd is the only client the mirror
+answers; any other process or pod gets `401`. A new worker writes new files
+with its own token (and, on the pod network, its own IP).
 
 On SIGTERM (a rollout, an eviction, an uninstall) the worker removes the
 files it wrote, so containerd pulls from registries directly until the next
 worker writes them again. If a worker dies without SIGTERM, the files point
-at a dead pod IP until the replacement starts; containerd then falls back to
-the registry, immediately with Calico, after its dial timeout on CNIs that
-don't reject unreachable pod IPs.
+at a closed loopback port until the replacement starts, and containerd falls
+back to the registry immediately. On the pod network they point at a dead pod
+IP: containerd falls back immediately with Calico, after its dial timeout on
+CNIs that don't reject unreachable pod IPs.
 
 For each manifest or blob, by digest, the mirror:
 

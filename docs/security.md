@@ -32,8 +32,13 @@ tool that manages images, and it is the trust the worker keeps. What is
 gone is the extra kernel attack surface on top of it. Control who can push
 the worker image.
 
-The worker runs on the pod network: nothing listens on node IPs, and
-NetworkPolicy applies to it. Its only Kubernetes API permission is `get` on
+By default the worker shares the node's network (`worker.hostNetwork: true`),
+so image bytes skip the pod network. It still holds no capabilities and no
+host PID namespace: sharing the network gives it the node's addresses, not
+more privilege. Its API listens on the node's own address only (`18081`), not
+on every interface of the node, and the mirror on the node's loopback only
+(`18082`). Set `worker.hostNetwork: false` to run it on the pod network,
+where NetworkPolicy applies. Its only Kubernetes API permission is `get` on
 its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 
 ## Trust boundaries
@@ -72,10 +77,19 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
   `/status` lists every node, its images and what is moving where. Keep the
   controller's Service inside the cluster: the Helm chart's ingress and the
   example ingress expose only the webhook path, matched exactly.
-- **NetworkPolicy applies to the worker.** Ports `18081` (worker API) and
-  `18082` (mirror) are on the pod IP. A policy can restrict `18081` to the
-  Angry Duck pods and your Prometheus; containerd's traffic to `18082` comes
-  from the node itself, which most CNIs (Calico included) always allow.
+- **On the node's network** (the default), port `18081` is open on the
+  node's address to anything that can reach the node, and pod
+  NetworkPolicy doesn't cover it. Everything on it except `/healthz`,
+  `/metrics` and `/status` needs the shared token. Restrict it with a host
+  firewall or your CNI's host policies (Cilium's
+  `CiliumClusterwideNetworkPolicy` with a `nodeSelector`) to the nodes and
+  your Prometheus. The mirror (`18082`) is on the loopback, so only
+  processes on the node reach it, and it still needs containerd's token.
+- **On the pod network** (`worker.hostNetwork: false`), NetworkPolicy
+  applies. Ports `18081` and `18082` are on the pod IP. A policy can restrict
+  `18081` to the Angry Duck pods and your Prometheus; containerd's traffic to
+  `18082` comes from the node itself, which most CNIs (Calico included)
+  always allow.
 - **The mirror answers only containerd.** containerd sends a random per-pod
   token from `hosts.toml` (mode `0600`, root-only); any other pod gets `401`.
   The shared token doesn't open it. Peer fetches between mirrors go over the
@@ -115,8 +129,8 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
 - Let the chart generate both tokens, or create them yourself with at least
   32 random characters. Never run without the shared token in production.
 - Restrict the webhook ingress to your CI runners' addresses.
-- Add a NetworkPolicy that allows port `18081` only from Angry Duck pods and
-  Prometheus.
+- Allow port `18081` only from the nodes and Prometheus: a host firewall or
+  CNI host policy on the node's network, a NetworkPolicy on the pod network.
 - Use a CNI that encrypts traffic between nodes if the network isn't trusted.
 - Keep `discard_unpacked_layers = false`, so verified blobs travel instead of
   snapshots.

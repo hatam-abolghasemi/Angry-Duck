@@ -29,7 +29,8 @@ curl -s -X POST localhost:8080/webhook/preheat -H "Authorization: Bearer ${ANGRY
 
 ## Worker
 
-Port `18081` on the worker's pod IP. Endpoints marked *token* require the
+Port `18081` on the worker's pod IP, which is the node's address when the
+worker shares the node's network (the default). Endpoints marked *token* require the
 shared token as `Authorization: Bearer <token>`.
 
 | Endpoint | Auth | Called by | Description |
@@ -50,7 +51,7 @@ shared token as `Authorization: Bearer <token>`.
 | `GET /metrics` | none | Prometheus | Prometheus metrics. |
 | `GET /healthz` | none | kubelet | Liveness and readiness. |
 
-The mirror itself listens separately on `MIRROR_LISTEN_ADDR` (`:18082`, on
-the pod IP), answers only requests carrying the per-pod token containerd
+The mirror itself listens separately on `MIRROR_LISTEN_ADDR` (`18082`, on
+the node's loopback, or the pod IP on the pod network), answers only requests carrying the per-pod token containerd
 sends from `hosts.toml`, and implements the read-only part of the OCI distribution
 API for containerd.
