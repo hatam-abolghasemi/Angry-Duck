@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.12.0
+
+Images are ready sooner after their last layer lands. Nodes unpack each layer
+as soon as it and the layers below it are here, instead of all at once at
+the end; holders serve three nodes at a time instead of one; a finished
+transfer starts the next within 50 ms instead of a second; and workers share
+the node's network, so image bytes skip the pod network.
+
+### Added
+
+- **Unpacking as layers arrive** (`SPREAD_UNPACK_ENABLED`, on by default,
+  under `SPREAD_ENABLED`). Every fetch order now says where its layer sits in
+  the image (its chainID, the chainID below it and its media type). When a
+  blob lands and the layer below is unpacked, the worker unpacks it under the
+  job's lease, bottom up, one layer at a time per image, while the rest still
+  arrive. A layer is committed only if what containerd unpacked chains to
+  the chainID the image's config names. Finalize waits for a layer still
+  being unpacked, then containerd's unpack skips what is done. A layer the
+  node held before the push, and everything above it, is unpacked at
+  finalize as before; so is any layer whose early unpack fails. A dropped
+  job stops unpacking, and its lease takes the work with it. New metric:
+  `angryduck_worker_spread_unpacks_total{node,result}` (`applied`,
+  `present`, `failed`), shown on the dashboard's Delivery tab in a new
+  *Unpacking on arrival* row: layers by result, and layers unpacked per node.
+- **`WAKE_COALESCE_MS`** (50): how long spread, propagation and rescue wait
+  after a wake-up (a transfer ended, a pod got stuck) before they look again.
+- **Helm `worker.hostNetwork`** (`true`) and the worker's `HOST_NETWORK`.
+
+### Changed
+
+- **Workers share the node's network by default.** Transfers between nodes
+  skip the pod network (veth, iptables, any tunnel). The worker API binds the
+  node's own address only (`POD_IP`, port `18081`), not every interface of
+  the node, and the mirror binds the node's loopback (`127.0.0.1:18082`),
+  which is also what `hosts.toml` points at: the address no longer changes
+  when a worker restarts, so containerd never dials a dead pod IP. The worker
+  keeps every other restriction (no capabilities, no host PID, read-only root
+  filesystem). Pod NetworkPolicy no longer covers port `18081`; restrict it
+  with a host firewall or your CNI's host policies (see
+  [Security](docs/security.md)). `worker.hostNetwork: false` keeps the
+  pod-network setup of 1.8.6 to 1.11.1. Ports `18081` and `18082` must be
+  free on every node.
+- **`PROPAGATE_PER_SOURCE` defaults to 3** (was 1). One send rarely fills a
+  holder's link, since the receiver's writes into containerd are usually the
+  limit; serving from page cache costs the holder little CPU. It applies to
+  spread, whole-image propagation and spread's whole-image fallback alike.
+- **A finished transfer starts the next within 50 ms** (was 1 s), for
+  spread, propagation and rescue alike.
+
+### Upgrading
+
+- The worker DaemonSet changes to `hostNetwork: true`; Helm and
+  `k8s/daemonset-worker.yaml` both carry it. Workers rewrite their
+  `hosts.toml` files at startup, so nothing else changes on the nodes.
+- Workers before 1.12.0 ignore the new placement in fetch orders and unpack
+  at finalize; a 1.12.0 worker under an older controller does the same.
+
 ## 1.11.1
 
 Dependency updates only; nothing behaves differently.
