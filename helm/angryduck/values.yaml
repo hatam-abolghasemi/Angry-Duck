@@ -25,6 +25,11 @@ worker:
       memory: 192Mi
   tolerations:
     - operator: Exists
+  # Share the node's network: transfers skip the pod network (veth,
+  # iptables, any tunnel). The worker API then listens on the node's own
+  # address only (18081) and the mirror on the node's loopback (18082).
+  # false: the worker runs on the pod network, where NetworkPolicy applies.
+  hostNetwork: true
 
 registryCredentials:
   secretName: registry-pull
@@ -48,6 +53,7 @@ config:
   METRICS_LABEL_REGISTRY: "true"
   METRICS_EVENT_TTL_S: "15"
   CONTROLLER_LISTEN_ADDR: ":8080"
+  WAKE_COALESCE_MS: "50"
   WORKER_STALE_AFTER_S: "30"
   TARGET_TTL_S: "120"
   RANK_INTERVAL_S: "10"
@@ -92,7 +98,7 @@ config:
   PROPAGATE_INTERVAL_S: "10"
   PROPAGATE_WINDOW_S: "0"
   PROPAGATE_MAX_CONCURRENT: "8"
-  PROPAGATE_PER_SOURCE: "1"
+  PROPAGATE_PER_SOURCE: "3"
   PROPAGATE_MAX_UTILIZATION: "0.70"
   PROPAGATE_SEED_TIMEOUT_MIN_S: "120"
   PROPAGATE_SEED_TIMEOUT_MAX_S: "600"
@@ -104,6 +110,7 @@ config:
   SPREAD_BACKOFF_MAX_S: "600"
   SPREAD_TRANSFER_TIMEOUT_S: "1800"
   SPREAD_STREAM_ENABLED: "true"
+  SPREAD_UNPACK_ENABLED: "true"
   SPREAD_STREAM_MIN_MB: "32"
   SPREAD_STREAM_MAX_DEPTH: "0"
   SPREAD_EXPRESS_MAX_MB: "32"

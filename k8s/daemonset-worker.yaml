@@ -20,9 +20,13 @@ spec:
       serviceAccountName: angryduck-worker
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 30
+      # On the node's network: transfers skip the pod network. The worker API
+      # listens on the node's own address only, the mirror on its loopback.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: worker
-          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.11.1
+          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.12.0
           env:
             - name: NODE_ID
               valueFrom:
@@ -46,6 +50,8 @@ spec:
                   fieldPath: status.hostIP
             - name: NODE_EXPORTER_URL
               value: "http://$(HOST_IP):9100/metrics"
+            - name: HOST_NETWORK
+              value: "true"
           envFrom:
             - configMapRef:
                 name: angryduck-config

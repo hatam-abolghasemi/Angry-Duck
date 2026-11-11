@@ -30,7 +30,8 @@ no endpoint, no metric series of its own.
 GC_ENABLED                  image cleanup on each node
 └─ GC_RETENTION_ENABLED     one retention copy of every image that went unused
 SPREAD_ENABLED              blob-by-blob spreading
-└─ SPREAD_STREAM_ENABLED    serving blobs to peers while still receiving them
+├─ SPREAD_STREAM_ENABLED    serving blobs to peers while still receiving them
+└─ SPREAD_UNPACK_ENABLED    unpacking each layer as soon as it and the layers below are here
 PROPAGATE_ENABLED           whole-image propagation
 RESCUE_ENABLED              rescue of pods stuck on pulls
 MIRROR_ENABLED              the pull-only registry mirror
@@ -68,6 +69,7 @@ holds it.
 | Variable | Default | Description |
 |---|---|---|
 | `CONTROLLER_LISTEN_ADDR` | `:8080` | Listen address. |
+| `WAKE_COALESCE_MS` | `50` | How long spread, propagation and rescue wait after something they were waiting for happens (a transfer ended, a pod got stuck) before they look again, so events arriving together share one look. Every millisecond here is a freed link sitting idle; each look costs a fraction of a millisecond of CPU per running spread. |
 | `WORKER_STALE_AFTER_S` | `30` | A worker silent for this long is ignored until it reports again. |
 
 ## Preheat
@@ -110,6 +112,7 @@ How pushed images reach every node blob by blob. See
 | `SPREAD_BACKOFF_MAX_S` | `600` | Cap for that doubling. |
 | `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller forgets a transfer nobody reported on a minute after. |
 | `SPREAD_STREAM_ENABLED` | `true` | A node still receiving a large blob serves it on to peers as the bytes arrive ([streaming](propagation.md#streaming-large-blobs)). Read by the controller and the worker; a worker streams only with containerd's content store mounted. |
+| `SPREAD_UNPACK_ENABLED` | `true` | A node unpacks each layer as soon as its blob and the layers below it are here, while the rest still arrive, instead of all at once when the image registers ([unpacking](propagation.md#unpacking-as-layers-arrive)). Read by the worker. |
 | `SPREAD_STREAM_MIN_MB` | `32` | Only blobs at least this large are streamed; smaller ones go node to node whole, as before. |
 | `SPREAD_STREAM_MAX_DEPTH` | `0` | Longest chain of nodes receiving a blob through each other: 1 is the node getting it from the registry or a full copy, 2 a node streaming from it, and so on. `0`: no cap but the number of nodes. `1`: nothing is streamed. |
 | `SPREAD_SLOW_FACTOR` | `2` | Slow-chain guard: a transfer running more than this many times its expected time (its size at the typical speed of its path) is late. A late streamed registry pull is raced; a late stream is offered a restart from a holder, which the receiver takes only if it should finish sooner. `0` turns the guard off. |
@@ -127,10 +130,10 @@ The whole-image fallback, and the limits spread shares.
 | Variable | Default | Description |
 |---|---|---|
 | `PROPAGATE_ENABLED` | `true` | Whole-image propagation, used when an image can't spread blob by blob. Blob-by-blob spreading is controlled by `SPREAD_ENABLED`; turn both off to seed only. |
-| `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. A finished transfer also advances them, after about a second. |
+| `PROPAGATE_INTERVAL_S` | `10` | How often propagations advance. A finished transfer also advances them, after `WAKE_COALESCE_MS`. |
 | `PROPAGATE_WINDOW_S` | `0` | How long to keep spreading a push. `0` means until done or superseded. |
 | `PROPAGATE_MAX_CONCURRENT` | `8` | Whole-image transfers in flight cluster-wide. Spread has no cluster-wide cap. |
-| `PROPAGATE_PER_SOURCE` | `1` | Concurrent sends per source node, spread included. For spread it is the only limit on peer transfers: a receiver takes any number of different blobs at once. |
+| `PROPAGATE_PER_SOURCE` | `3` | Concurrent sends per source node, spread included. For spread it is the only limit on peer transfers: a receiver takes any number of different blobs at once. One send rarely fills a source's link (the receiver's writes into containerd are usually the limit); three keep a 10G link busy while serving from page cache costs little CPU. Raise it on faster links. |
 | `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this receive nothing new until cleanup makes room. A spread counts as complete without them and stays open for them. Keep it at or below `GC_HIGH_UTILIZATION`. |
 | `PROPAGATE_SEED_TIMEOUT_MIN_S` | `120` | A seed still pulling after `max(MIN, FACTOR × the first seed's pull time)` is cancelled, and peers serve it instead. |
 | `PROPAGATE_SEED_TIMEOUT_MAX_S` | `600` | The timeout while no seed has finished yet. |
@@ -161,11 +164,12 @@ The whole-image fallback, and the limits spread shares.
 |---|---|---|
 | `NODE_ID` | hostname | Node name. Set from `spec.nodeName`. |
 | `SELF_ADDRESS` | *(required)* | Address the controller and peers reach this worker at. Set from `status.podIP`. |
-| `WORKER_LISTEN_ADDR` | `:18081` | Listen address. |
+| `WORKER_LISTEN_ADDR` | `:18081` | Listen address. With `HOST_NETWORK=true`, an address without a host is bound to `POD_IP` (the node's address), not to every interface of the node. |
+| `HOST_NETWORK` | `false` | Set by the DaemonSet when the worker shares the node's network (Helm `worker.hostNetwork`, `true` by default): the worker API binds the node's address only and the mirror the node's loopback. |
 | `CONTROLLER_URL` | `http://angryduck-controller:8080` | Controller base URL. |
 | `REPORT_INTERVAL_S` | `15` | How often the worker reports. |
 | `NODE_EXPORTER_URL` | `http://localhost:9100/metrics` | Source of root filesystem utilization. The DaemonSet sets it to `http://$(HOST_IP):9100/metrics`. |
-| `POD_IP`, `POD_NAMESPACE`, `HOST_IP` | from the downward API | Set by the DaemonSet. `POD_IP` is the mirror's address in `hosts.toml`. |
+| `POD_IP`, `POD_NAMESPACE`, `HOST_IP` | from the downward API | Set by the DaemonSet. On the pod network `POD_IP` is the mirror's address in `hosts.toml`; on the node's network it is the node's address, which the worker API binds. |
 | `DAEMONSET_NAME` | `angryduck-worker` | The DaemonSet the worker checks on shutdown: gone or being deleted means an uninstall, and the worker cleans up the node. |
 | `CONTAINER_RUNTIME` | `containerd` | Only containerd is supported. `crictl` and `ctr`, from older configurations, are accepted and mean the same. |
 | `CONTAINER_RUNTIME_ENDPOINT` | `unix:///run/containerd/containerd.sock` | containerd's socket, as mounted into the worker. |
@@ -185,8 +189,8 @@ The whole-image fallback, and the limits spread shares.
 | Variable | Default | Description |
 |---|---|---|
 | `MIRROR_ENABLED` | `true` | Run the mirror and manage containerd's `hosts.toml` files. Needs containerd's CRI registry `config_path` (see [Mirror](mirror.md#requirements)). |
-| `MIRROR_LISTEN_ADDR` | `:18082` | Listen address, on the pod network. A loopback address, from older configurations, is turned into `:<port>`. |
-| `MIRROR_ADVERTISE_ADDR` | `$POD_IP:<port>` | The address written into `hosts.toml`. |
+| `MIRROR_LISTEN_ADDR` | `:18082` | Listen address. With `HOST_NETWORK=true`, an address without a host means `127.0.0.1:<port>`. On the pod network, a loopback address, from older configurations, is turned into `:<port>`. |
+| `MIRROR_ADVERTISE_ADDR` | the listen address with `HOST_NETWORK=true`, else `$POD_IP:<port>` | The address written into `hosts.toml`. |
 | `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | Where `hosts.toml` files are written. containerd's CRI registry `config_path` must point here. |
 | `MIRROR_REGISTRIES` | *(empty)* | Registries to mirror even before the node uses them. |
 | `MIRROR_RESOLVE_ENABLED` | `true` | Resolve tags too: the registry's answer when it gives one, else the newest copy a node holds (see [Mirror](mirror.md#tags)). |

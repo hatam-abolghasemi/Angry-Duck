@@ -172,13 +172,14 @@ A worker can't receive its own image. If a node can't reach the registry, a
 new Angry Duck version gets stuck there and the DaemonSet rollout stops at
 that node. Copy the worker image from a healthy worker that holds its blobs,
 then delete the stuck pod so the DaemonSet recreates it with the image already
-local. Workers listen on their pod IPs; find a healthy one with
+local. Workers listen on their pod IPs (the node's address on the node's
+network); find a healthy one with
 `kubectl -n angryduck get pods -o wide`.
 
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.11.1
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.12.0
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

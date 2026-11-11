@@ -8,8 +8,9 @@
 - **node-exporter** on every node with host networking, on port `9100`.
   Workers read disk usage from it at the node's IP.
 - **Network**: workers reachable from each other and from the controller on
-  port `18081` of their pod IPs, and node-exporter reachable from pods at
-  the node IP.
+  port `18081` of their pod IPs (the node IPs, as the worker shares the
+  node's network by default), and node-exporter reachable at the node IP.
+  Ports `18081` and `18082` must be free on every node.
 - **Registry credentials**: a dockerconfigjson covering every private registry
   you push to.
 - Optional: the **Prometheus Operator**, for the included ServiceMonitors, and
@@ -34,11 +35,11 @@ and adapt them to your cluster.
 ### 1. Get the images
 
 Every release publishes both images to GitHub Container Registry, tagged with
-the version (`1.11.1`) and `latest`:
+the version (`1.12.0`) and `latest`:
 
 ```text
-ghcr.io/hatam-abolghasemi/angry-duck-controller:1.11.1
-ghcr.io/hatam-abolghasemi/angry-duck-worker:1.11.1
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.12.0
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.12.0
 ```
 
 They are public, so kubelet needs no `imagePullSecrets` for them. If you
@@ -50,10 +51,10 @@ To build and push your own instead:
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.11.1 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.11.1 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.11.1
-docker push $REGISTRY/angry-duck-worker:1.11.1
+docker build -t $REGISTRY/angry-duck-controller:1.12.0 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.12.0 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.12.0
+docker push $REGISTRY/angry-duck-worker:1.12.0
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and
