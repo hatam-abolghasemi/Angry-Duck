@@ -34,6 +34,11 @@ var (
 		"Finished propagations: complete (every eligible node has the image), superseded (a newer tag of the same repo was pushed) or expired (PROPAGATE_WINDOW_S ran out).",
 		"result",
 	)
+	companionTransfersTotal = metrics.NewCounterVec(
+		"angryduck_controller_companion_transfers_total",
+		"Companion images copied to a node from its peers, by result: success or failure.",
+		"result",
+	)
 	seedTimeoutsTotal = metrics.NewCounterVec(
 		"angryduck_controller_seed_timeouts_total",
 		"Seeds whose registry pull took too long: the pull was cancelled and the node got the image from a peer instead.",
@@ -98,6 +103,7 @@ type Propagator struct {
 	seeds    func(image string) map[string]time.Time // seed -> ordered at
 	waiting  func() map[string]map[string]bool       // image -> nodes with a pod waiting for it
 	resolver LayerResolver
+	busy     func() bool // a push is spreading: companions wait
 
 	mu        sync.Mutex
 	jobs      map[string]*propagation
@@ -118,6 +124,11 @@ type propagation struct {
 	cancelled     map[string]bool // seeds whose pull we cancelled
 	recorded      map[string]bool // deliveries in the image history
 	looked        bool            // a tick has seen the job
+	// push: started for a pushed image. keep: a companion image kept on
+	// every node (SetKeep). A keep job never ends on its own, isn't in the
+	// image history and runs only after the pushes; one that is both
+	// behaves like a push until the push is done.
+	push, keep bool
 }
 
 // NewPropagator builds a propagator.
@@ -125,6 +136,8 @@ func NewPropagator(registry *Registry, token string, cfg PropagatorConfig) *Prop
 	for _, r := range []string{"complete", "superseded", "expired"} {
 		propagationsTotal.Add(0, r)
 	}
+	companionTransfersTotal.Add(0, "success")
+	companionTransfersTotal.Add(0, "failure")
 	registry.OnNewNode(func(node string) {
 		propagationTransfersTotal.Add(0, node, "success")
 		propagationTransfersTotal.Add(0, node, "failure")
@@ -169,6 +182,46 @@ func (p *Propagator) SetWaiting(f func() map[string]map[string]bool) { p.waiting
 // SetLayerResolver lets the propagator order receivers by missing bytes.
 func (p *Propagator) SetLayerResolver(r LayerResolver) { p.resolver = r }
 
+// SetBusy tells the propagator when a push is spreading (the spreader's
+// Active): companion images wait for it, so they never compete with a
+// rollout.
+func (p *Propagator) SetBusy(f func() bool) { p.busy = f }
+
+// SetKeep makes images the companion images to keep on every eligible
+// node, replacing the previous set: a keep job starts for each new one and
+// goes for each one no longer there. Pushes are never superseded by them.
+func (p *Propagator) SetKeep(images map[string]bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for img, job := range p.jobs {
+		if job.keep && !images[img] {
+			if job.push {
+				job.keep = false
+			} else {
+				delete(p.jobs, img)
+				logging.Infof("angryduck-controller: propagator: image=%s is no longer a companion", img)
+			}
+		}
+	}
+	for img := range images {
+		if job, ok := p.jobs[img]; ok {
+			job.keep = true
+			continue
+		}
+		p.jobs[img] = newPropagation(img)
+		p.jobs[img].keep = true
+	}
+}
+
+func newPropagation(image string) *propagation {
+	return &propagation{
+		image: image, started: time.Now(),
+		inFlight: map[string]bool{}, failures: map[string]int{},
+		next: map[string]time.Time{}, done: map[string]bool{}, cancelled: map[string]bool{},
+		recorded: map[string]bool{},
+	}
+}
+
 // Start begins propagating image. A job for another tag of the same repo
 // is superseded: spreading a version that is about to be replaced
 // everywhere would only fill disks.
@@ -176,12 +229,19 @@ func (p *Propagator) Start(image string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if job, ok := p.jobs[image]; ok {
-		job.started = time.Now()
+		if !job.push {
+			// A companion until now: its history starts with this push.
+			job.recorded, job.looked = map[string]bool{}, false
+		}
+		job.started, job.push = time.Now(), true
 		recordSpreadStart(image, job.started)
 		return
 	}
 	repo := imageref.Repo(image)
 	for other, job := range p.jobs {
+		if job.keep {
+			continue // companion images stay whatever is pushed
+		}
 		if other != image && repo != "" && imageref.Repo(other) == repo {
 			logging.Infof("angryduck-controller: propagator: image=%s superseded by image=%s", other, image)
 			propagationsTotal.Inc("superseded")
@@ -189,12 +249,8 @@ func (p *Propagator) Start(image string) {
 			delete(p.jobs, other)
 		}
 	}
-	p.jobs[image] = &propagation{
-		image: image, started: time.Now(),
-		inFlight: map[string]bool{}, failures: map[string]int{},
-		next: map[string]time.Time{}, done: map[string]bool{}, cancelled: map[string]bool{},
-		recorded: map[string]bool{},
-	}
+	p.jobs[image] = newPropagation(image)
+	p.jobs[image].push = true
 	recordSpreadStart(image, p.jobs[image].started)
 	if p.cfg.Window > 0 {
 		logging.Infof("angryduck-controller: propagator: will spread image=%s to every eligible node for %s", image, p.cfg.Window)
@@ -343,17 +399,33 @@ func (p *Propagator) tick(ctx context.Context) {
 
 	p.mu.Lock()
 	images := make([]string, 0, len(p.jobs))
-	for img := range p.jobs {
+	keepOnly := map[string]bool{}
+	for img, job := range p.jobs {
 		images = append(images, img)
+		if !job.push {
+			keepOnly[img] = true
+		}
 	}
 	p.mu.Unlock()
-	sort.Strings(images)
+	// Pushes first: companions get what transfer slots are left.
+	sort.Slice(images, func(i, j int) bool {
+		if keepOnly[images[i]] != keepOnly[images[j]] {
+			return !keepOnly[images[i]]
+		}
+		return images[i] < images[j]
+	})
+	pushing := p.busy != nil && p.busy()
 
 	// Layer lookups are cached by the resolver, but can still go to the
 	// registry: do them without holding the lock.
 	layers := make(map[string][]layerindex.Layer, len(images))
 	if p.resolver != nil {
 		for _, img := range images {
+			if keepOnly[img] {
+				// Companions spread from peers only and in no hurry: no
+				// registry reads for them (public registries included).
+				continue
+			}
 			rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			if ls, err := p.resolver.Layers(rctx, img, p.cfg.Platform); err == nil {
 				layers[img] = ls
@@ -376,8 +448,31 @@ func (p *Propagator) tick(ctx context.Context) {
 		if !ok {
 			continue // superseded meanwhile
 		}
+		if !job.push {
+			// A delivery counts until the node's report shows the image;
+			// after that the report decides, so a copy that cleanup later
+			// removes under disk pressure is sent again.
+			for _, w := range fresh {
+				if job.done[w.NodeID] && w.HasImage(img) {
+					delete(job.done, w.NodeID)
+				}
+			}
+		}
 		v := p.viewLocked(job, fresh, seeds[img], now)
 		inFlight := len(job.inFlight)
+		if !job.push {
+			// A companion: no history, no end, nothing new while a push
+			// spreads, and only the transfer slots pushes left (they come
+			// first in images).
+			if pushing || len(v.holders) == 0 {
+				continue
+			}
+			p.order(img, v.missing, waiting[img], layers[img])
+			if !p.sendLocked(ctx, job, v, nil, layers[img], now) {
+				return
+			}
+			continue
+		}
 		for _, node := range v.have {
 			if job.recorded[node] || job.done[node] {
 				continue
@@ -398,7 +493,11 @@ func (p *Propagator) tick(ctx context.Context) {
 				img, len(v.have), now.Sub(job.started).Round(time.Second), v.skipped)
 			propagationsTotal.Inc("complete")
 			recordSpreadEnd(img, "complete", now.Sub(job.started))
-			delete(p.jobs, img)
+			if job.keep {
+				job.push = false // a companion too: kept from now on
+			} else {
+				delete(p.jobs, img)
+			}
 			continue
 		}
 		expired := p.cfg.Window > 0 && now.Sub(job.started) > p.cfg.Window
@@ -407,7 +506,11 @@ func (p *Propagator) tick(ctx context.Context) {
 				img, len(v.missing), nodeIDs(v.missing))
 			propagationsTotal.Inc("expired")
 			recordSpreadEnd(img, "expired", now.Sub(job.started))
-			delete(p.jobs, img)
+			if job.keep {
+				job.push = false
+			} else {
+				delete(p.jobs, img)
+			}
 			continue
 		}
 		imageSpreadSeconds.Hold(now.Sub(job.started).Seconds(), img, "running")
@@ -420,30 +523,39 @@ func (p *Propagator) tick(ctx context.Context) {
 			continue // winding down, or the seeds haven't reported the image yet
 		}
 		p.order(img, v.missing, waiting[img], layers[img])
-
-		for _, target := range v.missing {
-			if now.Before(job.next[target.NodeID]) {
-				continue
-			}
-			sources := p.pickSourcesLocked(v.holders, target.NodeID, layers[img])
-			if len(sources) == 0 {
-				break // every holder is busy serving; more will free up next tick
-			}
-			select {
-			case p.sem <- struct{}{}:
-			default:
-				return // cluster-wide transfer limit reached
-			}
-			_, isSeed := seeds[img][target.NodeID]
-			job.inFlight[target.NodeID] = true
-			p.perSource[sources[0].NodeID]++
-			p.wg.Add(1)
-			go p.send(ctx, job, target, sources, isSeed && !job.cancelled[target.NodeID])
-			if isSeed {
-				job.cancelled[target.NodeID] = true
-			}
+		if !p.sendLocked(ctx, job, v, seeds[img], layers[img], now) {
+			return
 		}
 	}
+}
+
+// sendLocked orders transfers to job's missing nodes while holders and
+// cluster-wide slots last. It returns false once the cluster-wide limit is
+// reached. Caller holds p.mu.
+func (p *Propagator) sendLocked(ctx context.Context, job *propagation, v propView, seeds map[string]time.Time, layers []layerindex.Layer, now time.Time) bool {
+	for _, target := range v.missing {
+		if now.Before(job.next[target.NodeID]) {
+			continue
+		}
+		sources := p.pickSourcesLocked(v.holders, target.NodeID, layers)
+		if len(sources) == 0 {
+			return true // every holder is busy serving; more will free up next tick
+		}
+		select {
+		case p.sem <- struct{}{}:
+		default:
+			return false // cluster-wide transfer limit reached
+		}
+		_, isSeed := seeds[target.NodeID]
+		job.inFlight[target.NodeID] = true
+		p.perSource[sources[0].NodeID]++
+		p.wg.Add(1)
+		go p.send(ctx, job, target, sources, isSeed && !job.cancelled[target.NodeID])
+		if isSeed {
+			job.cancelled[target.NodeID] = true
+		}
+	}
+	return true
 }
 
 // skippedExcluded is the part of skipped that is excluded by name (never
@@ -507,6 +619,14 @@ func (p *Propagator) send(ctx context.Context, job *propagation, target *workerE
 	p.mu.Lock()
 	delete(job.inFlight, target.NodeID)
 	p.perSource[sources[0].NodeID]--
+	push := job.push
+	if !push {
+		if err != nil {
+			companionTransfersTotal.Inc("failure")
+		} else {
+			companionTransfersTotal.Inc("success")
+		}
+	}
 	if err != nil {
 		job.failures[target.NodeID]++
 		wait := p.cfg.RetryAfter
@@ -528,8 +648,10 @@ func (p *Propagator) send(ctx context.Context, job *propagation, target *workerE
 	since := job.started
 	job.recorded[target.NodeID] = true
 	p.mu.Unlock()
-	recordTransfer(job.image, target.NodeID, "propagate", res.Bytes, time.Since(start).Seconds())
-	recordDelivery(job.image, target.NodeID, "propagate", since, time.Now())
+	if push {
+		recordTransfer(job.image, target.NodeID, "propagate", res.Bytes, time.Since(start).Seconds())
+		recordDelivery(job.image, target.NodeID, "propagate", since, time.Now())
+	}
 	logging.Infof("angryduck-controller: propagator: node=%s got image=%s from %s (%d blob(s), %d snapshot(s), %d bytes, %s)",
 		target.NodeID, job.image, orDash(res.Source), res.Blobs, res.Snapshots, res.Bytes, time.Since(start).Round(time.Millisecond))
 	propagationTransfersTotal.Inc(target.NodeID, "success")
@@ -577,7 +699,7 @@ func (p *Propagator) Status() []model.PropagationStatus {
 	for _, job := range p.jobs {
 		v := p.viewLocked(job, fresh, seeds[job.image], now)
 		st := model.PropagationStatus{
-			Image: job.image, StartedAt: job.started,
+			Image: job.image, StartedAt: job.started, Companion: job.keep,
 			Have: sorted(v.have), Missing: sorted(nodeIDs(v.missing)), InFlight: sorted(v.inFlight),
 			Seeding: sorted(v.seeding), Skipped: sorted(v.skipped), Failing: sorted(v.failing),
 		}

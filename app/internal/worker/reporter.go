@@ -46,6 +46,39 @@ type Reporter struct {
 	stateOn  bool
 	inUse    []model.ImageRef
 	retained map[string]int64
+
+	// Companion images (see SetCompanions): compOn once the cleanup
+	// reports them; it and onCompanions are under stateMu. compHash, the
+	// hash of the set the controller last sent, belongs to the Run
+	// goroutine.
+	compOn       bool
+	companions   []model.ImageRef
+	compHash     string
+	onCompanions func(model.CompanionSet)
+}
+
+// SetCompanions hands the reporter the companion images running here (the
+// image cleanup's companion state) and sends a report right away. The
+// slice is kept as given and never modified.
+func (rp *Reporter) SetCompanions(refs []model.ImageRef) {
+	rp.stateMu.Lock()
+	rp.compOn, rp.companions = true, refs
+	rp.stateMu.Unlock()
+	rp.Kick()
+}
+
+// OnCompanions registers fn to take each companion set the controller
+// sends (the image cleanup's SetCompanions).
+func (rp *Reporter) OnCompanions(fn func(model.CompanionSet)) {
+	rp.stateMu.Lock()
+	rp.onCompanions = fn
+	rp.stateMu.Unlock()
+}
+
+func (rp *Reporter) companionHook() func(model.CompanionSet) {
+	rp.stateMu.Lock()
+	defer rp.stateMu.Unlock()
+	return rp.onCompanions
 }
 
 // SetImageState hands the reporter this node's in-use images and
@@ -58,10 +91,10 @@ func (rp *Reporter) SetImageState(inUse []model.ImageRef, retained map[string]in
 	rp.Kick()
 }
 
-func (rp *Reporter) imageState() (on bool, inUse []model.ImageRef, retained map[string]int64) {
+func (rp *Reporter) imageState() (on bool, inUse []model.ImageRef, retained map[string]int64, compOn bool, companions []model.ImageRef) {
 	rp.stateMu.Lock()
 	defer rp.stateMu.Unlock()
-	return rp.stateOn, rp.inUse, rp.retained
+	return rp.stateOn, rp.inUse, rp.retained, rp.compOn, rp.companions
 }
 
 // SetStreams makes reports tell the controller this node streams spread
@@ -178,8 +211,12 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		Streams:     rp.streams,
 		Timestamp:   time.Now(),
 	}
-	stateOn, inUse, retained := rp.imageState()
-	switch invHash := inventoryHash(repos, images, stateOn, inUse, retained); {
+	onCompanions := rp.companionHook()
+	if onCompanions != nil {
+		report.CompanionsHash = rp.compHash
+	}
+	stateOn, inUse, retained, compOn, companions := rp.imageState()
+	switch invHash := inventoryHash(repos, images, stateOn, inUse, retained, compOn, companions); {
 	case !listed:
 		// No listing this time: keep whatever the controller holds
 		// rather than telling it this node has no images.
@@ -189,6 +226,7 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	default:
 		report.Repos, report.Images, report.InventoryHash = repos, images, invHash
 		report.ImageState, report.InUse, report.Retained = stateOn, inUse, retained
+		report.CompanionState, report.Companions = compOn, companions
 	}
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -219,6 +257,10 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 		ack = model.ReportAck{} // an old or odd controller: send everything next time
 	}
 	rp.ackedInv = ack.InventoryHash
+	if ack.Companions != nil && onCompanions != nil {
+		rp.compHash = ack.Companions.Hash
+		onCompanions(*ack.Companions)
+	}
 	if rp.layers != nil {
 		rp.layers.Ack(ack, layers)
 		if layers != nil {
@@ -285,8 +327,9 @@ func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []st
 }
 
 // inventoryHash identifies a sorted inventory, with the image state when
-// there is one (inUse sorted; retained in any order).
-func inventoryHash(repos, images []string, stateOn bool, inUse []model.ImageRef, retained map[string]int64) string {
+// there is one (inUse sorted; retained in any order) and the companions
+// when reported (sorted).
+func inventoryHash(repos, images []string, stateOn bool, inUse []model.ImageRef, retained map[string]int64, compOn bool, companions []model.ImageRef) string {
 	h := sha256.New()
 	for _, s := range repos {
 		h.Write([]byte(s))
@@ -318,6 +361,19 @@ func inventoryHash(repos, images []string, stateOn bool, inUse []model.ImageRef,
 			h.Write([]byte(d))
 			h.Write([]byte{0})
 			h.Write(strconv.AppendInt(buf[:0], retained[d], 10))
+			h.Write([]byte{0})
+		}
+	}
+	if compOn {
+		// Absent with companions off: such a worker hashes as before.
+		h.Write([]byte{4})
+		var buf [20]byte
+		for _, r := range companions {
+			h.Write([]byte(r.Digest))
+			h.Write([]byte{0})
+			h.Write([]byte(r.Name))
+			h.Write([]byte{0})
+			h.Write(strconv.AppendInt(buf[:0], r.Size, 10))
 			h.Write([]byte{0})
 		}
 	}

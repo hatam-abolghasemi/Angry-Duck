@@ -53,15 +53,53 @@ type WorkerReport struct {
 	InUse []ImageRef `json:"in_use,omitempty"`
 	// Retained is the images this node keeps as their cluster's retention
 	// copy: target digest to when the copy expires (Unix seconds).
-	Retained  map[string]int64 `json:"retained,omitempty"`
-	Timestamp time.Time        `json:"timestamp"`
+	Retained map[string]int64 `json:"retained,omitempty"`
+	// CompanionState says Companions is reported: the worker's cleanup
+	// runs with companions on. Companions is every image this node runs
+	// beside an app image in the same pod (see CompanionSet), with its
+	// size, sorted by digest. Left out with the rest of the inventory
+	// while InventoryOmitted.
+	CompanionState bool       `json:"companion_state,omitempty"`
+	Companions     []ImageRef `json:"companions,omitempty"`
+	// CompanionsHash is the hash of the CompanionSet this worker holds
+	// ("" none yet): the controller sends the set only when it differs.
+	CompanionsHash string    `json:"companions_hash,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
 }
 
 // ImageRef is one image as retention tracks it: the digest its names
-// point at (an index or a manifest) and one of those names.
+// point at (an index or a manifest) and one of those names. Size is the
+// image's size on the node in bytes, reported for companion images only
+// (0: unknown).
 type ImageRef struct {
 	Digest string `json:"digest"`
 	Name   string `json:"name"`
+	Size   int64  `json:"size,omitempty"`
+}
+
+// CompanionSet is the cluster's companion images, as the controller sends
+// them to workers in a report ack: the target digests image cleanup keeps
+// on every node (no age rule; removed last under disk pressure), and the
+// app registries workers use to tell companions apart. Hash identifies
+// the set; a worker echoes the one it holds in CompanionsHash. Digests
+// count only when Ready: a controller that just started sends the app
+// registries first, and workers keep the digests they hold until every
+// node has reported to it.
+type CompanionSet struct {
+	Hash          string   `json:"hash"`
+	Ready         bool     `json:"ready,omitempty"`
+	Digests       []string `json:"digests,omitempty"`
+	AppRegistries []string `json:"app_registries,omitempty"`
+}
+
+// CompanionStatus is one companion image, for /status.
+type CompanionStatus struct {
+	Image   string   `json:"image"`
+	Digest  string   `json:"digest"`
+	Size    int64    `json:"size,omitempty"`
+	Running []string `json:"running"`          // nodes where a pod runs it beside an app image
+	Kept    bool     `json:"kept"`             // within COMPANION_MAX_MB: spread and kept everywhere
+	Reason  string   `json:"reason,omitempty"` // why not kept
 }
 
 // RetainOrder tells a worker to keep an image as the cluster's retention
@@ -121,6 +159,10 @@ type ReportAck struct {
 	// matches. Empty from controllers that predate it, which always need
 	// the full inventory.
 	InventoryHash string `json:"inventory_hash,omitempty"`
+	// Companions is the cluster's companion images, sent when the worker's
+	// CompanionsHash differs and the controller has heard from every node
+	// since it started. Nil: keep what you hold.
+	Companions *CompanionSet `json:"companions,omitempty"`
 }
 
 // PreheatRequest is the payload the CI/CD pipeline sends right after
@@ -176,6 +218,7 @@ type ControllerStatus struct {
 	Rescues      []RescueStatus      `json:"rescues,omitempty"`
 	Propagations []PropagationStatus `json:"propagations,omitempty"`
 	Spreads      []SpreadStatus      `json:"spreads,omitempty"`
+	Companions   []CompanionStatus   `json:"companions,omitempty"`
 	Retention    []RetentionStatus   `json:"retention,omitempty"`
 }
 
@@ -183,13 +226,14 @@ type ControllerStatus struct {
 type PropagationStatus struct {
 	Image     string    `json:"image"`
 	StartedAt time.Time `json:"started_at"`
-	EndsAt    time.Time `json:"ends_at,omitempty"` // zero: no window, runs until complete or superseded
-	Have      []string  `json:"have"`              // eligible nodes that have it
-	Missing   []string  `json:"missing"`           // eligible nodes still without it
-	InFlight  []string  `json:"in_flight"`         // nodes receiving it right now
-	Seeding   []string  `json:"seeding,omitempty"` // seeds still pulling it from the registry
-	Skipped   []string  `json:"skipped,omitempty"` // nodes left out (excluded or too full)
-	Failing   []string  `json:"failing,omitempty"` // nodes whose last attempt failed
+	EndsAt    time.Time `json:"ends_at,omitempty"`   // zero: no window, runs until complete or superseded
+	Have      []string  `json:"have"`                // eligible nodes that have it
+	Missing   []string  `json:"missing"`             // eligible nodes still without it
+	InFlight  []string  `json:"in_flight"`           // nodes receiving it right now
+	Seeding   []string  `json:"seeding,omitempty"`   // seeds still pulling it from the registry
+	Skipped   []string  `json:"skipped,omitempty"`   // nodes left out (excluded or too full)
+	Failing   []string  `json:"failing,omitempty"`   // nodes whose last attempt failed
+	Companion bool      `json:"companion,omitempty"` // a companion image, kept on every node
 }
 
 // RescueStatus is the rescuer's view of one image one node can't pull.
@@ -277,9 +321,12 @@ type BlobExportRequest struct {
 }
 
 // Holder is a worker that holds a blob, as /layers/holders returns it.
+// Arriving marks one still receiving it in a spread: it streams the blob
+// from /spread/content as the bytes land, not from /mirror/content.
 type Holder struct {
-	NodeID  string `json:"node_id"`
-	Address string `json:"address"`
+	NodeID   string `json:"node_id"`
+	Address  string `json:"address"`
+	Arriving bool   `json:"arriving,omitempty"`
 }
 
 // TagHolders is the controller's answer to a mirror resolving a tag

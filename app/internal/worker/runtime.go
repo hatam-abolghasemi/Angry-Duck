@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -225,6 +226,92 @@ func (r criRuntime) ListInUseImages() ([]string, error) {
 		ready[s.GetId()] = true
 	}
 	return inUseImages(cs.GetContainers(), ready), nil
+}
+
+// PodImages is one pod's containers, each as the image references the
+// runtime gives for it (tag, user-specified and image ID forms).
+type PodImages [][]string
+
+// PodRuntime is what companion images need from the runtime on top of
+// Runtime. criRuntime has it.
+type PodRuntime interface {
+	// ListInUsePods is ListInUseImages grouped by pod: the same two CRI
+	// calls, the same containers.
+	ListInUsePods() ([]PodImages, error)
+	// ImageSize is image's size on this node, in bytes.
+	ImageSize(image string) (int64, error)
+}
+
+// ListInUsePods returns, per pod, the images of the containers image
+// cleanup must keep (see ListInUseImages).
+func (r criRuntime) ListInUsePods() ([]PodImages, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listingTimeout)
+	defer cancel()
+	release, err := acquireListing(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	sb, err := r.rt.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{Filter: &runtimeapi.PodSandboxFilter{
+		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
+	}})
+	if err != nil {
+		return nil, fmt.Errorf("listing pod sandboxes: %w", err)
+	}
+	cs, err := r.rt.ListContainers(ctx, &runtimeapi.ListContainersRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("listing containers: %w", err)
+	}
+	ready := make(map[string]bool, len(sb.GetItems()))
+	for _, s := range sb.GetItems() {
+		ready[s.GetId()] = true
+	}
+	return inUsePods(cs.GetContainers(), ready), nil
+}
+
+// inUsePods is the selection half of ListInUsePods: the containers
+// inUseImages keeps, grouped by pod sandbox, in a stable order.
+func inUsePods(cs []*runtimeapi.Container, readySandbox map[string]bool) []PodImages {
+	byPod := map[string]PodImages{}
+	var order []string
+	for _, c := range cs {
+		if c.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING && !readySandbox[c.GetPodSandboxId()] {
+			continue
+		}
+		var refs []string
+		for _, ref := range [...]string{c.GetImage().GetImage(), c.GetImage().GetUserSpecifiedImage(), c.GetImageRef()} {
+			if ref != "" && !slices.Contains(refs, ref) {
+				refs = append(refs, ref)
+			}
+		}
+		if len(refs) == 0 {
+			continue
+		}
+		id := c.GetPodSandboxId()
+		if _, ok := byPod[id]; !ok {
+			order = append(order, id)
+		}
+		byPod[id] = append(byPod[id], refs)
+	}
+	out := make([]PodImages, 0, len(order))
+	for _, id := range order {
+		out = append(out, byPod[id])
+	}
+	return out
+}
+
+// ImageSize asks the runtime for image's size on this node.
+func (r criRuntime) ImageSize(image string) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listingTimeout)
+	defer cancel()
+	resp, err := r.images.ImageStatus(ctx, &runtimeapi.ImageStatusRequest{Image: &runtimeapi.ImageSpec{Image: image}})
+	if err != nil {
+		return 0, err
+	}
+	if resp.GetImage() == nil {
+		return 0, fmt.Errorf("%s isn't here", image)
+	}
+	return int64(resp.GetImage().GetSize()), nil
 }
 
 // inUseImages is the selection half of ListInUseImages, split out to be

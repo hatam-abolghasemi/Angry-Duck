@@ -21,6 +21,7 @@ type Server struct {
 	propagator *Propagator // nil when propagation is off
 	spreader   *Spreader   // nil when spreading is off
 	retainer   *Retainer   // nil when retention is off
+	companions *Companions // nil when companions are off
 	tags       *tagLookup  // nil when mirror resolve is off
 	auth       *sharedtoken.Auth
 	webhook    *sharedtoken.Auth // CI's token for /webhook/preheat
@@ -60,11 +61,12 @@ func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "digest required", http.StatusBadRequest)
 		return
 	}
-	var spreading []string
+	var spreading, arriving []string
 	if s.spreader != nil {
 		spreading = s.spreader.Holders(digest)
+		arriving = s.spreader.Arriving(digest)
 	}
-	holders := s.registry.Holders(digest, r.URL.Query().Get("exclude"), spreading)
+	holders := s.registry.Holders(digest, r.URL.Query().Get("exclude"), spreading, arriving)
 	if holders == nil {
 		holders = []model.Holder{}
 	}
@@ -73,6 +75,10 @@ func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
 
 // SetRescuer adds the rescuer's state to /status.
 func (s *Server) SetRescuer(rs *Rescuer) { s.rescuer = rs }
+
+// SetCompanions adds the companion images to /status and tells the
+// tracker which registries CI preheats from.
+func (s *Server) SetCompanions(c *Companions) { s.companions = c }
 
 // SetRetainer adds the retention copies to /status.
 func (s *Server) SetRetainer(rt *Retainer) { s.retainer = rt }
@@ -130,6 +136,9 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 		logging.Infof("angryduck-controller: normalized image reference %q to %q", req.Image, normalized)
 	}
 	req.Image = normalized
+	if s.companions != nil {
+		s.companions.NoteRegistry(req.Image)
+	}
 
 	if s.registry.FreshCount() == 0 {
 		logging.Warnf("angryduck-controller: rejecting preheat for image=%s: zero fresh workers reporting", req.Image)
@@ -207,6 +216,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.spreader != nil {
 		status.Spreads = s.spreader.Status()
+	}
+	if s.companions != nil {
+		status.Companions = s.companions.Status()
 	}
 	writeJSON(w, http.StatusOK, status)
 }

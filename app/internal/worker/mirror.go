@@ -28,12 +28,12 @@ import (
 var (
 	mirrorRequestsTotal = metrics.NewCounterVec(
 		"angryduck_worker_mirror_requests_total",
-		"Content requests containerd sent to this node's mirror, by kind (blob, manifest) and result: local (served from this node), peer (from another node), miss (nobody had it: containerd goes to the registry), error.",
+		"Content requests containerd sent to this node's mirror, by kind (blob, manifest) and result: local (served from this node), peer (from another node), stream (from a node still receiving it in a spread), miss (nobody had it: containerd goes to the registry), error.",
 		"node", "kind", "result",
 	)
 	mirrorBytesTotal = metrics.NewCounterVec(
 		"angryduck_worker_mirror_bytes_total",
-		"Bytes the mirror served to containerd, by source: local or peer. Every one of them is a byte not downloaded from the registry.",
+		"Bytes the mirror served to containerd, by source: local, peer, or stream (a peer still receiving it). Every one of them is a byte not downloaded from the registry.",
 		"node", "source",
 	)
 	mirrorServedTotal = metrics.NewCounterVec(
@@ -66,7 +66,8 @@ type TagOrigin interface {
 // containerd asks it first for every manifest and blob by digest, and,
 // with resolve on, for every tag. The mirror answers from this node's
 // content store, else streams the content from a peer node that has it
-// (the controller's layer inventory says which), else answers 404 and
+// (the controller's layer inventory says which), else from a peer still
+// receiving it in a spread, as the bytes land there, else answers 404 and
 // containerd goes to the registry as usual. containerd verifies every
 // digest, so a peer can't slip in anything else. The mirror never
 // downloads from a registry: that stays containerd's.
@@ -113,8 +114,10 @@ func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 			mirrorRequestsTotal.Add(0, nodeID, kind, r)
 		}
 	}
-	mirrorBytesTotal.Add(0, nodeID, "local")
-	mirrorBytesTotal.Add(0, nodeID, "peer")
+	mirrorRequestsTotal.Add(0, nodeID, "blob", "stream") // streams carry layers only
+	for _, src := range []string{"local", "peer", "stream"} {
+		mirrorBytesTotal.Add(0, nodeID, src)
+	}
 	mirrorServedTotal.Add(0, nodeID)
 	return &Mirror{
 		store: store, nodeID: nodeID, token: token, controllerURL: strings.TrimRight(controllerURL, "/"),
@@ -255,16 +258,23 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 		clearBlobHeaders(w)
 	}
 	for _, h := range m.lookup(r.Context(), digest) {
+		source := "peer"
+		if h.Arriving {
+			if kind != "blobs" {
+				continue // spreads carry layers; manifests come whole from holders
+			}
+			source = "stream"
+		}
 		n, served, err := m.fromPeer(w, r, h, kind, digest)
 		if served {
 			if err != nil {
 				mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "error")
-				logging.Warnf("angryduck-worker[%s]: mirror: %s %s from node=%s broke after %d bytes: %v", m.nodeID, kindLabel, digest, h.NodeID, n, err)
+				logging.Warnf("angryduck-worker[%s]: mirror: %s %s from node=%s (%s) broke after %d bytes: %v", m.nodeID, kindLabel, digest, h.NodeID, source, n, err)
 				return "error"
 			}
-			mirrorRequestsTotal.Inc(m.nodeID, kindLabel, "peer")
-			mirrorBytesTotal.Add(n, m.nodeID, "peer")
-			return "peer"
+			mirrorRequestsTotal.Inc(m.nodeID, kindLabel, source)
+			mirrorBytesTotal.Add(n, m.nodeID, source)
+			return source
 		}
 		if err != nil {
 			logging.Debugf("angryduck-worker[%s]: mirror: node=%s couldn't serve %s: %v", m.nodeID, h.NodeID, digest, err)
@@ -467,9 +477,15 @@ func (m *Mirror) forget(digest string) {
 }
 
 // fromPeer streams digest from h. served is true once a response started
-// going out to containerd (so no other peer can be tried after).
+// going out to containerd (so no other peer can be tried after). A holder
+// still receiving the blob (Arriving) serves it from /spread/content, which
+// sends the bytes as they land there, or the committed blob once it has.
 func (m *Mirror) fromPeer(w http.ResponseWriter, r *http.Request, h model.Holder, kind, digest string) (n int64, served bool, err error) {
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, "http://"+h.Address+"/mirror/content/"+digest+"?kind="+kind, nil)
+	u := "http://" + h.Address + "/mirror/content/" + digest + "?kind=" + kind
+	if h.Arriving {
+		u = "http://" + h.Address + "/spread/content/" + digest
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, u, nil)
 	if err != nil {
 		return 0, false, err
 	}

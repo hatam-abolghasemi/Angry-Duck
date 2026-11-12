@@ -1504,6 +1504,51 @@ func (s *Spreader) Holders(digest string) []string {
 	return out
 }
 
+// Arriving lists the nodes still receiving blob digest in a running
+// spread, over an order their worker took and from a source that hasn't
+// failed a stream: a mirror can stream it from them as it lands instead of
+// sending containerd to the registry for a second copy. Empty when
+// streaming is off. Any size counts: the mirror's caller is containerd,
+// not another hop in a chain.
+func (s *Spreader) Arriving(digest string) []string {
+	if !s.cfg.Stream {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, j := range s.jobs {
+		i, ok := j.idx[digest]
+		if !ok {
+			continue
+		}
+		for node, n := range j.nodes {
+			if j.noStream[node] {
+				continue
+			}
+			for _, x := range n.xfers {
+				if x.layer == i && x.accepted && !contains(out, node) {
+					out = append(out, node)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// Active reports whether a spread is still bringing an image to nodes.
+func (s *Spreader) Active() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if !j.completed {
+			return true
+		}
+	}
+	return false
+}
+
 func (j *sjob) addGot(i int, node string) {
 	if j.got[i] == nil {
 		j.got[i] = map[string]bool{}

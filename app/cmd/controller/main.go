@@ -108,6 +108,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	companions := newCompanions(registry, creds, staleAfter, excludeNodeSubstrings, feat.Companion)
+	if companions != nil {
+		server.SetCompanions(companions)
+	}
 	// Rescue and propagation both order workers to copy images from each
 	// other, and the workers only accept that with the shared token.
 	token, tokenErr := sharedtoken.Load(config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token"))
@@ -130,6 +134,7 @@ func main() {
 			go pods.Run(ctx)
 			go rescuer.Run(ctx)
 		}
+		spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN, feat)
 		if propagator := newPropagator(registry, token, excludeNodeSubstrings, platform, feat.Propagate); propagator != nil {
 			propagator.SetSeeds(ranker.Seeds)
 			if rescuer != nil {
@@ -138,10 +143,19 @@ func main() {
 			if resolver != nil {
 				propagator.SetLayerResolver(resolver)
 			}
+			if spreader != nil {
+				// Companion images wait while a push spreads.
+				propagator.SetBusy(spreader.Active)
+			}
+			if companions != nil {
+				companions.SetKeep(propagator.SetKeep)
+			}
 			server.SetPropagator(propagator)
 			go propagator.Run(ctx)
+		} else if companions != nil {
+			log.Println("angryduck-controller: companions are kept from cleanup but not spread (PROPAGATE_ENABLED=false)")
 		}
-		if spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN, feat); spreader != nil {
+		if spreader != nil {
 			if rescuer != nil {
 				spreader.SetWaiting(rescuer.Waiting)
 			}
@@ -155,6 +169,9 @@ func main() {
 			server.SetRetainer(retainer)
 			go retainer.Run(ctx)
 		}
+	}
+	if companions != nil {
+		go companions.Run(ctx) // after SetKeep
 	}
 
 	if originInterval > 0 {
@@ -312,6 +329,24 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		log.Printf("angryduck-controller: blobs up to %d MiB have their own per-source slots, beside large transfers", cfg.ExpressMaxBytes>>20)
 	}
 	return controller.NewSpreader(registry, rc, token, cfg)
+}
+
+// newCompanions sets up keeping the sidecar images of app pods on every
+// node, or returns nil when it's off.
+func newCompanions(registry *controller.Registry, creds *registryauth.Store, staleAfter time.Duration, rankExclude []string, enabled bool) *controller.Companions {
+	if !enabled {
+		log.Println("angryduck-controller: companion images disabled (COMPANION_ENABLED=false or GC_ENABLED=false)")
+		return nil
+	}
+	return controller.NewCompanions(registry, controller.CompanionConfig{
+		AppRegistries:  config.StringSlice("COMPANION_APP_REGISTRIES", nil),
+		CredRegistries: creds.Hosts(),
+		MaxBytes:       int64(config.Int("COMPANION_MAX_MB", 300)) << 20,
+		Interval:       config.Duration("COMPANION_INTERVAL_S", 30),
+		Warmup:         staleAfter,
+		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
+		Exclude:        config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),
+	})
 }
 
 // newRetainer sets up keeping one copy of every image that went unused,

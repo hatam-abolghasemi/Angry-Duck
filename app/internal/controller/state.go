@@ -39,6 +39,10 @@ type workerEntry struct {
 	ImageState bool
 	InUse      []model.ImageRef
 	Retained   map[string]int64
+	// Companion images it runs beside app images, when it reports them
+	// (CompanionState). Replaced, never modified.
+	CompanionState bool
+	Companions     []model.ImageRef
 }
 
 // hasSorted reports whether sorted list contains s.
@@ -81,17 +85,30 @@ type Registry struct {
 	names interner
 	// onNewNode runs, under mu, for every node the first time it reports.
 	onNewNode []func(node string)
+	// companionAck fills a report ack's companion set (see
+	// SetCompanionAck); nil: none sent.
+	companionAck func(held string) *model.CompanionSet
 	// onImageState runs, outside mu, after a report changed a node's
 	// image state.
-	onImageState func()
+	onImageState []func()
 }
 
 // OnImageState registers fn to run after any report that changed a
-// node's in-use images or retention copies. fn must not block.
+// node's in-use images, retention copies or companion images. fn must not
+// block.
 func (r *Registry) OnImageState(fn func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.onImageState = fn
+	r.onImageState = append(r.onImageState, fn)
+}
+
+// SetCompanionAck makes every report ack carry what fn returns for the
+// companion set hash the worker holds. fn must not block or call back into
+// the registry.
+func (r *Registry) SetCompanionAck(fn func(held string) *model.CompanionSet) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.companionAck = fn
 }
 
 // interner keeps one copy of each string held by any worker's inventory,
@@ -180,7 +197,7 @@ func (in *interner) internRefs(old, refs []model.ImageRef) []model.ImageRef {
 	if len(refs) > 0 {
 		out = make([]model.ImageRef, len(refs))
 		for i, ref := range refs {
-			out[i] = model.ImageRef{Digest: in.intern(ref.Digest), Name: in.intern(ref.Name)}
+			out[i] = model.ImageRef{Digest: in.intern(ref.Digest), Name: in.intern(ref.Name), Size: ref.Size}
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Digest < out[j].Digest })
 	}
@@ -284,12 +301,17 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 	r.mu.Lock()
 	var stateChanged bool
 	defer func() {
-		fn := r.onImageState
+		fns := r.onImageState
 		r.mu.Unlock()
-		if stateChanged && fn != nil {
-			fn()
+		if stateChanged {
+			for _, fn := range fns {
+				fn()
+			}
 		}
 	}()
+	if r.companionAck != nil {
+		ack.Companions = r.companionAck(rep.CompanionsHash)
+	}
 	w, ok := r.workers[rep.NodeID]
 	if !ok {
 		w = &workerEntry{NodeID: rep.NodeID}
@@ -327,6 +349,11 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 		if !equalRetained(retained, w.Retained) {
 			w.Retained = retained
 		}
+		comps := r.names.internRefs(w.Companions, rep.Companions)
+		if rep.CompanionState != w.CompanionState || len(comps) != len(w.Companions) || (len(comps) > 0 && &comps[0] != &w.Companions[0]) {
+			stateChanged = true
+		}
+		w.CompanionState, w.Companions = rep.CompanionState, comps
 	}
 	ack.InventoryHash = w.invHash
 	return ack
@@ -438,15 +465,23 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 
 // Holders returns every fresh worker (least full first) whose layer
 // inventory holds blob digest, then those in also that it doesn't list
-// yet, leaving out exclude.
-func (r *Registry) Holders(digest, exclude string, also []string) []model.Holder {
+// yet, then those in arriving (still receiving it, marked Arriving) whose
+// worker streams, leaving out exclude.
+func (r *Registry) Holders(digest, exclude string, also, arriving []string) []model.Holder {
 	fresh := r.FreshWorkers()
 	ids := make([]string, 0, len(fresh))
 	addr := make(map[string]string, len(fresh))
+	var streams map[string]bool
+	if len(arriving) > 0 {
+		streams = make(map[string]bool, len(arriving))
+	}
 	for _, w := range fresh {
 		if w.NodeID != exclude {
 			ids = append(ids, w.NodeID)
 			addr[w.NodeID] = w.Address
+			if streams != nil && w.Streams {
+				streams[w.NodeID] = true
+			}
 		}
 	}
 	var out []model.Holder
@@ -460,6 +495,13 @@ func (r *Registry) Holders(digest, exclude string, also []string) []model.Holder
 	for _, n := range also {
 		if a, ok := addr[n]; ok && !seen[n] {
 			out = append(out, model.Holder{NodeID: n, Address: a})
+			seen[n] = true
+		}
+	}
+	// Last, nodes still receiving it: a stream waits on their transfer.
+	for _, n := range arriving {
+		if a, ok := addr[n]; ok && !seen[n] && streams[n] {
+			out = append(out, model.Holder{NodeID: n, Address: a, Arriving: true})
 			seen[n] = true
 		}
 	}

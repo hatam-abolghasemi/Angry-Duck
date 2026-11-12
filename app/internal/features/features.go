@@ -8,6 +8,7 @@
 //
 //	GC_ENABLED                  image cleanup on each node
 //	  GC_RETENTION_ENABLED      one retention copy of each image that went unused
+//	  COMPANION_ENABLED         sidecar images of app pods kept on every node
 //	SPREAD_ENABLED              blob-by-blob spreading
 //	  SPREAD_STREAM_ENABLED     serving blobs still arriving
 //	  SPREAD_UNPACK_ENABLED     unpacking layers as they arrive
@@ -34,6 +35,7 @@ import (
 type Flags struct {
 	GC              bool
 	GCRetention     bool
+	Companion       bool
 	Spread          bool
 	SpreadStream    bool
 	SpreadUnpack    bool
@@ -61,6 +63,7 @@ type switchDef struct {
 var tree = []switchDef{
 	{"GC_ENABLED", true, "", func(f *Flags, v bool) { f.GC = v }},
 	{"GC_RETENTION_ENABLED", true, "GC_ENABLED", func(f *Flags, v bool) { f.GCRetention = v }},
+	{"COMPANION_ENABLED", true, "GC_ENABLED", func(f *Flags, v bool) { f.Companion = v }},
 	{"SPREAD_ENABLED", true, "", func(f *Flags, v bool) { f.Spread = v }},
 	{"SPREAD_STREAM_ENABLED", true, "SPREAD_ENABLED", func(f *Flags, v bool) { f.SpreadStream = v }},
 	{"SPREAD_UNPACK_ENABLED", true, "SPREAD_ENABLED", func(f *Flags, v bool) { f.SpreadUnpack = v }},
@@ -95,6 +98,6 @@ func resolve(get func(key string, def bool) bool) Flags {
 
 // String lists every switch as resolved, for the startup log.
 func (f Flags) String() string {
-	return fmt.Sprintf("gc=%t gc_retention=%t spread=%t spread_stream=%t spread_unpack=%t propagate=%t rescue=%t mirror=%t mirror_resolve=%t repair=%t layer_inventory=%t inventory_events=%t",
-		f.GC, f.GCRetention, f.Spread, f.SpreadStream, f.SpreadUnpack, f.Propagate, f.Rescue, f.Mirror, f.MirrorResolve, f.Repair, f.LayerInventory, f.InventoryEvents)
+	return fmt.Sprintf("gc=%t gc_retention=%t companion=%t spread=%t spread_stream=%t spread_unpack=%t propagate=%t rescue=%t mirror=%t mirror_resolve=%t repair=%t layer_inventory=%t inventory_events=%t",
+		f.GC, f.GCRetention, f.Companion, f.Spread, f.SpreadStream, f.SpreadUnpack, f.Propagate, f.Rescue, f.Mirror, f.MirrorResolve, f.Repair, f.LayerInventory, f.InventoryEvents)
 }

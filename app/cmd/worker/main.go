@@ -293,6 +293,15 @@ func main() {
 				StatePath:         filepath.Join(hostRoot, stateDir, "image-usage.json"),
 			})
 		gc.OnDone(reporter.Kick)
+		if pr, ok := rt.(worker.PodRuntime); ok && feat.Companion {
+			// Companions come from the cleanup's own listing, grouped by
+			// pod; the controller's set comes back in report acks.
+			gc.EnableCompanions(pr.ListInUsePods, pr.ImageSize, reporter.SetCompanions)
+			reporter.OnCompanions(gc.SetCompanions)
+			log.Printf("angryduck-worker[%s]: companion images on: sidecars of app pods are kept and reported", nodeID)
+		} else if !feat.Companion {
+			log.Printf("angryduck-worker[%s]: companion images disabled (COMPANION_ENABLED=false)", nodeID)
+		}
 		if retention {
 			gc.OnState(reporter.SetImageState)
 			extra = append(extra, gc.Register(token))

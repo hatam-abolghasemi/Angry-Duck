@@ -23,7 +23,7 @@ import (
 var (
 	imagesDeletedTotal = metrics.NewCounterVec(
 		"angryduck_worker_gc_images_deleted_total",
-		"Images this node's cleanup removed, by tier: old (unused for GC_UNUSED_FOR_S, removed whatever the disk), pressure (unused for less, removed only because the disk went above GC_HIGH), retention (the cluster's retention copy, removed when its GC_RETENTION_TTL_S ran out), or error.",
+		"Images this node's cleanup removed, by tier: old (unused for GC_UNUSED_FOR_S, removed whatever the disk), pressure (unused for less, removed only because the disk went above GC_HIGH), companion (a companion image, removed under disk pressure after every other unused image), retention (the cluster's retention copy, removed when its GC_RETENTION_TTL_S ran out), or error.",
 		"node", "tier",
 	)
 	gcImageReturns = metrics.NewGaugeVec(
@@ -53,7 +53,7 @@ var (
 	)
 	gcCandidates = metrics.NewGaugeVec(
 		"angryduck_worker_gc_candidates",
-		"Images the cleanup could remove, by tier (old, pressure). old goes on its own; pressure only while cleaning.",
+		"Images the cleanup could remove, by tier (old, pressure, companion). old goes on its own; pressure only while cleaning; companion only while cleaning, after every pressure one.",
 		"node", "tier",
 	)
 	gcRetained = metrics.NewGaugeVec(
@@ -160,6 +160,8 @@ type ImageGC struct {
 	pubRetained map[string]int64
 	onState     func(inUse []model.ImageRef, retained map[string]int64)
 	pubMu       sync.Mutex // one publish at a time, so they arrive in order
+
+	comp *gcCompanions // nil: companions off (see EnableCompanions)
 }
 
 // A batch that frees less than gcMinFree of the disk means the disk isn't
@@ -259,7 +261,7 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 	if err != nil {
 		return nil, nil, err
 	}
-	used, err := g.inUse()
+	used, pods, err := g.listInUse()
 	if err != nil {
 		return nil, nil, err // without it nothing is safe to judge
 	}
@@ -292,6 +294,7 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 			g.dirty = true
 		}
 	}
+	g.noteCompanionsLocked(pods, targets)
 	if g.cfg.Retention {
 		g.inUseNow = inUse
 		var retained map[string]time.Time
@@ -376,6 +379,7 @@ func (g *ImageGC) Tick(ctx context.Context) {
 		g.unretainInUse(ctx, groups, inUse)
 		g.publishState(groups, inUse)
 	}
+	g.publishCompanions(groups)
 
 	// Disk pressure is judged only with a fresh reading; the age rule
 	// doesn't need one.
@@ -415,13 +419,20 @@ func (g *ImageGC) Tick(ctx context.Context) {
 
 	unused, expired, kept := g.plan(groups, inUse, now)
 	var old []candidate
+	companions := 0
 	for _, c := range unused {
-		if c.tier == "old" {
+		switch c.tier {
+		case "old":
 			old = append(old, c)
+		case "companion":
+			companions++
 		}
 	}
 	gcImageRemoval.Reset()
 	for _, c := range unused {
+		if c.tier == "companion" {
+			continue // no deadline: only disk pressure removes it
+		}
 		left := (g.cfg.UnusedFor - c.age).Seconds()
 		if left < 0 {
 			left = 0
@@ -432,7 +443,10 @@ func (g *ImageGC) Tick(ctx context.Context) {
 		gcImageRemoval.Set(k.left.Seconds(), g.nodeID, displayName(k.names), "retention")
 	}
 	gcCandidates.Set(float64(len(old)), g.nodeID, "old")
-	gcCandidates.Set(float64(len(unused)-len(old)), g.nodeID, "pressure")
+	gcCandidates.Set(float64(len(unused)-len(old)-companions), g.nodeID, "pressure")
+	if g.comp != nil {
+		gcCandidates.Set(float64(companions), g.nodeID, "companion")
+	}
 	if g.cfg.Retention {
 		gcRetained.Set(float64(len(kept)), g.nodeID)
 	}
@@ -441,7 +455,11 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	// for its time.
 	removed, _, _ := g.remove(ctx, expired, nil, nil)
 	if !cleaning || stalled {
-		// Age rule only: everything unused for UnusedFor goes.
+		// Age rule only: everything unused for UnusedFor goes. A fresh
+		// worker first waits for the cluster's companion images.
+		if g.holdAgeRule(now) {
+			old = nil
+		}
 		if len(old) > 0 {
 			logging.Infof("angryduck-worker[%s]: image cleanup: removing %d image(s) unused for %s", g.nodeID, len(old), g.cfg.UnusedFor)
 		}
@@ -449,8 +467,9 @@ func (g *ImageGC) Tick(ctx context.Context) {
 		removed += n
 	} else {
 		// Disk pressure: unused images oldest first (the age-rule ones are
-		// the oldest, so they go first), down to Low. It stops as soon as a
-		// batch frees (almost) nothing. Retention copies are never part of it.
+		// the oldest, so they go first), companion images last, down to
+		// Low. It stops as soon as a batch frees (almost) nothing.
+		// Retention copies are never part of it.
 		start := u
 		n, ok, futile := g.remove(ctx, unused, &u, func(u float64) bool { return u <= g.cfg.Low })
 		removed += n
@@ -589,6 +608,7 @@ func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now ti
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	unused = make([]candidate, 0, len(groups)-len(inUse))
+	var companions []candidate
 	for d, names := range groups {
 		if inUse[d] || g.protected(names) || (g.busy != nil && g.busy(names)) {
 			continue
@@ -606,6 +626,10 @@ func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now ti
 			last = u
 		}
 		age := now.Sub(last)
+		if g.isCompanionLocked(d) {
+			companions = append(companions, candidate{digest: d, names: names, age: age, tier: "companion"})
+			continue
+		}
 		tier := "pressure"
 		if age >= g.cfg.UnusedFor {
 			tier = "old"
@@ -622,6 +646,8 @@ func (g *ImageGC) plan(groups map[string][]string, inUse map[string]bool, now ti
 	}
 	oldestFirst(unused)
 	oldestFirst(expired)
+	oldestFirst(companions)
+	unused = append(unused, companions...) // disk pressure takes them last
 	return unused, expired, kept
 }
 
