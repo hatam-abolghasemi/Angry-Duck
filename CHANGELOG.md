@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.13.2
+
+Companion images now work on clusters like sahand-k8s-stg, where they found
+nothing in 1.13.0 and 1.13.1.
+
+### Fixed
+
+- **Containers known only by image ID.** kubelet creates containers by image
+  ID, and containerd reports no user-specified name, so no container looked
+  like an app image. Workers now judge a container by every name its image has
+  on the node, from the cleanup's own listing: no extra call.
+
+### Changed
+
+- **App images are those of the repos CI preheats**, whatever registry they
+  come from. A sidecar in the same registry as the apps (an openresty built by
+  the platform team, say) is a companion, since CI never preheats it. Until CI
+  has preheated anything, there are no companions. `COMPANION_APP_REGISTRIES`
+  and the credentials-file detection are gone; the setting is no longer read.
+- **The companion set survives restarts.** Each worker saves the set it holds
+  (`companions.json` in `/var/lib/angryduck`) and reports its app repos; a
+  restarted worker keeps protecting it at once, and a restarted controller
+  learns the app repos back from the workers without waiting for a push.
+
+### Added
+
+- Steady-state benchmarks for the loops a worker and the controller run all
+  the time (`go test ./internal/... -run '^$' -bench Steady -benchmem`).
+
 ## 1.13.1
 
 A slow registry answer at the moment CI calls the webhook no longer sends the
