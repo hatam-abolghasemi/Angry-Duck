@@ -64,6 +64,21 @@ DEBUG_PPROF_ADDR=127.0.0.1:6060 ./angryduck-worker
 go tool pprof -top http://127.0.0.1:6060/debug/pprof/heap
 ```
 
+For a cluster, the **pprof images** workflow (Actions → pprof images → Run
+workflow, `version` e.g. `1.13.2`) builds tag `v<version>` into
+`angry-duck-{controller,worker}:<version>-pprof` (amd64, release build tags
+plus `pprof`). Run them with these Helm values:
+
+```yaml
+controller: {image: {tag: "1.13.2-pprof"}}
+worker:     {image: {tag: "1.13.2-pprof"}}
+config:
+  DEBUG_PPROF_ADDR: "127.0.0.1:6060"
+```
+
+The controller's endpoint is reached with `kubectl port-forward`; a worker on
+the host network serves it on its node's loopback.
+
 ## Test
 
 ```bash
