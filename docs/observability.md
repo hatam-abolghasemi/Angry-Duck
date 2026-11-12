@@ -229,6 +229,7 @@ what is moving, not history:
 | `angryduck_worker_spread_streamed_bytes_total` | counter | `node` | Bytes served to peers from blobs this node was still receiving (part of `served`). |
 | `angryduck_worker_spread_transfer_milliseconds_total` | counter | `node`, `path` | Time spent transferring. Bytes divided by it is the throughput per path. |
 | `angryduck_worker_spread_active` | gauge | `node`, `path` | Blobs coming in right now on that path (any number; one blob at most once per path). |
+| `angryduck_worker_direct_writes_total` | counter | `node`, `result` | Blobs written straight into containerd's ingest files (`DIRECT_WRITES`): `ok`, or `failed` (aborted, as a failed transfer through the API would be). |
 | `angryduck_worker_page_cache_released_bytes_total` | counter | `node` | Page cache handed back after serving blob files: the pages this worker's reads brought in, once the file was idle for `PAGE_CACHE_RELEASE_AFTER_S`. |
 | `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
 | `angryduck_worker_spread_unpacks_total` | counter | `node`, `result` | Layers unpacked as they arrived, before the image registered: `applied`, `present` (already unpacked) or `failed` (left to the image's own unpack). |

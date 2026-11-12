@@ -15,6 +15,7 @@ filesystem. It mounts:
 |---|---|---|
 | `/run/containerd/containerd.sock` | read-write | containerd's API and CRI: every image, layer and snapshot operation. |
 | `/var/lib/containerd/io.containerd.content.v1.content` | read-only | Serve blobs without a round trip through the API (optional). |
+| `/var/lib/containerd/io.containerd.content.v1.content/ingest` | read-write | Write blobs straight into the files of the writes the worker opens through containerd (`DIRECT_WRITES`, optional). |
 | `/etc/containerd/config.toml` | read-only | Find containerd's root and check `config_path` for the mirror. |
 | `/etc/containerd/certs.d` | read-write | The mirror's `hosts.toml` files. |
 | `/var/lib/angryduck` | read-write | Rescue pins and image-usage history. |
@@ -63,6 +64,18 @@ its own DaemonSet, used on shutdown to tell an uninstall from a rollout.
   its digests before anything is imported. Orders are refused unless their
   digest, size and job ID are well formed, and a fetch can't exceed 64 GiB. Traffic is plain HTTP between pod IPs; use a CNI with
   encryption between nodes if the network itself isn't trusted.
+- **Direct writes never commit anything.** With `DIRECT_WRITES` the worker
+  fills the data file of a write it opened itself through containerd, under
+  its own lease and a ref no one else uses, and only containerd commits it,
+  after reading the whole file and checking its size and SHA-256. Wrong,
+  short or half-written bytes fail that check like a bad download and the
+  write is aborted; a worker that dies half-way leaves an interrupted write
+  that goes with its lease. Committed blobs stay read-only to the worker,
+  and containerd and kubelet never depend on the worker for their own writes.
+  The mount does let the worker write into other in-progress writes' files,
+  a pull's included; containerd's digest check at commit still rejects
+  anything altered there. Remove the mount (or set `DIRECT_WRITES=false`)
+  to write through containerd's API only.
 - **`/report`, `/pull` and `/pull/cancel` require the shared token** when one
   is configured (`AUTH_MODE`, see [Configuration](configuration.md)).
   `/report` matters most: the address a worker reports is where rescue and
