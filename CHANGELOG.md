@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.13.0
+
+The first wave of a rollout no longer pulls the same layers from the registry
+once per node: mirrors stream them from the nodes still receiving them. Sidecar
+images of app pods are found on their own and kept on every node, so a
+rescheduled pod never waits for its exporter or proxy. And a benchmark and
+chaos kit measures all of it on a test cluster.
+
+### Added
+
+- **Mirrors join spread transfers still running.** When no node holds a blob
+  yet but some node is receiving it in a spread (a seed pulling it from the
+  registry, or a node getting it from a peer), `/layers/holders` lists that
+  node last, marked `"arriving": true`, and the mirror streams the blob from
+  its `/spread/content` as the bytes land there, instead of answering `404` and
+  sending containerd to the registry for one more copy. Any size counts. Nodes
+  whose worker doesn't stream, or whose stream broke in that spread, aren't
+  offered; manifests never come this way. New `result="stream"` on
+  `angryduck_worker_mirror_requests_total` and `source="stream"` on
+  `angryduck_worker_mirror_bytes_total`. On sahand-k8s-stg, a rolling update
+  of a 500 MB image with the webhook called right before the rollout cost the
+  registry 4.1 copies of the image before this change; the rest of those
+  copies were first-wave nodes pulling what the seeds were pulling.
+- **Companion images** (`COMPANION_ENABLED`, on by default, under
+  `GC_ENABLED`). An image a pod runs beside an app image (from an app
+  registry) is a companion: it is spread to every eligible node from peers,
+  and image cleanup never removes it for age, only under disk pressure, after
+  every other unused image. Workers tell companions apart from the cleanup's
+  own container listing, now grouped by pod (no extra containerd call), and
+  report each with its size (asked of the runtime once per image). The app
+  registries are `COMPANION_APP_REGISTRIES`, or else every registry CI
+  preheated from plus those in the credentials file, minus public ones.
+  `COMPANION_MAX_MB` (300) caps what is kept. Spreading waits while a push
+  spreads, reads no registry, and skips nodes above
+  `PROPAGATE_MAX_UTILIZATION`. A restarted controller sends no set until every
+  live worker has reported, and a fresh worker holds the age rule until the
+  set arrives (5 minutes at most), so protection never lapses. New metrics
+  `angryduck_controller_companion_images`, `_companion_bytes`,
+  `_companion_nodes`, `_companion_transfers_total`, and the `companion` tier
+  on `angryduck_worker_gc_candidates` and `_gc_images_deleted_total`;
+  `/status` lists them under `companions`. See
+  [Companion images](docs/companions.md).
+- **Dashboard.** A *Companion images* row on the Disk Cleanup tab (kept, not
+  kept, space, copies missing, copied, removed under pressure; every image and
+  where it's missing; copies and removals over time), a *companions* column in
+  *Cleanup Status*, the `companion` tier in the tier panels, and `stream` in the
+  mirror panels.
+- **`bench/`**: `duckbench.sh` benchmarks pulls with Angry Duck's features off,
+  on without the webhook, and with preheat (any lead time), for DaemonSet
+  rollouts and rolling updates, on fresh random images through a throwaway
+  registry; and chaos tests for registry outages (tags resolved from peers,
+  one holder via the mirror, rescue), killed workers or controller mid-spread,
+  and disk pressure. See `bench/README.md`.
+
+### Changed
+
+- **Mirror hits include streams.** Every hit-ratio and peer-bytes query on the
+  dashboard counts `stream` with `peer`.
+- **Propagation runs pushes first.** Companion jobs take only the transfer
+  slots pushes leave, never supersede a push and are never superseded by one.
+
+### Upgrading
+
+- Old workers ignore `arriving` holders' marker and ask their
+  `/mirror/content`, which answers `404` for a blob still arriving: they go on
+  to the registry as before.
+- Companions need both binaries at 1.13.0. A 1.13.0 worker under an older
+  controller holds its age rule for 5 minutes after it starts, then cleans up
+  as before.
+
 ## 1.12.0
 
 Images are ready sooner after their last layer lands. Nodes unpack each layer
