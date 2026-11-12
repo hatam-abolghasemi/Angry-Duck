@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -64,7 +65,25 @@ func FetchRootUtilization(metricsURL string, timeout time.Duration) (Utilization
 var collectFilterRejected atomic.Bool
 
 // utilizationClient is reused so the connection to node-exporter stays open.
-var utilizationClient = &http.Client{}
+// It asks for the page uncompressed: node-exporter runs on this node, so
+// gzip only costs both sides CPU (and a decompressor per report here).
+var utilizationClient = &http.Client{Transport: uncompressedTransport()}
+
+func uncompressedTransport() http.RoundTripper {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	t = t.Clone()
+	t.DisableCompression = true
+	return t
+}
+
+// scanBuffers pools the line buffers of parseRootUtilization.
+var scanBuffers = sync.Pool{New: func() any {
+	b := make([]byte, 0, 64<<10)
+	return &b
+}}
 
 func withCollectFilter(metricsURL string) string {
 	u, err := url.Parse(metricsURL)
@@ -110,8 +129,10 @@ func parseRootUtilization(r io.Reader) (UtilizationResult, error) {
 
 	sizePrefix := []byte("node_filesystem_size_bytes{")
 	freePrefix := []byte("node_filesystem_free_bytes{")
+	bp := scanBuffers.Get().(*[]byte)
+	defer scanBuffers.Put(bp)
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	scanner.Buffer((*bp)[:0], 1<<20)
 	for scanner.Scan() {
 		// Bytes, not Text: most lines are skipped, and converting each to
 		// a string would allocate for every line of a large page.

@@ -503,15 +503,7 @@ func (s *ContainerdStore) listDigests(ctx context.Context) (map[string]bool, err
 		return nil, err
 	}
 	defer release()
-	have := make(map[string]bool)
-	err = s.client.ContentStore().Walk(s.ns(ctx), func(info content.Info) error {
-		have[info.Digest.String()] = true
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return have, nil
+	return leanContentDigests(s.ns(ctx), s.client.Conn())
 }
 
 // --- images ---
@@ -879,20 +871,18 @@ func (s *ContainerdStore) ImageTargetsLabeled(ctx context.Context, label string)
 		return nil, nil, err
 	}
 	defer release()
-	imgs, err := s.client.ImageService().List(s.ns(ctx))
-	if err != nil {
-		return nil, nil, err
-	}
-	targets = make(map[string]string, len(imgs))
-	for _, img := range imgs {
-		d := img.Target.Digest.String()
-		targets[img.Name] = d
-		if v := img.Labels[label]; label != "" && v != "" {
+	targets = make(map[string]string)
+	err = leanImages(s.ns(ctx), s.client.Conn(), label, func(name, d, v string) {
+		targets[name] = d
+		if label != "" && v != "" {
 			if labeled == nil {
 				labeled = map[string]string{}
 			}
 			labeled[d] = v
 		}
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	return targets, labeled, nil
 }
@@ -1004,15 +994,7 @@ func (s *ContainerdStore) listSnapshots(ctx context.Context) (map[string]bool, e
 		return nil, err
 	}
 	defer release()
-	keys := make(map[string]bool)
-	err = s.snapshotterSvc().Walk(s.ns(ctx), func(_ context.Context, info snapshots.Info) error {
-		keys[info.Name] = true
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return keys, nil
+	return leanSnapshotNames(s.ns(ctx), s.client.Conn(), s.snapshotter)
 }
 
 // ExportSnapshot writes committed snapshot chainID as an uncompressed OCI

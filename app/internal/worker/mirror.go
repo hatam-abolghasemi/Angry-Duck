@@ -507,7 +507,7 @@ func (m *Mirror) fromPeer(w http.ResponseWriter, r *http.Request, h model.Holder
 	if r.Method == http.MethodHead {
 		return 0, true, nil
 	}
-	n, err = io.Copy(w, resp.Body)
+	n, err = relay(w, resp.Body)
 	if err != nil {
 		panic(http.ErrAbortHandler)
 	}

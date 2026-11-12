@@ -70,12 +70,22 @@ func (c pooledCodec) Marshal(v any) (mem.BufferSlice, error) {
 	return mem.BufferSlice{mem.NewBuffer(bp, writeBufPool{})}, nil
 }
 
-// pooledWrites returns the dial option that makes content writes use
-// pooled buffers.
+// connWriteBuffer is how much gRPC gathers before writing to containerd's
+// socket. Its default, 32 KiB, splits each rpcChunk content write into
+// about 32 write calls; at 256 KiB it is about 4, and containerd answers
+// with fewer, larger window updates too. On a spread, these socket calls
+// were the largest share of a worker's CPU. The buffer is shared: taken
+// from a pool for a write and handed back once it is flushed, so an idle
+// connection holds none of it.
+const connWriteBuffer = 256 << 10
+
+// pooledWrites returns the dial options that make content writes use
+// pooled buffers and reach the socket in connWriteBuffer writes.
 func pooledWrites() []grpc.DialOption {
+	opts := []grpc.DialOption{grpc.WithWriteBufferSize(connWriteBuffer), grpc.WithSharedWriteBuffer(true)}
 	base := encoding.GetCodecV2("proto")
 	if base == nil {
-		return nil
+		return opts
 	}
-	return []grpc.DialOption{grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pooledCodec{base}))}
+	return append(opts, grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pooledCodec{base})))
 }

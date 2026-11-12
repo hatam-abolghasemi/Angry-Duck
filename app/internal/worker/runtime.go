@@ -61,13 +61,14 @@ type criRuntime struct {
 	creds  *registryauth.Store
 	images runtimeapi.ImageServiceClient
 	rt     runtimeapi.RuntimeServiceClient
+	cc     grpc.ClientConnInterface // for the lean listings (leancri.go)
 }
 
 // NewRuntime builds the CRI runtime on conn, containerd's gRPC connection.
 // creds resolves per-registry pull credentials; pass registryauth.Empty()
 // if none are configured, and every pull proceeds anonymously.
 func NewRuntime(conn *grpc.ClientConn, creds *registryauth.Store) Runtime {
-	return criRuntime{creds: creds, images: runtimeapi.NewImageServiceClient(conn), rt: runtimeapi.NewRuntimeServiceClient(conn)}
+	return criRuntime{creds: creds, images: runtimeapi.NewImageServiceClient(conn), rt: runtimeapi.NewRuntimeServiceClient(conn), cc: conn}
 }
 
 func (r criRuntime) PullImage(ctx context.Context, image string) error {
@@ -101,15 +102,11 @@ func (r criRuntime) listImages() (crictlImagesOutput, error) {
 		return crictlImagesOutput{}, err
 	}
 	defer release()
-	resp, err := r.images.ListImages(ctx, &runtimeapi.ListImagesRequest{})
+	entries, err := leanImageEntries(ctx, r.cc)
 	if err != nil {
 		return crictlImagesOutput{}, fmt.Errorf("listing images: %w", err)
 	}
-	var out crictlImagesOutput
-	for _, img := range resp.GetImages() {
-		out.Images = append(out.Images, imageEntry{ID: img.GetId(), RepoTags: img.GetRepoTags(), RepoDigests: img.GetRepoDigests()})
-	}
-	return out, nil
+	return crictlImagesOutput{Images: entries}, nil
 }
 
 // LocalImages returns every image's tag-form and repo@digest references.
@@ -159,13 +156,13 @@ func (r criRuntime) listRunning() (crictlPsOutput, error) {
 		return crictlPsOutput{}, err
 	}
 	defer release()
-	resp, err := r.rt.ListContainers(ctx, &runtimeapi.ListContainersRequest{Filter: &runtimeapi.ContainerFilter{
+	cs, err := leanContainers(ctx, r.cc, &runtimeapi.ListContainersRequest{Filter: &runtimeapi.ContainerFilter{
 		State: &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING},
 	}})
 	if err != nil {
 		return crictlPsOutput{}, fmt.Errorf("listing containers: %w", err)
 	}
-	return toPsOutput(resp.GetContainers()), nil
+	return toPsOutput(cs), nil
 }
 
 func toPsOutput(cs []*runtimeapi.Container) crictlPsOutput {
@@ -211,21 +208,11 @@ func (r criRuntime) ListInUseImages() ([]string, error) {
 		return nil, err
 	}
 	defer release()
-	sb, err := r.rt.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{Filter: &runtimeapi.PodSandboxFilter{
-		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
-	}})
+	ready, cs, err := r.inUseListing(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing pod sandboxes: %w", err)
+		return nil, err
 	}
-	cs, err := r.rt.ListContainers(ctx, &runtimeapi.ListContainersRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("listing containers: %w", err)
-	}
-	ready := make(map[string]bool, len(sb.GetItems()))
-	for _, s := range sb.GetItems() {
-		ready[s.GetId()] = true
-	}
-	return inUseImages(cs.GetContainers(), ready), nil
+	return inUseImages(cs, ready), nil
 }
 
 // PodImages is one pod's containers, each as the image references the
@@ -252,21 +239,31 @@ func (r criRuntime) ListInUsePods() ([]PodImages, error) {
 		return nil, err
 	}
 	defer release()
-	sb, err := r.rt.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{Filter: &runtimeapi.PodSandboxFilter{
+	ready, cs, err := r.inUseListing(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return inUsePods(cs, ready), nil
+}
+
+// inUseListing makes the two CRI calls of ListInUseImages and
+// ListInUsePods: the ready sandboxes, and every container.
+func (r criRuntime) inUseListing(ctx context.Context) (ready map[string]bool, cs []*runtimeapi.Container, err error) {
+	ids, err := leanSandboxIDs(ctx, r.cc, &runtimeapi.ListPodSandboxRequest{Filter: &runtimeapi.PodSandboxFilter{
 		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
 	}})
 	if err != nil {
-		return nil, fmt.Errorf("listing pod sandboxes: %w", err)
+		return nil, nil, fmt.Errorf("listing pod sandboxes: %w", err)
 	}
-	cs, err := r.rt.ListContainers(ctx, &runtimeapi.ListContainersRequest{})
+	cs, err = leanContainers(ctx, r.cc, &runtimeapi.ListContainersRequest{})
 	if err != nil {
-		return nil, fmt.Errorf("listing containers: %w", err)
+		return nil, nil, fmt.Errorf("listing containers: %w", err)
 	}
-	ready := make(map[string]bool, len(sb.GetItems()))
-	for _, s := range sb.GetItems() {
-		ready[s.GetId()] = true
+	ready = make(map[string]bool, len(ids))
+	for _, id := range ids {
+		ready[id] = true
 	}
-	return inUsePods(cs.GetContainers(), ready), nil
+	return ready, cs, nil
 }
 
 // inUsePods is the selection half of ListInUsePods: the containers

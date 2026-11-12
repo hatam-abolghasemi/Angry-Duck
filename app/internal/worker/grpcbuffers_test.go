@@ -71,7 +71,7 @@ func TestPooledCodecLeavesOtherMessagesToProto(t *testing.T) {
 		}
 		bs.Free()
 	}
-	if len(pooledWrites()) != 1 {
-		t.Fatal("the pooled codec must be installed: gRPC's proto codec is registered")
+	if len(pooledWrites()) != 3 {
+		t.Fatal("the pooled codec and the write buffer options must be installed: gRPC's proto codec is registered")
 	}
 }
