@@ -153,6 +153,14 @@ func main() {
 		log.Printf("angryduck-worker[%s]: reading blobs directly from %s", nodeID, dir)
 		if err := store.VerifyStreaming(context.Background()); err != nil {
 			log.Printf("angryduck-worker[%s]: WARNING: spread streaming off: %v (set CONTAINERD_ROOT to containerd's root)", nodeID, err)
+		} else if config.Bool("DIRECT_WRITES", true) {
+			// Blobs straight into containerd's ingest files (directwrite.go),
+			// if a probe works: the ingest directory must be writable.
+			if err := store.EnableDirectWrites(context.Background(), nodeID); err != nil {
+				log.Printf("angryduck-worker[%s]: direct writes off, writing blobs through containerd's content API: %v", nodeID, err)
+			} else {
+				log.Printf("angryduck-worker[%s]: direct writes on: blobs go straight into containerd's ingest files", nodeID)
+			}
 		}
 	} else {
 		log.Printf("angryduck-worker[%s]: containerd's content store isn't mounted (set CONTAINERD_ROOT to where it is): serving blobs through containerd's content API", nodeID)

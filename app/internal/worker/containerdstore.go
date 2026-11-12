@@ -70,6 +70,11 @@ type ContainerdStore struct {
 	// pages gives back the page cache that reading blob files brings in
 	// (nil: kept, as the kernel does by default).
 	pages *pageCache
+
+	// directWrites: blobs are written straight into containerd's ingest
+	// files (see directwrite.go), labelled with nodeID in metrics.
+	directWrites bool
+	nodeID       string
 }
 
 // NewContainerdStore wraps a connected client.
@@ -1281,6 +1286,9 @@ func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string
 	d, err := digest.Parse(dgst)
 	if err != nil {
 		return 0, err
+	}
+	if s.directWrites && size >= directMin {
+		return s.writeDirect(ctx, lease, ref, d, size, r, writeObserverFrom(ctx))
 	}
 	ctx = leases.WithLease(s.ns(ctx), lease)
 	cs := s.client.ContentStore()

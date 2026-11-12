@@ -58,7 +58,14 @@ type feed struct {
 	opened  bool  // the ingest file holds this write, from zero
 	written int64 // bytes containerd has written so far
 	state   int
+	// readers are the streams reading this feed's ingest file, at the
+	// offset each has sent up to: a direct write keeps those pages
+	// cached for them (see readHolder).
+	readers map[*streamPos]struct{}
 }
+
+// streamPos is how far one stream has read a feed's ingest file.
+type streamPos struct{ off int64 }
 
 // arriving is a blob coming in over one or two paths, with a channel
 // closed (and replaced) whenever any of its feeds moves.
@@ -80,6 +87,53 @@ func (o feedObserver) opened() {
 }
 func (o feedObserver) wrote(total int64) {
 	o.s.feedUpdate(o.digest, o.f, func(f *feed) { f.written = total })
+}
+
+// holdFrom is the lowest offset a stream reading this feed's file has
+// reached, or -1 when none reads it.
+func (o feedObserver) holdFrom() int64 {
+	o.s.streamMu.Lock()
+	defer o.s.streamMu.Unlock()
+	from := int64(-1)
+	for p := range o.f.readers {
+		if from < 0 || p.off < from {
+			from = p.off
+		}
+	}
+	return from
+}
+
+// directWrites reports whether this node writes blobs straight into
+// ingest files, so their pages are the worker's to let go (see
+// directwrite.go).
+func (s *Spread) directWrites() bool {
+	d, ok := s.store.(interface{ DirectWrites() bool })
+	return ok && d.DirectWrites()
+}
+
+// readerAt records that a stream reads f's ingest file from off (p nil:
+// a new reader); readerGone forgets it.
+func (s *Spread) readerAt(f *feed, p *streamPos, off int64) *streamPos {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if p == nil {
+		p = &streamPos{}
+		if f.readers == nil {
+			f.readers = map[*streamPos]struct{}{}
+		}
+		f.readers[p] = struct{}{}
+	}
+	p.off = off
+	return p
+}
+
+func (s *Spread) readerGone(f *feed, p *streamPos) {
+	if f == nil || p == nil {
+		return
+	}
+	s.streamMu.Lock()
+	delete(f.readers, p)
+	s.streamMu.Unlock()
 }
 
 // feedStart registers a transfer of dgst as a feed. Nil when this node
@@ -223,20 +277,38 @@ func (s *Spread) stream(ctx context.Context, w io.Writer, dgst string, size int6
 		off  int64
 		cur  *feed
 		file *os.File // cur's ingest file, or the committed blob
+		// pos is this stream's place among posFeed's readers, while it
+		// reads posFeed's ingest file.
+		pos     *streamPos
+		posFeed *feed
+		// running: posFeed is still being written, so the pages read are
+		// the writer's to let go, not (after the commit) containerd's.
+		running bool
 	)
-	defer func() {
+	closeFile := func() {
+		s.readerGone(posFeed, pos)
+		pos, posFeed = nil, nil
 		if file != nil {
 			file.Close()
+			file = nil
 		}
-	}()
+	}
+	defer closeFile()
 	// send copies [off, upto) of file to w; the file's own ReadFrom path
 	// keeps sendfile.
 	send := func(upto int64) error {
 		if _, err := file.Seek(off, io.SeekStart); err != nil {
 			return err
 		}
+		from := off
 		n, err := copyToWriter(w, &io.LimitedReader{R: file, N: upto - off})
 		off += n
+		if pos != nil {
+			s.readerAt(posFeed, pos, off)
+			if running && s.directWrites() {
+				dropRead(file, from, off, upto, size)
+			}
+		}
 		if err == nil && off < upto {
 			err = io.ErrUnexpectedEOF
 		}
@@ -273,12 +345,10 @@ func (s *Spread) stream(ctx context.Context, w io.Writer, dgst string, size int6
 				continue
 			}
 			cur = f
-			if file != nil {
-				file.Close()
-				file = nil
-			}
+			closeFile()
 		}
 		state, opened, written, changed := s.feedNow(dgst, cur)
+		running = state == feedRunning
 		switch {
 		case state == feedCommitted:
 			if file == nil {
@@ -316,6 +386,7 @@ func (s *Spread) stream(ctx context.Context, w io.Writer, dgst string, size int6
 				continue
 			}
 			file = f
+			pos, posFeed = s.readerAt(cur, nil, off), cur
 		}
 		if written > off {
 			if err := send(written); err != nil {
@@ -328,8 +399,7 @@ func (s *Spread) stream(ctx context.Context, w io.Writer, dgst string, size int6
 		// peer push): go on from that one.
 		if f, w, _, _ := s.streamPick(dgst); f != nil && f != cur && w > off {
 			cur = f
-			file.Close()
-			file = nil
+			closeFile()
 			continue
 		}
 		if err := wait(changed); err != nil {
