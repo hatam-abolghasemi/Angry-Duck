@@ -1864,7 +1864,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[1h]))\n/ (sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[1h])))",
+                        "expr": "sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer|stream\"}[1h]))\n/ (sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[1h])))",
                         "legendFormat": "{{node}}",
                         "range": true
                       }
@@ -16563,7 +16563,7 @@
         "spec": {
           "id": 5,
           "title": "Mirror Hit Ratio",
-          "description": "Share of containerd's content requests the mirror answered from this node or a peer, in the time range. The rest went to the registry.",
+          "description": "Share of containerd's content requests the mirror answered from this node or a peer (a peer still receiving it counts), in the time range. The rest went to the registry.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -16582,7 +16582,7 @@
                       "spec": {
                         "editorMode": "code",
                         "exemplar": false,
-                        "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[$__range]))\n/\n(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) > 0)",
+                        "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer|stream\"}[$__range]))\n/\n(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) > 0)",
                         "instant": false,
                         "legendFormat": "__auto",
                         "range": true
@@ -18406,7 +18406,7 @@
                       "spec": {
                         "editorMode": "code",
                         "exemplar": false,
-                        "expr": "sum (label_replace(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range]), \"via\", \"mirror\", \"\", \"\") or label_replace(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"via\", \"spread\", \"\", \"\") or label_replace(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range]), \"via\", \"rescue\", \"\", \"\") or label_replace(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range]), \"via\", \"repair\", \"\", \"\"))",
+                        "expr": "sum (label_replace(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__range]), \"via\", \"mirror\", \"\", \"\") or label_replace(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"via\", \"spread\", \"\", \"\") or label_replace(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range]), \"via\", \"rescue\", \"\", \"\") or label_replace(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range]), \"via\", \"repair\", \"\", \"\"))",
                         "instant": false,
                         "legendFormat": "__auto",
                         "range": true
@@ -18612,7 +18612,7 @@
         "spec": {
           "id": 61,
           "title": "Mirror Hit Ratio",
-          "description": "Share of containerd's content requests the mirror answered from this node or a peer, in the time range.",
+          "description": "Share of containerd's content requests the mirror answered from this node or a peer (a peer still receiving it counts), in the time range.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -18631,7 +18631,7 @@
                       "spec": {
                         "editorMode": "code",
                         "exemplar": false,
-                        "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[$__range]))\n/\n(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) > 0)",
+                        "expr": "sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer|stream\"}[$__range]))\n/\n(sum (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) > 0)",
                         "instant": false,
                         "legendFormat": "__auto",
                         "range": true
@@ -20222,7 +20222,7 @@
         "spec": {
           "id": 69,
           "title": "Mirror Requests by Result",
-          "description": "Content requests containerd sent to the mirror, by result: local, peer, miss (went to the registry), error.",
+          "description": "Content requests containerd sent to the mirror, by result: local, peer, stream (from a peer still receiving it in a spread), miss (went to the registry), error.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -20375,6 +20375,26 @@
                       {
                         "id": "displayName",
                         "value": "peer"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "stream",
+                      "scope": "series"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#2f8f8a",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "stream (peer still receiving)"
                       }
                     ]
                   },
@@ -20541,7 +20561,7 @@
                       "spec": {
                         "editorMode": "code",
                         "exemplar": false,
-                        "expr": "sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[$__range]))\n/\n(sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) > 0)",
+                        "expr": "sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer|stream\"}[$__range]))\n/\n(sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])) > 0)",
                         "format": "table",
                         "instant": true,
                         "legendFormat": "__auto",
@@ -20565,7 +20585,7 @@
                       "spec": {
                         "editorMode": "code",
                         "exemplar": false,
-                        "expr": "sum by (node) (label_replace(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range]), \"via\", \"mirror\", \"\", \"\") or label_replace(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"via\", \"spread\", \"\", \"\") or label_replace(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range]), \"via\", \"rescue\", \"\", \"\") or label_replace(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range]), \"via\", \"repair\", \"\", \"\"))",
+                        "expr": "sum by (node) (label_replace(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__range]), \"via\", \"mirror\", \"\", \"\") or label_replace(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"via\", \"spread\", \"\", \"\") or label_replace(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range]), \"via\", \"rescue\", \"\", \"\") or label_replace(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range]), \"via\", \"repair\", \"\", \"\"))",
                         "format": "table",
                         "instant": true,
                         "legendFormat": "__auto",
@@ -21360,7 +21380,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer\"}[1h]))\n/ (sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[1h])) > 0)",
+                        "expr": "sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"local|peer|stream\"}[1h]))\n/ (sum by (node) (increase(angryduck_worker_mirror_requests_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[1h])) > 0)",
                         "legendFormat": "{{node}}",
                         "range": true
                       }
@@ -21625,6 +21645,26 @@
                           "fixedColor": "#3c9874",
                           "mode": "fixed"
                         }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "stream",
+                      "scope": "series"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#2f8f8a",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "stream (peer still receiving)"
                       }
                     ]
                   }
@@ -21923,6 +21963,21 @@
                   {
                     "matcher": {
                       "id": "byRegexp",
+                      "options": ".*· stream"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#2f8f8a",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
                       "options": ".*· miss"
                     },
                     "properties": [
@@ -22009,6 +22064,22 @@
                         "id": "color",
                         "value": {
                           "fixedColor": "light-blue",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "blob · stream",
+                      "scope": "series"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#4fb3a9",
                           "mode": "fixed"
                         }
                       }
@@ -22969,7 +23040,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))",
+                        "expr": "(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))",
                         "legendFormat": "all delivered",
                         "range": true
                       }
@@ -23011,7 +23082,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval]))",
+                        "expr": "sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__rate_interval]))",
                         "legendFormat": "peers · mirror",
                         "range": true
                       }
@@ -23567,7 +23638,7 @@
         "spec": {
           "id": 83,
           "title": "Cleanup Status",
-          "description": "Per node: cleanup state (idle; cleaning = disk above GC_HIGH, removing unused images until GC_LOW; stalled = removing images frees nothing). old / pressure = images removable right now per tier; retained = retention copies the node keeps (never removed before they expire). removed, errors and came back (re-pulled within an hour of removal) count the time range. Stalled nodes first.",
+          "description": "Per node: cleanup state (idle; cleaning = disk above GC_HIGH, removing unused images until GC_LOW; stalled = removing images frees nothing). old / pressure = images removable right now per tier; retained = retention copies the node keeps (never removed before they expire); companions = companion images here no container uses right now (kept: removed only under disk pressure, after every other unused image). removed, errors and came back (re-pulled within an hour of removal) count the time range. Stalled nodes first.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -23666,6 +23737,30 @@
                       }
                     },
                     "refId": "retained",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "sum by (node) (angryduck_worker_gc_candidates{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier=\"companion\"})",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "companions",
                     "hidden": false
                   }
                 },
@@ -23784,6 +23879,7 @@
                           "Value #old",
                           "Value #pressure",
                           "Value #retained",
+                          "Value #companions",
                           "Value #removed",
                           "Value #errors",
                           "Value #back"
@@ -23800,14 +23896,15 @@
                       "excludeByName": {},
                       "includeByName": {},
                       "indexByName": {
-                        "Value #back": 7,
-                        "Value #errors": 6,
+                        "Value #back": 8,
+                        "Value #errors": 7,
                         "Value #old": 2,
                         "Value #pressure": 3,
-                        "Value #removed": 5,
+                        "Value #removed": 6,
                         "Value #retained": 4,
                         "Value #state": 1,
-                        "node": 0
+                        "node": 0,
+                        "Value #companions": 5
                       },
                       "renameByName": {
                         "Value #back": "came back",
@@ -23816,7 +23913,8 @@
                         "Value #pressure": "pressure",
                         "Value #removed": "removed",
                         "Value #retained": "retained",
-                        "Value #state": "state"
+                        "Value #state": "state",
+                        "Value #companions": "companions"
                       }
                     }
                   }
@@ -24059,6 +24157,44 @@
                         "id": "color",
                         "value": {
                           "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "companions"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 80
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#6a8fc4",
                           "mode": "fixed"
                         }
                       },
@@ -24522,6 +24658,22 @@
                   {
                     "matcher": {
                       "id": "byName",
+                      "options": "companion",
+                      "scope": "series"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#6a8fc4",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
                       "scope": "series",
                       "options": "error"
                     },
@@ -24692,6 +24844,22 @@
                         "id": "color",
                         "value": {
                           "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "companion",
+                      "scope": "series"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#6a8fc4",
                           "mode": "fixed"
                         }
                       }
@@ -25629,7 +25797,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "(\n(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))\n) * $__interval_ms / 1000",
+                        "expr": "(\n(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__rate_interval])) or vector(0))\n) * $__interval_ms / 1000",
                         "legendFormat": "step all",
                         "range": true
                       }
@@ -29940,7 +30108,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "((sum(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range])) or vector(0)))\n/\n(((sum(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range])) or vector(0)) + (sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__range])) or vector(0))) > 0)",
+                        "expr": "((sum(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range])) or vector(0)))\n/\n(((sum(increase(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__range])) or vector(0)) + (sum(increase(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range])) or vector(0)) +\n(sum(increase(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"registry\"}[$__range])) or vector(0))) > 0)",
                         "instant": false,
                         "legendFormat": "__auto",
                         "range": true
@@ -30631,7 +30799,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=\"peer\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"peer|registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__rate_interval])) or vector(0))",
+                        "expr": "(sum(rate(angryduck_worker_mirror_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", source=~\"peer|stream\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_spread_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=~\"peer|registry\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_rescue_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", direction=\"received\"}[$__rate_interval])) or vector(0)) +\n(sum(rate(angryduck_worker_repair_bytes_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__rate_interval])) or vector(0))",
                         "instant": false,
                         "legendFormat": "image bytes delivered",
                         "range": true
@@ -35734,6 +35902,1174 @@
           },
           "transparent": true
         }
+      },
+      "panel-179": {
+        "kind": "Panel",
+        "spec": {
+          "id": 179,
+          "title": "Companions Kept",
+          "description": "Companion images: images a pod runs beside an app image (sidecars, exporters, proxies). Each is spread to every eligible node and kept there: never removed for age, and under disk pressure only after every other unused image.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(angryduck_controller_companion_images{k8s_source_cluster=~\"$cluster\", state=\"kept\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "#6a8fc4"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-180": {
+        "kind": "Panel",
+        "spec": {
+          "id": 180,
+          "title": "Not Kept",
+          "description": "Companion images not kept: above COMPANION_MAX_MB, or no node reported their size yet. They follow the ordinary cleanup rules.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(angryduck_controller_companion_images{k8s_source_cluster=~\"$cluster\", state=~\"too_large|size_unknown\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "#7fb87a"
+                      },
+                      {
+                        "value": 1,
+                        "color": "#e0a960"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-181": {
+        "kind": "Panel",
+        "spec": {
+          "id": 181,
+          "title": "Space They Take",
+          "description": "Bytes of the kept companion images together: what they take on a node that holds them all.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "max(angryduck_controller_companion_bytes{k8s_source_cluster=~\"$cluster\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "bytes",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "#6a8fc4"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-182": {
+        "kind": "Panel",
+        "spec": {
+          "id": 182,
+          "title": "Copies Still Missing",
+          "description": "Kept companion images not yet on an eligible node, summed over images. They arrive from peers once no push is spreading. Excluded and too-full nodes are not counted.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(angryduck_controller_companion_nodes{k8s_source_cluster=~\"$cluster\", state=\"missing\"}) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "#7fb87a"
+                      },
+                      {
+                        "value": 1,
+                        "color": "#e0a960"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-183": {
+        "kind": "Panel",
+        "spec": {
+          "id": 183,
+          "title": "Copied in Range",
+          "description": "Companion images copied to nodes from their peers in the time range.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "round(sum(increase(angryduck_controller_companion_transfers_total{k8s_source_cluster=~\"$cluster\", result=\"success\"}[$__range]))) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "#6a8fc4"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-184": {
+        "kind": "Panel",
+        "spec": {
+          "id": 184,
+          "title": "Removed Under Pressure",
+          "description": "Companion images removed in the time range because a disk stayed above GC_HIGH_UTILIZATION after every other unused image was gone. They come back once the node has room.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "round(sum(increase(angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier=\"companion\"}[$__range]))) or vector(0)",
+                        "instant": false,
+                        "legendFormat": "__auto",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {
+                "maxDataPoints": 100
+              }
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "center",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "value",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "#7fb87a"
+                      },
+                      {
+                        "value": 1,
+                        "color": "#e0a960"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "0"
+                },
+                "overrides": []
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-185": {
+        "kind": "Panel",
+        "spec": {
+          "id": 185,
+          "title": "Companion Images",
+          "description": "Every kept companion image: nodes that have it, eligible nodes still missing it, and nodes skipped (excluded from propagation, or above PROPAGATE_MAX_UTILIZATION). Images still missing somewhere first.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "max by (image) (angryduck_controller_companion_nodes{k8s_source_cluster=~\"$cluster\", state=\"have\", image=~\"$cleanup_image\", image=~\"($registry)/.*\"})",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "have",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "max by (image) (angryduck_controller_companion_nodes{k8s_source_cluster=~\"$cluster\", state=\"missing\", image=~\"$cleanup_image\", image=~\"($registry)/.*\"})",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "missing",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "exemplar": false,
+                        "expr": "max by (image) (angryduck_controller_companion_nodes{k8s_source_cluster=~\"$cluster\", state=\"skipped\", image=~\"$cleanup_image\", image=~\"($registry)/.*\"})",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "__auto",
+                        "range": false
+                      }
+                    },
+                    "refId": "skipped",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "image",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterFieldsByName",
+                  "spec": {
+                    "options": {
+                      "include": {
+                        "names": [
+                          "image",
+                          "Value #have",
+                          "Value #missing",
+                          "Value #skipped"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {},
+                      "includeByName": {},
+                      "indexByName": {
+                        "image": 0,
+                        "Value #have": 1,
+                        "Value #missing": 2,
+                        "Value #skipped": 3
+                      },
+                      "renameByName": {
+                        "Value #have": "have",
+                        "Value #missing": "missing",
+                        "Value #skipped": "skipped"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "missing"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No companion image is kept",
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "filterable": false,
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "image"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Filter image to ${__value.raw}",
+                            "url": "${__url.path}${__url.params:exclude:var-cleanup_image}&var-cleanup_image=${__value.raw}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#d5dbe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "pattern": "docker\\.io/.+",
+                              "result": {
+                                "color": "#5fa8d3",
+                                "index": 0
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "registry\\.k8s\\.io/.+",
+                              "result": {
+                                "color": "#9b8fd6",
+                                "index": 1
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "ghcr\\.io/.+",
+                              "result": {
+                                "color": "#c58fe0",
+                                "index": 2
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "quay\\.io/.+",
+                              "result": {
+                                "color": "#d97796",
+                                "index": 3
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "([a-z0-9-]+\\.)?gcr\\.io/.+|[a-z0-9-]+\\.pkg\\.dev/.+",
+                              "result": {
+                                "color": "#6fb7a8",
+                                "index": 4
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "public\\.ecr\\.aws/.+|[0-9]+\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/.+",
+                              "result": {
+                                "color": "#e0a36b",
+                                "index": 5
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "mcr\\.microsoft\\.com/.+",
+                              "result": {
+                                "color": "#8fb35f",
+                                "index": 6
+                              }
+                            },
+                            "type": "regex"
+                          },
+                          {
+                            "options": {
+                              "pattern": "cr\\.kgateway\\.dev/.+",
+                              "result": {
+                                "color": "#86c5b5",
+                                "index": 7
+                              }
+                            },
+                            "type": "regex"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "have"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 90
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#6a8fc4",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "missing"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 90
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": 0,
+                              "color": "#7fb87a"
+                            },
+                            {
+                              "value": 1,
+                              "color": "#e0a960"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "skipped"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 90
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#808080",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-186": {
+        "kind": "Panel",
+        "spec": {
+          "id": 186,
+          "title": "Companion Copies & Removals",
+          "description": "Per minute: companion images copied to nodes from peers (copied), copies that failed (failed, retried with backoff), and companions removed under disk pressure (removed).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum by (result) (rate(angryduck_controller_companion_transfers_total{k8s_source_cluster=~\"$cluster\"}[$__rate_interval])) * 60",
+                        "legendFormat": "{{result}}",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum (rate(angryduck_worker_gc_images_deleted_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", tier=\"companion\"}[$__rate_interval])) * 60",
+                        "legendFormat": "removed",
+                        "range": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "cpm",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "success"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#6a8fc4",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "copied"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "failure"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0566b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "failed"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "removed"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "removed"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
       }
     },
     "layout": {
@@ -38987,6 +40323,124 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-143"
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "RowsLayoutRow",
+                      "spec": {
+                        "title": "Companion images",
+                        "collapse": false,
+                        "layout": {
+                          "kind": "GridLayout",
+                          "spec": {
+                            "items": [
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-179"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 4,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-180"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 8,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-181"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-182"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 16,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-183"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 20,
+                                  "y": 0,
+                                  "width": 4,
+                                  "height": 4,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-184"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 4,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-185"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 4,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-186"
                                   }
                                 }
                               }
