@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.13.1
+
+A slow registry answer at the moment CI calls the webhook no longer sends the
+push down the slow path.
+
+### Changed
+
+- **The webhook answers at once; the manifest is read in the background, with
+  retries.** Before, the controller read the pushed image's manifest while CI
+  waited, once, for `RANK_RESOLVE_TIMEOUT_S`; a single timeout made it seed
+  the image whole: no layer-by-layer spread, nothing for mirrors to stream
+  from, and the first wave of a rollout pulling from the registry. On
+  sahand-k8s-stg one such run cost the registry 8.8 copies of a 500 MB image,
+  against 1.3 for the runs whose read succeeded. Now the read is retried,
+  backing off from 1 s to 15 s, for up to `TARGET_TTL_S` (120 s), and the
+  image is seeded whole only if it never reads, or at once if the registry
+  refuses Angry Duck's credentials. A newer tag of the same repo cancels a
+  read still going. The answer carries `"status": "spreading"` and no
+  `ordered_nodes` (the seeds are in `/status`); with `SPREAD_ENABLED=false` it
+  lists the seeds as before. New metric
+  `angryduck_controller_spread_starts_total{result}`: `first`, `retried`,
+  `fallback`, `superseded`.
+- **Bench:** `chaos worker-kill` finds the seeds in `/status` when the
+  webhook's answer doesn't list them.
+
+### Upgrading
+
+- CI that read `ordered_nodes` from the answer gets none while spreading is
+  on; the seeds show in `/status` under `spreads`.
+
 ## 1.13.0
 
 The first wave of a rollout no longer pulls the same layers from the registry
