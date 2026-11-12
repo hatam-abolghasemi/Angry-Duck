@@ -150,27 +150,31 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.spreader != nil {
-		ordered, err := s.spreader.Start(r.Context(), req.Image)
-		if err == nil {
-			logging.Infof("angryduck-controller: accepted preheat for image=%s: spreading blob by blob, %d node(s) pulling from the registry first: %v", req.Image, len(ordered), ordered)
-			writeJSON(w, http.StatusAccepted, model.PreheatResponse{Accepted: true, TargetImage: req.Image, OrderedNodes: ordered})
-			return
-		}
-		logging.Warnf("angryduck-controller: can't spread image=%s blob by blob (%v); seeding it whole instead", req.Image, err)
+		// CI doesn't wait on the registry: the manifest is read in the
+		// background, retried while the registry is slow, and the image
+		// is seeded whole only if it never can be.
+		s.spreader.Begin(req.Image, func(image string, _ error) { s.seedWhole(image) })
+		writeJSON(w, http.StatusAccepted, model.PreheatResponse{Accepted: true, Status: "spreading", TargetImage: req.Image})
+		return
 	}
-
-	s.registry.SetTarget(req.Image)
-	ordered := s.ranker.OrderNow(req.Image)
-	if s.propagator != nil {
-		s.propagator.Start(req.Image)
-	}
-
-	logging.Infof("angryduck-controller: accepted preheat for image=%s, ordered %d node(s): %v", req.Image, len(ordered), ordered)
+	ordered := s.seedWhole(req.Image)
 	writeJSON(w, http.StatusAccepted, model.PreheatResponse{
 		Accepted:     true,
 		TargetImage:  req.Image,
 		OrderedNodes: ordered,
 	})
+}
+
+// seedWhole orders seeds to pull image whole and propagation to take it
+// from there, and returns the seeds.
+func (s *Server) seedWhole(image string) []string {
+	s.registry.SetTarget(image)
+	ordered := s.ranker.OrderNow(image)
+	if s.propagator != nil {
+		s.propagator.Start(image)
+	}
+	logging.Infof("angryduck-controller: accepted preheat for image=%s, ordered %d node(s): %v", image, len(ordered), ordered)
+	return ordered
 }
 
 // handleReport ingests periodic disk-utilization reports from workers.

@@ -306,6 +306,7 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		// normally arrives first.
 		TransferTimeout: config.Duration("SPREAD_TRANSFER_TIMEOUT_S", 1800) + time.Minute,
 		ResolveTimeout:  config.Duration("RANK_RESOLVE_TIMEOUT_S", 5),
+		StartDeadline:   config.Duration("TARGET_TTL_S", 120),
 		Window:          config.Duration("PROPAGATE_WINDOW_S", 0),
 		Platform:        platform,
 		Stream:          feat.SpreadStream,

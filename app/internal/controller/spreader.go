@@ -103,8 +103,11 @@ type SpreaderConfig struct {
 	BackoffMax      time.Duration
 	TransferTimeout time.Duration // an in-flight transfer nobody reported on is freed after this
 	ResolveTimeout  time.Duration
-	Window          time.Duration // 0: until done or superseded
-	Platform        string
+	// StartDeadline bounds Begin's retries of a manifest read before the
+	// image is seeded whole instead (TARGET_TTL_S).
+	StartDeadline time.Duration
+	Window        time.Duration // 0: until done or superseded
+	Platform      string
 	// Streaming: with Stream on, a node still receiving a blob of at least
 	// StreamMinBytes may serve it on, to nodes that have no transfer of it
 	// yet. Chains of nodes receiving through each other are at most
@@ -205,6 +208,7 @@ type Spreader struct {
 	runCtx    context.Context  // Run's: orders outlive the request that started a spread
 	jobs      map[string]*sjob // by image
 	byID      map[string]*sjob
+	starting  map[string]context.CancelCauseFunc // images whose manifest Begin is still reading
 	published bool
 	wakeup    waker
 	wg        sync.WaitGroup // order goroutines, for tests
@@ -322,6 +326,9 @@ func NewSpreader(registry *Registry, resolver ImageResolver, token string, cfg S
 	for _, r := range []string{"complete", "superseded", "expired"} {
 		spreadsTotal.Add(0, r)
 	}
+	for _, r := range []string{"first", "retried", "fallback", "superseded"} {
+		spreadStartsTotal.Add(0, r)
+	}
 	if cfg.MaxRegistry < 1 {
 		cfg.MaxRegistry = 1
 	}
@@ -340,11 +347,12 @@ func NewSpreader(registry *Registry, resolver ImageResolver, token string, cfg S
 	dial := (&net.Dialer{Timeout: 5 * time.Second}).DialContext
 	return &Spreader{
 		registry: registry, resolver: resolver, token: token, cfg: cfg,
-		orders: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, DialContext: dial}},
-		finals: &http.Client{Timeout: 16 * time.Minute, Transport: &http.Transport{Proxy: nil, DialContext: dial}},
-		jobs:   map[string]*sjob{},
-		byID:   map[string]*sjob{},
-		wakeup: newWaker(),
+		orders:   &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, DialContext: dial}},
+		finals:   &http.Client{Timeout: 16 * time.Minute, Transport: &http.Transport{Proxy: nil, DialContext: dial}},
+		jobs:     map[string]*sjob{},
+		byID:     map[string]*sjob{},
+		starting: map[string]context.CancelCauseFunc{},
+		wakeup:   newWaker(),
 	}
 }
 

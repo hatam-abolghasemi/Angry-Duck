@@ -173,9 +173,13 @@ type PreheatRequest struct {
 }
 
 // PreheatResponse tells the caller what the controller decided to do.
+// With spreading on, the spread starts in the background (Status
+// "spreading") and OrderedNodes is empty: the seeds are picked once the
+// image's manifest is read.
 type PreheatResponse struct {
 	Accepted     bool     `json:"accepted"`
 	Reason       string   `json:"reason,omitempty"`
+	Status       string   `json:"status,omitempty"`
 	TargetImage  string   `json:"target_image,omitempty"`
 	OrderedNodes []string `json:"ordered_nodes,omitempty"`
 }
