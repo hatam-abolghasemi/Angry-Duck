@@ -23,6 +23,11 @@ nothing in 1.13.0 and 1.13.1.
   (`companions.json` in `/var/lib/angryduck`) and reports its app repos; a
   restarted worker keeps protecting it at once, and a restarted controller
   learns the app repos back from the workers without waiting for a push.
+- **Dashboard tables size only columns with predictable values.** Free-text
+  columns (node, namespace, component, registry, transfer source) take the
+  free width instead of a fixed one, so long names are no longer cut off
+  next to empty space. Kind and version pills are wide enough for
+  `StatefulSet` and `1.13.2-pprof`.
 
 ### Added
 
