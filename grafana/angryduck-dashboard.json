@@ -2487,7 +2487,7 @@
                     "properties": [
                       {
                         "id": "custom.width",
-                        "value": 74
+                        "value": 115
                       },
                       {
                         "id": "custom.filterable",
@@ -2519,10 +2519,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 260
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -2539,10 +2535,6 @@
                       "options": "namespace"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 220
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -2577,10 +2569,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -4631,10 +4619,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -5394,10 +5378,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 220
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -5414,10 +5394,6 @@
                       "options": "component"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 300
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -5700,10 +5676,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -6192,10 +6164,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -6698,10 +6666,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -7074,10 +7038,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -11923,10 +11883,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -12311,10 +12267,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -12400,10 +12352,6 @@
                       "options": "source"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 200
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -15343,10 +15291,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -15857,10 +15801,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -16161,10 +16101,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 220
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -16198,10 +16134,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -19446,10 +19378,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 260
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -20813,10 +20741,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -25157,10 +25081,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -25517,10 +25437,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -26169,10 +26085,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -27326,10 +27238,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -27366,7 +27274,7 @@
                     "properties": [
                       {
                         "id": "custom.width",
-                        "value": 95
+                        "value": 115
                       },
                       {
                         "id": "custom.filterable",
@@ -28514,10 +28422,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -29128,10 +29032,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 235
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -29540,10 +29440,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -32548,10 +32444,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 115
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -33125,10 +33017,6 @@
                       "options": "node"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 235
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
@@ -34480,7 +34368,7 @@
                     "properties": [
                       {
                         "id": "custom.width",
-                        "value": 105
+                        "value": 115
                       },
                       {
                         "id": "custom.filterable",
@@ -34512,10 +34400,6 @@
                     },
                     "properties": [
                       {
-                        "id": "custom.width",
-                        "value": 260
-                      },
-                      {
                         "id": "custom.filterable",
                         "value": true
                       },
@@ -34532,10 +34416,6 @@
                       "options": "namespace"
                     },
                     "properties": [
-                      {
-                        "id": "custom.width",
-                        "value": 170
-                      },
                       {
                         "id": "custom.filterable",
                         "value": true
