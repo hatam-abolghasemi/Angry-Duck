@@ -32,46 +32,32 @@ var (
 	)
 )
 
-// publicRegistries are never app registries by way of the credentials
-// file: credentials for them are usually there to lift pull rate limits,
-// not because the cluster's own images live there.
-var publicRegistries = map[string]bool{
-	"docker.io": true, "index.docker.io": true, "registry-1.docker.io": true,
-	"ghcr.io": true, "quay.io": true, "gcr.io": true, "registry.k8s.io": true,
-	"k8s.gcr.io": true, "mcr.microsoft.com": true, "public.ecr.aws": true,
-}
-
 // CompanionConfig holds the companion tracker's tunables.
 type CompanionConfig struct {
-	// AppRegistries, when set (COMPANION_APP_REGISTRIES), are the app
-	// registries, and nothing is detected.
-	AppRegistries []string
-	// CredRegistries are the registries in the credentials file; the
-	// public ones are dropped.
-	CredRegistries []string
-	MaxBytes       int64         // COMPANION_MAX_MB in bytes; 0: no limit
-	Interval       time.Duration // re-evaluated at least this often
+	MaxBytes int64         // COMPANION_MAX_MB in bytes; 0: no limit
+	Interval time.Duration // re-evaluated at least this often
 	// Warmup is how long after start the set is held back, so that every
-	// live worker has reported what it runs (WORKER_STALE_AFTER_S).
+	// live worker has reported what it runs and the app repos it holds
+	// (WORKER_STALE_AFTER_S).
 	Warmup         time.Duration
 	MaxUtilization float64  // as propagation: nodes fuller than this are skipped
 	Exclude        []string // as propagation: nodes never sent companions
 }
 
 // Companions tracks the cluster's companion images: images a pod runs
-// beside an app image, an image from one of the app registries (sidecars:
-// exporters, proxies, agents). Their pods land on new nodes all the time,
-// and each time the sidecar's image is pulled again unless the node still
-// has it. So every node keeps them: they are spread to every eligible
-// node, and image cleanup there never removes them for age, only under
-// disk pressure, after every other unused image.
+// beside an app image (sidecars: exporters, proxies, agents). An app image
+// is one of an app repo: a repo CI preheats (the webhook). Which registry
+// an image comes from doesn't matter. Their pods land on new nodes all
+// the time, and each time the sidecar's image is pulled again unless the
+// node still has it. So every node keeps them: they are spread to every
+// eligible node, and image cleanup there never removes them for age, only
+// under disk pressure, after every other unused image.
 //
-// The app registries are COMPANION_APP_REGISTRIES when set; otherwise the
-// registries CI preheats from (the webhook) and those in the credentials
-// file, which is how they are known again right after a restart. Workers
-// get them in their report acks, tell companions apart themselves from
-// what their containers run, and report each with its size. Images above
-// COMPANION_MAX_MB aren't kept.
+// Workers get the app repos in their report acks, tell companions apart
+// themselves from what their containers run, report each with its size,
+// and save the set they hold on the node. A restarted controller learns
+// the app repos back from their reports. Images above COMPANION_MAX_MB
+// aren't kept.
 //
 // After a restart the set isn't sent until every live worker reported
 // (Warmup): workers keep the set they hold until then, so a restart never
@@ -84,7 +70,7 @@ type Companions struct {
 
 	mu      sync.Mutex
 	started time.Time
-	webhook map[string]bool // registries preheats came from
+	repos   map[string]bool // app repos: preheated, or held by a worker
 	ready   bool
 	set     model.CompanionSet
 	status  []model.CompanionStatus
@@ -96,7 +82,7 @@ func NewCompanions(registry *Registry, cfg CompanionConfig) *Companions {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}
-	c := &Companions{registry: registry, cfg: cfg, wakeup: newWaker(), started: time.Now(), webhook: map[string]bool{}}
+	c := &Companions{registry: registry, cfg: cfg, wakeup: newWaker(), started: time.Now(), repos: map[string]bool{}}
 	for _, s := range []string{"kept", "too_large", "size_unknown"} {
 		companionImages.Set(0, s)
 	}
@@ -114,21 +100,21 @@ func (c *Companions) SetKeep(fn func(images map[string]bool)) { c.keep = fn }
 // Wake asks for a re-evaluation now. It never blocks.
 func (c *Companions) Wake() { c.wakeup.wake() }
 
-// NoteRegistry records that CI preheated an image of ref's registry.
-func (c *Companions) NoteRegistry(ref string) {
-	host := imageref.RegistryHost(imageref.Normalize(ref))
-	if host == "" || len(c.cfg.AppRegistries) > 0 {
+// NoteRepo records that CI preheated ref: its repo is an app repo.
+func (c *Companions) NoteRepo(ref string) {
+	repo := imageref.Repo(imageref.Normalize(ref))
+	if repo == "" {
 		return
 	}
 	c.mu.Lock()
-	added := !c.webhook[host]
-	c.webhook[host] = true
+	added := !c.repos[repo]
+	c.repos[repo] = true
 	if added {
 		c.set = c.buildSetLocked(c.set.Digests) // acks carry it from now on
 	}
 	c.mu.Unlock()
 	if added {
-		logging.Infof("angryduck-controller: companions: %s is an app registry (CI preheats from it)", host)
+		logging.Infof("angryduck-controller: companions: %s is an app repo (CI preheats it)", repo)
 		c.Wake()
 	}
 }
@@ -141,15 +127,15 @@ func (c *Companions) Ack(held string) *model.CompanionSet {
 	if held == c.set.Hash {
 		return nil
 	}
-	set := c.set // Digests and AppRegistries are replaced, never modified
+	set := c.set // Digests and AppRepos are replaced, never modified
 	return &set
 }
 
 // Run re-evaluates on every wake-up (a report changed what a node runs)
 // and every Interval, until ctx is done.
 func (c *Companions) Run(ctx context.Context) {
-	logging.Infof("angryduck-controller: companions started: app_registries=%v (from credentials: %v) max_mb=%d warmup=%s",
-		c.cfg.AppRegistries, c.credRegistries(), c.cfg.MaxBytes>>20, c.cfg.Warmup)
+	logging.Infof("angryduck-controller: companions started: max_mb=%d warmup=%s (app repos: those CI preheats, and those workers hold)",
+		c.cfg.MaxBytes>>20, c.cfg.Warmup)
 	t := time.NewTicker(c.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -166,33 +152,11 @@ func (c *Companions) Run(ctx context.Context) {
 	}
 }
 
-func (c *Companions) credRegistries() []string {
-	var out []string
-	for _, h := range c.cfg.CredRegistries {
-		if !publicRegistries[h] {
-			out = append(out, h)
-		}
-	}
-	return out
-}
-
-// appRegistriesLocked is the app registries, sorted.
-func (c *Companions) appRegistriesLocked() []string {
-	if len(c.cfg.AppRegistries) > 0 {
-		out := append([]string(nil), c.cfg.AppRegistries...)
-		sort.Strings(out)
-		return out
-	}
-	seen := map[string]bool{}
-	for _, h := range c.credRegistries() {
-		seen[h] = true
-	}
-	for h := range c.webhook {
-		seen[h] = true
-	}
-	out := make([]string, 0, len(seen))
-	for h := range seen {
-		out = append(out, h)
+// appReposLocked is the app repos, sorted.
+func (c *Companions) appReposLocked() []string {
+	out := make([]string, 0, len(c.repos))
+	for r := range c.repos {
+		out = append(out, r)
 	}
 	sort.Strings(out)
 	return out
@@ -201,9 +165,9 @@ func (c *Companions) appRegistriesLocked() []string {
 // buildSetLocked is the set to send for digests (nil: not ready, the
 // workers keep theirs).
 func (c *Companions) buildSetLocked(digests []string) model.CompanionSet {
-	set := model.CompanionSet{AppRegistries: c.appRegistriesLocked(), Digests: digests, Ready: c.ready}
+	set := model.CompanionSet{AppRepos: c.appReposLocked(), Digests: digests, Ready: c.ready}
 	h := sha256.New()
-	for _, r := range set.AppRegistries {
+	for _, r := range set.AppRepos {
 		h.Write([]byte(r))
 		h.Write([]byte{0})
 	}
@@ -230,11 +194,13 @@ func (c *Companions) tick(now time.Time) {
 	fresh := c.registry.FreshWorkers()
 	all := map[string]*companion{}
 	reporting := 0
+	var learned []string
 	for _, w := range fresh {
 		if !w.CompanionState {
 			continue
 		}
 		reporting++
+		learned = append(learned, w.AppRepos...)
 		for _, ref := range w.Companions {
 			e := all[ref.Digest]
 			if e == nil {
@@ -289,6 +255,9 @@ func (c *Companions) tick(now time.Time) {
 	c.nodeGauges(fresh, status)
 
 	c.mu.Lock()
+	for _, r := range learned {
+		c.repos[r] = true // a restarted controller learns them back
+	}
 	wasReady := c.ready
 	if !c.ready && now.Sub(c.started) >= c.cfg.Warmup {
 		c.ready = true
@@ -301,8 +270,8 @@ func (c *Companions) tick(now time.Time) {
 	c.mu.Unlock()
 
 	if ready && !wasReady {
-		logging.Infof("angryduck-controller: companions: %d worker(s) reporting, %d companion image(s) kept on every node (%d bytes), %d not kept",
-			reporting, len(kept), keptBytes, len(digests)-len(kept))
+		logging.Infof("angryduck-controller: companions: %d worker(s) reporting, %d app repo(s), %d companion image(s) kept on every node (%d bytes), %d not kept",
+			reporting, len(c.set.AppRepos), len(kept), keptBytes, len(digests)-len(kept))
 	} else if changed && ready {
 		logging.Infof("angryduck-controller: companions: now %d kept (%d bytes), %d not kept", len(kept), keptBytes, len(digests)-len(kept))
 	}

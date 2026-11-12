@@ -18,7 +18,7 @@ import (
 func TestReporterCarriesCompanionsAndTakesTheSet(t *testing.T) {
 	var mu sync.Mutex
 	var got []model.WorkerReport
-	send := &model.CompanionSet{Hash: "h1", Ready: true, Digests: []string{"sha256:n"}, AppRegistries: []string{"r.io"}}
+	send := &model.CompanionSet{Hash: "h1", Ready: true, Digests: []string{"sha256:n"}, AppRepos: []string{"r.io/team/app"}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/report") {
 			var rep model.WorkerReport
@@ -50,10 +50,10 @@ func TestReporterCarriesCompanionsAndTakesTheSet(t *testing.T) {
 	if len(sets) != 1 || sets[0].Hash != "h1" {
 		t.Fatalf("sets %+v, want the ack's set", sets)
 	}
-	rp.SetCompanions([]model.ImageRef{{Digest: "sha256:n", Name: "docker.io/library/nginx:1", Size: 5}})
+	rp.SetCompanions([]model.ImageRef{{Digest: "sha256:n", Name: "docker.io/library/nginx:1", Size: 5}}, []string{"r.io/team/app"})
 	rp.reportOnce(0)
 	r := last()
-	if !r.CompanionState || len(r.Companions) != 1 || r.Companions[0].Size != 5 || r.CompanionsHash != "h1" {
+	if !r.CompanionState || len(r.Companions) != 1 || r.Companions[0].Size != 5 || r.CompanionsHash != "h1" || len(r.AppRepos) != 1 {
 		t.Fatalf("report %+v, want the companion with its size and the held hash", r)
 	}
 	if len(sets) != 1 {

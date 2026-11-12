@@ -43,6 +43,7 @@ type workerEntry struct {
 	// (CompanionState). Replaced, never modified.
 	CompanionState bool
 	Companions     []model.ImageRef
+	AppRepos       []string // the app repos of the set it holds, sorted
 }
 
 // hasSorted reports whether sorted list contains s.
@@ -354,6 +355,11 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 			stateChanged = true
 		}
 		w.CompanionState, w.Companions = rep.CompanionState, comps
+		appRepos := r.names.internList(w.AppRepos, rep.AppRepos)
+		if len(appRepos) != len(w.AppRepos) || (len(appRepos) > 0 && &appRepos[0] != &w.AppRepos[0]) {
+			stateChanged = true
+		}
+		w.AppRepos = appRepos
 	}
 	ack.InventoryHash = w.invHash
 	return ack

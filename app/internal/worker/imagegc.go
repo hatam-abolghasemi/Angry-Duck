@@ -294,7 +294,7 @@ func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string]
 			g.dirty = true
 		}
 	}
-	g.noteCompanionsLocked(pods, targets)
+	g.noteCompanionsLocked(pods, targets, groups)
 	if g.cfg.Retention {
 		g.inUseNow = inUse
 		var retained map[string]time.Time

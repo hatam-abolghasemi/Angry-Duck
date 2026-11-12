@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 )
 
@@ -86,19 +85,6 @@ func (s *Store) CredentialsFor(host string) (string, bool) {
 	}
 	userpass, ok := s.creds[normalizeHost(host)]
 	return userpass, ok
-}
-
-// Hosts returns every registry host with credentials, sorted.
-func (s *Store) Hosts() []string {
-	if s == nil {
-		return nil
-	}
-	out := make([]string, 0, len(s.creds))
-	for h := range s.creds {
-		out = append(out, h)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // Count returns how many registries have credentials loaded — used only

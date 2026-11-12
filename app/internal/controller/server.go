@@ -77,7 +77,7 @@ func (s *Server) handleHolders(w http.ResponseWriter, r *http.Request) {
 func (s *Server) SetRescuer(rs *Rescuer) { s.rescuer = rs }
 
 // SetCompanions adds the companion images to /status and tells the
-// tracker which registries CI preheats from.
+// tracker which repos CI preheats.
 func (s *Server) SetCompanions(c *Companions) { s.companions = c }
 
 // SetRetainer adds the retention copies to /status.
@@ -137,7 +137,7 @@ func (s *Server) handlePreheat(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Image = normalized
 	if s.companions != nil {
-		s.companions.NoteRegistry(req.Image)
+		s.companions.NoteRepo(req.Image)
 	}
 
 	if s.registry.FreshCount() == 0 {

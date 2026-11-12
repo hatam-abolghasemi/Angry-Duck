@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -9,16 +12,21 @@ import (
 	"angryduck/internal/model"
 )
 
-// Companion images: images a pod runs beside an app image (one from an
-// app registry), such as exporters, proxies and agents. The controller
-// spreads them to every node; here, image cleanup keeps them: never
-// removed for age, and under disk pressure only after every other unused
-// image. See controller.Companions.
+// Companion images: images a pod runs beside an app image (one of a repo
+// CI preheats), such as exporters, proxies and agents, whatever registry
+// they come from. The controller spreads them to every node; here, image
+// cleanup keeps them: never removed for age, and under disk pressure only
+// after every other unused image. See controller.Companions.
 //
 // The cleanup's own listing already says which containers share a pod, so
 // telling companions apart costs no extra call: each sample groups the
 // in-use containers by pod and, in every pod running an app image, takes
-// the other images. Each new one's size is asked of the runtime once.
+// the other images. A container is matched by every name its image has
+// here, since kubelet often creates containers by image ID alone. Each new
+// companion's size is asked of the runtime once. The set the controller
+// sent is saved next to the cleanup's state, so a restarted worker keeps
+// protecting it, and reported back, so a restarted controller learns its
+// app repos again.
 
 // companionWarmup is how long a freshly started worker holds back the age
 // rule while it waits for the controller's companion set.
@@ -30,53 +38,114 @@ const companionWarmup = 5 * time.Minute
 type gcCompanions struct {
 	pods    func() ([]PodImages, error)
 	sizeOf  func(image string) (int64, error)
-	onState func([]model.ImageRef)
+	onState func([]model.ImageRef, []string)
 	started time.Time
 
-	app       map[string]bool // app registry hosts
+	repos     map[string]bool // app repos
 	keep      map[string]bool // target digests kept on every node
-	ready     bool            // the controller's set arrived
+	ready     bool            // a ready set arrived, or was saved here
 	waitNoted bool
+	path      string   // where the set is saved ("" = memory only)
+	held      []string // app repos, sorted: reported back
 
 	local map[string]bool  // target digests running here beside an app image
 	sizes map[string]int64 // target digest -> size, once known
 	pub   map[string]int64 // what onState last got: digest -> size
+	pubR  []string         // the app repos onState last got
+}
+
+// savedCompanions is the set as saved on the node.
+type savedCompanions struct {
+	Hash     string   `json:"hash"`
+	Digests  []string `json:"digests"`
+	AppRepos []string `json:"app_repos"`
 }
 
 // EnableCompanions makes the cleanup list in-use containers by pod with
 // pods (replacing inUse), report the companion images running here with
 // their sizes (sizeOf) to onState, and keep the cluster's companions (see
 // SetCompanions). Call before Run.
-func (g *ImageGC) EnableCompanions(pods func() ([]PodImages, error), sizeOf func(string) (int64, error), onState func([]model.ImageRef)) {
+func (g *ImageGC) EnableCompanions(pods func() ([]PodImages, error), sizeOf func(string) (int64, error), onState func([]model.ImageRef, []string)) {
 	g.comp = &gcCompanions{pods: pods, sizeOf: sizeOf, onState: onState, started: time.Now(),
 		sizes: map[string]int64{}}
+	if g.cfg.StatePath != "" {
+		g.comp.path = filepath.Join(filepath.Dir(g.cfg.StatePath), "companions.json")
+		g.loadCompanions()
+	}
 	imagesDeletedTotal.Add(0, g.nodeID, "companion")
 	gcCandidates.Set(0, g.nodeID, "companion")
 }
 
-// SetCompanions takes the controller's companion set (from a report ack).
-// A set that isn't ready only updates the app registries: the digests
-// held stay until the controller has heard from every node.
+// loadCompanions takes the set saved on the node, if any.
+func (g *ImageGC) loadCompanions() {
+	b, err := os.ReadFile(g.comp.path)
+	if err != nil {
+		return
+	}
+	var st savedCompanions
+	if json.Unmarshal(b, &st) != nil {
+		return
+	}
+	g.applyCompanionsLocked(st.Digests, st.AppRepos, true)
+	logging.Infof("angryduck-worker[%s]: image cleanup: loaded %d companion image(s) and %d app repo(s) from %s", g.nodeID, len(st.Digests), len(st.AppRepos), g.comp.path)
+}
+
+// applyCompanionsLocked replaces the set. Caller holds g.mu (or is the
+// only one touching g.comp yet).
+func (g *ImageGC) applyCompanionsLocked(digests, repos []string, ready bool) {
+	keep := make(map[string]bool, len(digests))
+	for _, d := range digests {
+		keep[d] = true
+	}
+	rs := make(map[string]bool, len(repos))
+	held := make([]string, 0, len(repos))
+	for _, r := range repos {
+		if !rs[r] {
+			rs[r] = true
+			held = append(held, r)
+		}
+	}
+	sort.Strings(held)
+	g.comp.repos, g.comp.held = rs, held
+	if ready {
+		g.comp.keep, g.comp.ready = keep, true
+	}
+}
+
+// SetCompanions takes the controller's companion set (from a report ack)
+// and saves it on the node. A set that isn't ready yet (a controller that
+// just started) is taken only by a worker holding none, for its app repos:
+// one holding a set keeps it until the controller has heard from every node.
 func (g *ImageGC) SetCompanions(set model.CompanionSet) {
 	if g.comp == nil {
 		return
 	}
-	app := make(map[string]bool, len(set.AppRegistries))
-	for _, h := range set.AppRegistries {
-		app[h] = true
-	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.comp.app = app
-	if set.Ready {
-		keep := make(map[string]bool, len(set.Digests))
-		for _, d := range set.Digests {
-			keep[d] = true
-		}
+	switch {
+	case set.Ready:
 		if !g.comp.ready {
-			logging.Infof("angryduck-worker[%s]: image cleanup: keeping %d companion image(s) of the cluster; app registries %v", g.nodeID, len(keep), set.AppRegistries)
+			logging.Infof("angryduck-worker[%s]: image cleanup: keeping %d companion image(s) of the cluster; %d app repo(s)", g.nodeID, len(set.Digests), len(set.AppRepos))
 		}
-		g.comp.keep, g.comp.ready = keep, true
+		g.applyCompanionsLocked(set.Digests, set.AppRepos, true)
+	case len(g.comp.held) == 0:
+		g.applyCompanionsLocked(nil, set.AppRepos, false)
+		g.mu.Unlock()
+		return
+	default:
+		g.mu.Unlock()
+		return
+	}
+	path := g.comp.path
+	g.mu.Unlock()
+	if path == "" {
+		return
+	}
+	b, _ := json.Marshal(savedCompanions{Hash: set.Hash, Digests: set.Digests, AppRepos: set.AppRepos})
+	tmp := path + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+		if err := os.WriteFile(tmp, b, 0o644); err == nil {
+			_ = os.Rename(tmp, path)
+		}
 	}
 }
 
@@ -100,18 +169,11 @@ func (g *ImageGC) listInUse() (used []string, pods []PodImages, err error) {
 
 // companionsOf returns the target digests of the images that run, in any
 // pod, beside a container of an app image, and aren't app images
-// themselves.
-func companionsOf(pods []PodImages, app map[string]bool, targets map[string]string) map[string]bool {
-	if len(app) == 0 {
+// themselves. A container's image is found by its references (often a
+// bare image ID) in targets, and judged by every name it has (groups).
+func companionsOf(pods []PodImages, repos map[string]bool, targets map[string]string, groups map[string][]string) map[string]bool {
+	if len(repos) == 0 {
 		return nil
-	}
-	isApp := func(refs []string) bool {
-		for _, r := range refs {
-			if h := imageref.RegistryHost(imageref.Normalize(r)); h != "" && app[h] {
-				return true
-			}
-		}
-		return false
 	}
 	target := func(refs []string) string {
 		for _, r := range refs {
@@ -124,23 +186,35 @@ func companionsOf(pods []PodImages, app map[string]bool, targets map[string]stri
 		}
 		return ""
 	}
+	isApp := func(refs []string, d string) bool {
+		names := refs
+		if d != "" {
+			names = append(append([]string(nil), refs...), groups[d]...)
+		}
+		for _, n := range names {
+			if repo := imageref.Repo(imageref.Normalize(n)); repo != "" && repos[repo] {
+				return true
+			}
+		}
+		return false
+	}
 	out := map[string]bool{}
+	ds := make([]string, 0, 4)
+	apps := make([]bool, 0, 4)
 	for _, pod := range pods {
+		ds, apps = ds[:0], apps[:0]
 		hasApp := false
 		for _, refs := range pod {
-			if isApp(refs) {
-				hasApp = true
-				break
-			}
+			d := target(refs)
+			app := isApp(refs, d)
+			ds, apps = append(ds, d), append(apps, app)
+			hasApp = hasApp || app
 		}
 		if !hasApp {
 			continue
 		}
-		for _, refs := range pod {
-			if isApp(refs) {
-				continue
-			}
-			if d := target(refs); d != "" {
+		for i, d := range ds {
+			if !apps[i] && d != "" {
 				out[d] = true
 			}
 		}
@@ -150,11 +224,11 @@ func companionsOf(pods []PodImages, app map[string]bool, targets map[string]stri
 
 // noteCompanions records the companions of the last sample. Caller holds
 // g.mu.
-func (g *ImageGC) noteCompanionsLocked(pods []PodImages, targets map[string]string) {
+func (g *ImageGC) noteCompanionsLocked(pods []PodImages, targets map[string]string, groups map[string][]string) {
 	if g.comp == nil {
 		return
 	}
-	g.comp.local = companionsOf(pods, g.comp.app, targets)
+	g.comp.local = companionsOf(pods, g.comp.repos, targets, groups)
 }
 
 // isCompanion reports whether d is kept as a companion. Caller holds g.mu.
@@ -187,7 +261,7 @@ func (g *ImageGC) publishCompanions(groups map[string][]string) {
 		return
 	}
 	g.mu.Lock()
-	local := g.comp.local
+	local, held := g.comp.local, g.comp.held
 	g.mu.Unlock()
 	c := g.comp
 	for d := range c.sizes {
@@ -196,7 +270,7 @@ func (g *ImageGC) publishCompanions(groups map[string][]string) {
 		}
 	}
 	refs := make([]model.ImageRef, 0, len(local))
-	same := len(local) == len(c.pub)
+	same := len(local) == len(c.pub) && equalStringSlices(held, c.pubR)
 	for d := range local {
 		name := displayName(groups[d])
 		size, ok := c.sizes[d]
@@ -220,6 +294,18 @@ func (g *ImageGC) publishCompanions(groups map[string][]string) {
 	for _, r := range refs {
 		pub[r.Digest] = r.Size
 	}
-	c.pub = pub
-	c.onState(refs)
+	c.pub, c.pubR = pub, held
+	c.onState(refs, held)
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

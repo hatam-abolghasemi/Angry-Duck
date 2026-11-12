@@ -61,6 +61,9 @@ type WorkerReport struct {
 	// while InventoryOmitted.
 	CompanionState bool       `json:"companion_state,omitempty"`
 	Companions     []ImageRef `json:"companions,omitempty"`
+	// AppRepos is the app repos of the companion set this worker holds,
+	// sorted: a restarted controller learns them back from its workers.
+	AppRepos []string `json:"app_repos,omitempty"`
 	// CompanionsHash is the hash of the CompanionSet this worker holds
 	// ("" none yet): the controller sends the set only when it differs.
 	CompanionsHash string    `json:"companions_hash,omitempty"`
@@ -80,16 +83,17 @@ type ImageRef struct {
 // CompanionSet is the cluster's companion images, as the controller sends
 // them to workers in a report ack: the target digests image cleanup keeps
 // on every node (no age rule; removed last under disk pressure), and the
-// app registries workers use to tell companions apart. Hash identifies
-// the set; a worker echoes the one it holds in CompanionsHash. Digests
-// count only when Ready: a controller that just started sends the app
-// registries first, and workers keep the digests they hold until every
-// node has reported to it.
+// app repos (those CI preheats) workers use to tell companions apart. Hash
+// identifies the set; a worker echoes the one it holds in CompanionsHash.
+// Only a Ready set counts: a controller that just started hasn't heard
+// from every node yet, and workers keep the set they hold (saved on the
+// node) until it has. A worker holding none takes the app repos of a set
+// that isn't ready, to start reporting.
 type CompanionSet struct {
-	Hash          string   `json:"hash"`
-	Ready         bool     `json:"ready,omitempty"`
-	Digests       []string `json:"digests,omitempty"`
-	AppRegistries []string `json:"app_registries,omitempty"`
+	Hash     string   `json:"hash"`
+	Ready    bool     `json:"ready,omitempty"`
+	Digests  []string `json:"digests,omitempty"`
+	AppRepos []string `json:"app_repos,omitempty"`
 }
 
 // CompanionStatus is one companion image, for /status.

@@ -108,7 +108,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	companions := newCompanions(registry, creds, staleAfter, excludeNodeSubstrings, feat.Companion)
+	companions := newCompanions(registry, staleAfter, excludeNodeSubstrings, feat.Companion)
 	if companions != nil {
 		server.SetCompanions(companions)
 	}
@@ -334,14 +334,12 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 
 // newCompanions sets up keeping the sidecar images of app pods on every
 // node, or returns nil when it's off.
-func newCompanions(registry *controller.Registry, creds *registryauth.Store, staleAfter time.Duration, rankExclude []string, enabled bool) *controller.Companions {
+func newCompanions(registry *controller.Registry, staleAfter time.Duration, rankExclude []string, enabled bool) *controller.Companions {
 	if !enabled {
 		log.Println("angryduck-controller: companion images disabled (COMPANION_ENABLED=false or GC_ENABLED=false)")
 		return nil
 	}
 	return controller.NewCompanions(registry, controller.CompanionConfig{
-		AppRegistries:  config.StringSlice("COMPANION_APP_REGISTRIES", nil),
-		CredRegistries: creds.Hosts(),
 		MaxBytes:       int64(config.Int("COMPANION_MAX_MB", 300)) << 20,
 		Interval:       config.Duration("COMPANION_INTERVAL_S", 30),
 		Warmup:         staleAfter,

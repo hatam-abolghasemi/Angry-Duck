@@ -20,17 +20,13 @@ func reportCompanions(reg *Registry, node, addr string, refs ...model.ImageRef) 
 }
 
 // The set goes out only once the warmup is over; before that, acks carry
-// the app registries (credentials minus public registries, plus what CI
-// preheated from) with Ready unset, so workers keep the digests they hold.
-// Images above the cap aren't kept, and an unchanged set isn't re-sent.
+// the app repos (those CI preheated) with Ready unset, so workers keep the
+// set they hold. Images above the cap aren't kept, and an unchanged set
+// isn't re-sent.
 func TestCompanionsSetAfterWarmupWithCap(t *testing.T) {
 	reg := NewRegistry(time.Hour, time.Minute)
-	c := NewCompanions(reg, CompanionConfig{
-		CredRegistries: []string{"docker.io", "registry.example.com"},
-		MaxBytes:       100 << 20,
-		Warmup:         time.Hour,
-	})
-	c.NoteRegistry("other.example.com/team/web:3")
+	c := NewCompanions(reg, CompanionConfig{MaxBytes: 100 << 20, Warmup: time.Hour})
+	c.NoteRepo("registry.example.com/team/web:3")
 
 	ack := reportCompanions(reg, "w1", "w1:1",
 		model.ImageRef{Digest: "sha256:n", Name: nginx, Size: 10 << 20},
@@ -39,10 +35,10 @@ func TestCompanionsSetAfterWarmupWithCap(t *testing.T) {
 		model.ImageRef{Digest: "sha256:n", Name: nginx, Size: 10 << 20},
 		model.ImageRef{Digest: "sha256:e", Name: exp}) // no size yet
 	if ack.Companions == nil || ack.Companions.Ready || len(ack.Companions.Digests) != 0 {
-		t.Fatalf("before the warmup: %+v, want app registries only", ack.Companions)
+		t.Fatalf("before the warmup: %+v, want app repos only", ack.Companions)
 	}
-	if got := ack.Companions.AppRegistries; len(got) != 2 || got[0] != "other.example.com" || got[1] != "registry.example.com" {
-		t.Fatalf("app registries %v, want the webhook's and the credentials' minus docker.io", got)
+	if got := ack.Companions.AppRepos; len(got) != 1 || got[0] != "registry.example.com/team/web" {
+		t.Fatalf("app repos %v, want the preheated repo", got)
 	}
 
 	c.tick(time.Now()) // still warming up
@@ -85,14 +81,17 @@ func TestCompanionsSetAfterWarmupWithCap(t *testing.T) {
 	}
 }
 
-// COMPANION_APP_REGISTRIES replaces detection entirely.
-func TestCompanionsOverrideReplacesDetection(t *testing.T) {
+// A restarted controller has seen no preheat yet: it learns the app repos
+// back from the workers, which saved them.
+func TestCompanionsLearnAppReposFromWorkers(t *testing.T) {
 	reg := NewRegistry(time.Hour, time.Minute)
-	c := NewCompanions(reg, CompanionConfig{AppRegistries: []string{"git.example.com"}, CredRegistries: []string{"registry.example.com"}})
-	c.NoteRegistry("other.example.com/a:1")
+	c := NewCompanions(reg, CompanionConfig{Warmup: 0})
+	reg.Update(model.WorkerReport{NodeID: "w1", Address: "w1:1", Timestamp: time.Now(),
+		CompanionState: true, AppRepos: []string{"registry.example.com/team/web"}})
+	c.tick(time.Now())
 	set := c.Ack("")
-	if len(set.AppRegistries) != 1 || set.AppRegistries[0] != "git.example.com" {
-		t.Fatalf("app registries %v, want only the override", set.AppRegistries)
+	if set == nil || !set.Ready || len(set.AppRepos) != 1 || set.AppRepos[0] != "registry.example.com/team/web" {
+		t.Fatalf("set %+v, want the repo a worker held", set)
 	}
 }
 
