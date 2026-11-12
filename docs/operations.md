@@ -179,7 +179,7 @@ network); find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.2
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.3
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

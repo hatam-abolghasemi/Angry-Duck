@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.13.3
+
+Less CPU and memory for the same work, from profiles of a worker and the
+controller on sahand-k8s-stg. Nothing a worker or the controller does or
+reports changes.
+
+### Changed
+
+- **Fewer socket calls into containerd.** A worker now hands containerd its
+  content writes 256 KiB at a time instead of gRPC's 32 KiB, about a third
+  of the calls. On a spread these calls were the largest share of a
+  worker's CPU. The buffer is taken from a pool only while writing, so an
+  idle worker holds none of it.
+- **The mirror relays a peer's blob in 256 KiB pieces** instead of 32 KiB,
+  with a pooled buffer.
+- **Listings read only what they use.** The periodic listings of
+  containerd's content, snapshots and images, and the CRI's containers,
+  sandboxes and images, now take only the digests, names, labels and image
+  references the worker uses from containerd's answer, not every label and
+  annotation of every entry. On a node with 1,500 blobs a content listing
+  went from about 62,000 allocations to 1,700, and from 11 ms of CPU to
+  4 ms. These listings were most of an idle worker's CPU and garbage.
+- **node-exporter is read uncompressed.** It runs on the same node, so gzip
+  only cost both sides CPU.
+- **`/metrics` is written without `fmt`.** The same text, byte for byte,
+  with a few allocations per scrape instead of one or more per series
+  (2,632 down to 18 on a busy controller).
+
 ## 1.13.2
 
 Companion images now work on clusters like sahand-k8s-stg, where they found
