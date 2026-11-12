@@ -8,7 +8,6 @@
 package metrics
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -22,22 +21,80 @@ import (
 // (node IDs, image references, "success"/"failure"), so it can't collide.
 const labelSep = "\x1f"
 
-// joinLabels renders labelNames/labelValues as Prometheus label-body text
-// ("name=\"value\",name2=\"value2\"", no surrounding braces), shared by
-// every metric type below so they format labels identically.
-func joinLabels(labelNames, labelValues []string) string {
-	var b strings.Builder
+// appendLabels appends the label body ("name=\"value\",name2=\"value2\"",
+// no surrounding braces) of the series stored under key: labelNames paired
+// with key's labelSep-separated values ("" where key has fewer). Every
+// metric type below formats labels through it, identically.
+func appendLabels(b []byte, labelNames []string, key string) []byte {
+	rest, more := key, true
 	for i, name := range labelNames {
 		if i > 0 {
-			b.WriteByte(',')
+			b = append(b, ',')
 		}
 		var val string
-		if i < len(labelValues) {
-			val = labelValues[i]
+		if more {
+			if j := strings.Index(rest, labelSep); j >= 0 {
+				val, rest = rest[:j], rest[j+len(labelSep):]
+			} else {
+				val, more = rest, false
+			}
 		}
-		fmt.Fprintf(&b, "%s=%q", name, val)
+		b = append(b, name...)
+		b = append(b, '=')
+		b = strconv.AppendQuote(b, val)
 	}
-	return b.String()
+	return b
+}
+
+// appendHeader appends a family's HELP and TYPE lines.
+func appendHeader(b []byte, name, help, typ string) []byte {
+	b = append(b, "# HELP "...)
+	b = append(b, name...)
+	b = append(b, ' ')
+	b = append(b, help...)
+	b = append(b, "\n# TYPE "...)
+	b = append(b, name...)
+	b = append(b, ' ')
+	b = append(b, typ...)
+	return append(b, '\n')
+}
+
+// appendSeriesStart appends "name{labels} ", the start of a sample line.
+func appendSeriesStart(b []byte, name string, labelNames []string, key string) []byte {
+	b = append(b, name...)
+	b = append(b, '{')
+	b = appendLabels(b, labelNames, key)
+	return append(b, "} "...)
+}
+
+// scrapeChunk is how much of a family is built before it is written out.
+const scrapeChunk = 16 << 10
+
+// scrapeBufs pools the buffers families are built in, so a scrape
+// formats every line without a fmt call or a string per line.
+var scrapeBufs = sync.Pool{New: func() any {
+	b := make([]byte, 0, scrapeChunk+1024)
+	return &b
+}}
+
+// flushIfFull writes b out once it holds a chunk, and returns it emptied.
+func flushIfFull(w io.Writer, b []byte) []byte {
+	if len(b) < scrapeChunk {
+		return b
+	}
+	_, _ = w.Write(b)
+	return b[:0]
+}
+
+// sortedKeys returns m's keys in order, for a stable line order across
+// scrapes.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // metric is anything the registry can serve at /metrics. CounterVec and
@@ -93,19 +150,16 @@ func (c *CounterVec) write(w io.Writer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Fprintf(w, "# HELP %s %s\n", c.name, c.help)
-	fmt.Fprintf(w, "# TYPE %s counter\n", c.name)
-
-	keys := make([]string, 0, len(c.counts))
-	for k := range c.counts {
-		keys = append(keys, k)
+	bp := scrapeBufs.Get().(*[]byte)
+	defer scrapeBufs.Put(bp)
+	b := appendHeader((*bp)[:0], c.name, c.help, "counter")
+	for _, key := range sortedKeys(c.counts) {
+		b = appendSeriesStart(b, c.name, c.labelNames, key)
+		b = strconv.AppendInt(b, c.counts[key], 10)
+		b = flushIfFull(w, append(b, '\n'))
 	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		values := strings.Split(key, labelSep)
-		fmt.Fprintf(w, "%s{%s} %d\n", c.name, joinLabels(c.labelNames, values), c.counts[key])
-	}
+	_, _ = w.Write(b)
+	*bp = b[:0]
 }
 
 // GaugeVec is a point-in-time value split by a fixed, ordered set of
@@ -169,26 +223,23 @@ func (g *GaugeVec) write(w io.Writer) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	fmt.Fprintf(w, "# HELP %s %s\n", g.name, g.help)
-	fmt.Fprintf(w, "# TYPE %s gauge\n", g.name)
-
-	keys := make([]string, 0, len(g.values))
-	for k := range g.values {
-		keys = append(keys, k)
+	bp := scrapeBufs.Get().(*[]byte)
+	defer scrapeBufs.Put(bp)
+	b := appendHeader((*bp)[:0], g.name, g.help, "gauge")
+	for _, key := range sortedKeys(g.values) {
+		b = appendSeriesStart(b, g.name, g.labelNames, key)
+		b = appendFloat(b, g.values[key])
+		b = flushIfFull(w, append(b, '\n'))
 	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		values := strings.Split(key, labelSep)
-		fmt.Fprintf(w, "%s{%s} %s\n", g.name, joinLabels(g.labelNames, values), formatFloat(g.values[key]))
-	}
+	_, _ = w.Write(b)
+	*bp = b[:0]
 }
 
-// formatFloat renders a float64 the way Prometheus text exposition
+// appendFloat appends a float64 the way Prometheus text exposition
 // expects (shortest round-trippable decimal — "0.5", "10", "45.6", not
 // "4.56e+01" or trailing zeros).
-func formatFloat(f float64) string {
-	return strconv.FormatFloat(f, 'g', -1, 64)
+func appendFloat(b []byte, f float64) []byte {
+	return strconv.AppendFloat(b, f, 'g', -1, 64)
 }
 
 // registry holds every metric created via NewCounterVec/NewGaugeVec, so

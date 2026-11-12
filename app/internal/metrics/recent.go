@@ -1,9 +1,7 @@
 package metrics
 
 import (
-	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -138,15 +136,14 @@ func (g *RecentGaugeVec) write(w io.Writer) {
 	defer g.mu.Unlock()
 	g.pruneLocked()
 
-	fmt.Fprintf(w, "# HELP %s %s\n", g.name, g.help)
-	fmt.Fprintf(w, "# TYPE %s gauge\n", g.name)
-	keys := make([]string, 0, len(g.values))
-	for k := range g.values {
-		keys = append(keys, k)
+	bp := scrapeBufs.Get().(*[]byte)
+	defer scrapeBufs.Put(bp)
+	b := appendHeader((*bp)[:0], g.name, g.help, "gauge")
+	for _, key := range sortedKeys(g.values) {
+		b = appendSeriesStart(b, g.name, g.labelNames, key)
+		b = appendFloat(b, g.values[key].v)
+		b = flushIfFull(w, append(b, '\n'))
 	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		values := strings.Split(key, labelSep)
-		fmt.Fprintf(w, "%s{%s} %s\n", g.name, joinLabels(g.labelNames, values), formatFloat(g.values[key].v))
-	}
+	_, _ = w.Write(b)
+	*bp = b[:0]
 }
