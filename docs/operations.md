@@ -129,6 +129,11 @@ On a node holding 304 images, 614 snapshots and 918 blobs, with containerd 2.2:
   blob has been idle for `PAGE_CACHE_RELEASE_AFTER_S` (30s), so its container
   memory returns to its idle level after a transfer instead of staying up to
   the size of what it served.
+- With `DIRECT_WRITES`, a blob the worker writes passes through page cache
+  charged to its pod: at most 16 MiB of it at a time, written back and let go
+  as the transfer goes, and nothing once the blob is written. containerd's own
+  read of the file before the commit caches it again, charged to containerd,
+  as it was when containerd wrote it.
 - A few seconds after a burst of work ends, and at least once a minute,
   worker and controller hand freed heap back to the OS when more than 1 MiB is
   retained, so after a burst memory returns to near its idle level.
@@ -179,7 +184,7 @@ network); find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.3
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.4
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

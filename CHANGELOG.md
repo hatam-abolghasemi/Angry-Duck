@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.13.4
+
+Blobs go straight into containerd's files: about a third of the CPU per
+blob, worker and containerd together, in half the time.
+
+### Changed
+
+- **Direct writes** (`DIRECT_WRITES`, on by default). A blob a worker
+  receives (a spread, a registry pull by digest, a repair) used to reach
+  containerd as gRPC content writes: every byte copied into a message, sent
+  over containerd's socket, read and hashed there, then written to disk. Now
+  the worker opens the write through containerd as before, writes the bytes
+  into that write's own data file, and has containerd resume and commit it:
+  containerd reads the file once, checks its size and digest, and commits
+  it. Measured per 100 MB blob on containerd 1.7.27, 2.2.1, 2.2.3 and 2.4:
+  about 1.8 ms of CPU per MB instead of 5.3 (worker and containerd
+  together), and about 230 ms instead of 470.
+  - containerd stays the only one to commit anything, and checks every
+    byte: wrong, short or interrupted writes fail like a bad download and
+    are aborted, or left under their expiring lease if the worker dies.
+  - The worker mounts containerd's `ingest` directory writable for this;
+    committed blobs stay read-only. A probe at startup checks the whole path
+    on the node and leaves direct writes off on any failure (no mount, a
+    different containerd root, another layout), writing through the API as
+    before.
+  - Page cache: the bytes written are charged to the worker's pod. It keeps
+    at most 16 MiB of a blob in page cache while writing it (8 MiB, more
+    only for a peer streaming behind), and none once it is written; streams
+    to peers let go of what they read too.
+  - New metric `angryduck_worker_direct_writes_total{result}`.
+
 ## 1.13.3
 
 Less CPU and memory for the same work, from profiles of a worker and the

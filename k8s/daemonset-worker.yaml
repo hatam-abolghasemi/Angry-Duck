@@ -26,7 +26,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: worker
-          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.3
+          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.4
           env:
             - name: NODE_ID
               valueFrom:
@@ -72,6 +72,11 @@ spec:
             - name: containerd-content
               mountPath: /var/lib/containerd/io.containerd.content.v1.content
               readOnly: true
+            # Writable: blobs are written straight into the files of the
+            # writes the worker opens through containerd (DIRECT_WRITES).
+            # Committed blobs, above, stay read-only.
+            - name: containerd-ingest
+              mountPath: /var/lib/containerd/io.containerd.content.v1.content/ingest
             - name: containerd-config
               mountPath: /etc/containerd/config.toml
               readOnly: true
@@ -124,6 +129,10 @@ spec:
           hostPath:
             path: /var/lib/containerd/io.containerd.content.v1.content
             type: Directory
+        - name: containerd-ingest
+          hostPath:
+            path: /var/lib/containerd/io.containerd.content.v1.content/ingest
+            type: DirectoryOrCreate
         - name: containerd-config
           hostPath:
             path: /etc/containerd/config.toml
