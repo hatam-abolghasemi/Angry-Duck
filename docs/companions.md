@@ -12,32 +12,28 @@ keeps them there.
 
 ## Which images
 
-A companion image is any image a pod runs **beside an app image**: an image
-from one of the **app registries**. App images themselves are left to
-[preheat](preheat.md) and [propagation](propagation.md).
+A companion image is any image a pod runs **beside an app image**. An **app
+image** is one of an **app repo**: a repository CI preheats through the
+webhook. App images themselves are left to [preheat](preheat.md) and
+[propagation](propagation.md).
 
-The app registries are, unless `COMPANION_APP_REGISTRIES` names them:
+Which registry an image comes from doesn't matter. A sidecar often lives in
+the same registry as the apps (an openresty built by the platform team, say),
+but CI never preheats it, so it's a companion. And a container is judged by
+every name its image has on the node, since kubelet often creates containers
+by image ID alone.
 
-- every registry CI has preheated from (the webhook), and
-- every registry in the credentials file (`REGISTRY_CREDENTIALS_PATH`),
-  except public ones (Docker Hub, `ghcr.io`, `quay.io`, `gcr.io`,
-  `registry.k8s.io`, `mcr.microsoft.com`, `public.ecr.aws`), whose credentials
-  usually exist only to lift rate limits.
-
-The credentials file is what makes the list known right after a controller
-restart, before CI calls the webhook again. Set `COMPANION_APP_REGISTRIES`
-when your app images live in a registry Angry Duck has no credentials for, or
-when a private registry also hosts the sidecars.
-
-Nothing is configured per workload: a new sidecar is picked up the minute a
-pod runs it, and one no pod runs anymore stops being a companion.
+Nothing is configured, per workload or otherwise: an app repo is known from
+its first preheat, a new sidecar the minute a pod runs it beside an app
+image, and one no pod runs anymore stops being a companion. Until CI has
+preheated anything, there are no companions.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     W[Worker: its cleanup's<br/>container listing,<br/>grouped by pod] -->|companions running here,<br/>with their size| C[Controller:<br/>the cluster's set]
-    C -->|set and app registries,<br/>in report acks| W
+    C -->|set and app repos,<br/>in report acks| W
     C -->|kept images| P[Propagation:<br/>every eligible node,<br/>from peers]
 ```
 
@@ -48,8 +44,8 @@ flowchart LR
    for each new one's size once, and reports them with its inventory.
 2. **The controller** combines the reports into the cluster's set. Images
    above `COMPANION_MAX_MB` (300) aren't kept, nor, while a cap is set, those
-   whose size no node reported yet. The set and the app registries go back
-   to every worker in its report ack, only when they changed.
+   whose size no node reported yet. The set and the app repos go back to
+   every worker in its report ack, only when they changed.
 3. **Propagation** puts each kept image on every eligible node, from peers
    that hold it. It never reads a registry for them, and it waits while a
    push is spreading, so companions never compete with a rollout. Nodes
@@ -63,13 +59,17 @@ flowchart LR
 
 ## Safe across restarts
 
-- **Controller:** after a restart, the set isn't sent until every live
-  worker has reported (`WORKER_STALE_AFTER_S`). Until then acks carry only the
-  app registries, and workers keep the set they hold, so a restart never lifts
-  the protection, not even for a moment.
-- **Worker:** a freshly started worker doesn't apply the age rule until the
-  controller's set arrives, for at most 5 minutes. A controller that predates
-  1.13.0 never sends one: after those 5 minutes cleanup goes on as before.
+- **Worker:** each worker saves the set it holds on its node
+  (`companions.json`, next to the cleanup's usage times in
+  `/var/lib/angryduck`). A restarted worker keeps protecting it at once. A
+  worker with nothing saved doesn't apply the age rule until the controller's
+  set arrives, for at most 5 minutes.
+- **Controller:** workers report the app repos they hold, so a restarted
+  controller knows them again without waiting for a push. It sends no set
+  until every live worker has reported (`WORKER_STALE_AFTER_S`); until then
+  acks carry only the app repos, taken by workers holding nothing yet, while
+  workers holding a set keep it. A restart never lifts the protection, not
+  even for a moment.
 
 ## Seeing it
 
@@ -98,6 +98,5 @@ flowchart LR
 | Variable | Default | Description |
 |---|---|---|
 | `COMPANION_ENABLED` | `true` | Keep companion images on every node. Under `GC_ENABLED`. |
-| `COMPANION_APP_REGISTRIES` | *(empty)* | App registries, comma-separated. Empty: CI's and the credentials file's (see above). |
 | `COMPANION_MAX_MB` | `300` | Larger images aren't kept. `0`: no limit. |
 | `COMPANION_INTERVAL_S` | `30` | Controller: the set is re-evaluated at least this often. Reports changing what runs where are acted on at once. |

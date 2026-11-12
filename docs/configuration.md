@@ -234,7 +234,6 @@ are only kept. See [Companion images](companions.md).
 | Variable | Default | Description |
 |---|---|---|
 | `COMPANION_ENABLED` | `true` | Keep companion images on every node. Read by both binaries; off when `GC_ENABLED=false`. |
-| `COMPANION_APP_REGISTRIES` | *(empty)* | Controller only. The app registries, comma-separated. Empty: every registry CI preheated from, plus those in the credentials file except public ones. |
 | `COMPANION_MAX_MB` | `300` | Controller only. Larger images aren't kept; while set, nor are those whose size no node reported yet. `0`: no limit. |
 | `COMPANION_INTERVAL_S` | `30` | Controller only. How often the set is re-evaluated at least. Reports changing what runs where are acted on at once. |
 
