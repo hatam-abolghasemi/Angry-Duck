@@ -79,7 +79,7 @@ holds it.
 |---|---|---|
 | `RANK_TOP_N` | `5` | Seed nodes per pushed image. |
 | `RANK_INTERVAL_S` | `10` | How often pull orders are (re)issued. |
-| `TARGET_TTL_S` | `120` | How long failed pull orders keep being replaced. |
+| `TARGET_TTL_S` | `120` | How long failed pull orders keep being replaced, and how long a preheat keeps retrying to read the image's manifest before seeding it whole. |
 | `RANK_BY_LAYERS` | `true` | Rank seeds by bytes already held, reading the image's manifest from its registry. |
 | `RANK_PLATFORM` | `linux/amd64` | Platform whose manifest is read. |
 | `RANK_RESOLVE_TIMEOUT_S` | `5` | Manifest lookup timeout. |

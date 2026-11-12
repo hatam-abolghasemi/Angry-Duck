@@ -14,11 +14,22 @@ curl -fsS -X POST https://angryduck.example.com/webhook/preheat \
   -H 'Content-Type: application/json' -d "{\"image\":\"${IMAGE}\"}" || true
 ```
 
-The controller answers `202` with the nodes it ordered to pull:
+The controller answers `202` right away, without waiting on the registry:
 
 ```json
-{"accepted": true, "target_image": "registry.example.com/app:1.2.3", "ordered_nodes": ["node-7", "node-3"]}
+{"accepted": true, "status": "spreading", "target_image": "registry.example.com/app:1.2.3"}
 ```
+
+It then reads the image's manifest and config in the background and picks
+the seeds. A registry that is slow or unreachable is asked again, backing off
+from 1 s to 15 s, for up to `TARGET_TTL_S` (120 s): one slow answer no longer
+sends the push down the slower whole-image path. Only if the manifest never
+reads in that time, or at once if the registry refuses Angry Duck's
+credentials, are seeds ordered to pull the image whole, and propagation takes
+it from there. A push of a newer tag of the same repo cancels a read still
+going. With `SPREAD_ENABLED=false` nothing changes: the answer lists the
+seeds (`ordered_nodes`), as before. The controller log and
+`angryduck_controller_spread_starts_total` say how each preheat started.
 
 Short names are normalized, so `nginx` becomes
 `docker.io/library/nginx:latest`. The call is best-effort: a failed preheat

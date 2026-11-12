@@ -6,7 +6,7 @@ Port `8080`.
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `POST /webhook/preheat` | webhook token, when configured | Body `{"image": "..."}`. Returns `202` with the seed nodes, or `503` when no worker is fresh. Short names are normalized, so `nginx` becomes `docker.io/library/nginx:latest`. Starts the spread; `ordered_nodes` are the nodes pulling from the registry first. |
+| `POST /webhook/preheat` | webhook token, when configured | Body `{"image": "..."}`. Returns `202` at once, or `503` when no worker is fresh. Short names are normalized, so `nginx` becomes `docker.io/library/nginx:latest`. With spreading on, `"status": "spreading"`: the manifest is read in the background, retried for `TARGET_TTL_S`, and the seeds show in `/status`; with spreading off, `ordered_nodes` are the seeds. See [Preheat](preheat.md#triggering-it). |
 | `POST /report` | token, when configured | Worker reports. |
 | `GET /layers/holders?digest=&exclude=` | token | Nodes holding a blob, for mirrors: by inventory, then those a spread just delivered it to, then those still receiving it in a spread (`"arriving": true`: ask their `/spread/content`, which streams it as it lands). |
 | `GET /images/tag?image=&newest=1` | token | For mirrors resolving a tag: `{"holders"}`, how many fresh nodes hold it, and with `newest=1` the `digest` the newest of their copies points at (asked of the holders, reused for `MIRROR_RESOLVE_NEWEST_CACHE_S`). Only with `MIRROR_RESOLVE_ENABLED`. |
@@ -24,7 +24,7 @@ curl -s -X POST localhost:8080/webhook/preheat -H "Authorization: Bearer ${ANGRY
 ```
 
 ```json
-{"accepted": true, "target_image": "registry.example.com/app:1.2.3", "ordered_nodes": ["node-7", "node-3"]}
+{"accepted": true, "status": "spreading", "target_image": "registry.example.com/app:1.2.3"}
 ```
 
 ## Worker

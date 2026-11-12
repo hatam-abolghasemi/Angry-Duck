@@ -208,6 +208,7 @@ what is moving, not history:
 | `angryduck_controller_spread_bytes_total` | counter | `path` | Bytes received for spreads. `path="registry"` is everything the registry served for them. |
 | `angryduck_controller_spread_finalizes_total` | counter | `result` | Nodes registering a spread image. |
 | `angryduck_controller_spreads_total` | counter | `result` | Spreads ended: `complete`, `superseded`, `expired`. |
+| `angryduck_controller_spread_starts_total` | counter | `result` | How preheats started: `first` (manifest read at once), `retried` (read after retries), `fallback` (never read in `TARGET_TTL_S`, or refused: seeded whole), `superseded` (a newer tag came first). |
 | `angryduck_controller_spread_last_duration_seconds` | gauge | | Preheat to last node registered, for the last complete spread. |
 
 ### Worker
