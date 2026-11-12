@@ -662,7 +662,13 @@ chaos_kill() {
   ans=$(preheat "$img"); log "preheat: $(tr -d '\n' <<<"$ans")"
   t0=$(now); sleep "$KILL_AFTER"
   if [ "$what" = worker ]; then
-    seeds=$(jq -r '.ordered_nodes[:2][]' <<<"$ans")
+    # The webhook answers before seeds are picked (1.13.1): read them from
+    # the spread, older controllers still list them in the answer.
+    seeds=$(jq -r '(.ordered_nodes // [])[:2][]' <<<"$ans")
+    if [ -z "$seeds" ]; then
+      seeds=$(ad_status | jq -r --arg i "$img" '[.spreads[]? | select(.image==$i) | .nodes[]? | select(.registry) | .node][:2][]')
+    fi
+    [ -n "$seeds" ] || die "no seed is pulling $img: nothing to kill"
     for s in $seeds; do
       log "killing the worker on seed $s mid-spread"
       K -n "$AD_NS" delete pod "$(worker_pod "$s")" --wait=false >/dev/null
