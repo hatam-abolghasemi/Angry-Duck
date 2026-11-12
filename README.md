@@ -96,7 +96,8 @@ and cleanup.
 | **Propagation** | Every other node gets each layer from whichever node already has it, the moment any node has it. The registry serves each layer about once. | [Propagation](docs/propagation.md) |
 | **Rescue** | A pod stuck in `ImagePullBackOff` gets its image copied from a node that has it, for any image. | [Rescue](docs/rescue.md) |
 | **Transfers** | Only missing layers move, as digest-verified blobs from any peer, with snapshots as a last resort. | [Transfers](docs/transfers.md) |
-| **Mirror** | A pull-only mirror on every node answers containerd from the node or a peer, tags included, and falls back to the registry. | [Mirror](docs/mirror.md) |
+| **Mirror** | A pull-only mirror on every node answers containerd from the node or a peer, even one still receiving the layer, tags included, and falls back to the registry. | [Mirror](docs/mirror.md) |
+| **Companion images** | Sidecars of app pods (exporters, proxies, agents), found on their own, kept on every node so a rescheduled pod never waits for them. | [Companion images](docs/companions.md) |
 | **Image cleanup** | Removes images unused for an hour, and oldest first when the disk is above 70% (down to 40%). One node keeps a copy of every image that went unused, for 24 hours of rollbacks. Every feature has an on/off switch. | [Image cleanup](docs/image-cleanup.md) |
 
 ## Quick start
@@ -113,7 +114,7 @@ them, so there is nothing to clone or build:
 
 ```bash
 helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck \
-  --version 1.12.0 --namespace angryduck --create-namespace \
+  --version 1.13.0 --namespace angryduck --create-namespace \
   --set ingress.host=angryduck.example.com
 ```
 
@@ -162,11 +163,11 @@ or [Helm](docs/helm.md), then pick a setup from [Recipes](docs/recipes.md).
 Feature guides: [Preheat](docs/preheat.md) ·
 [Propagation](docs/propagation.md) · [Rescue](docs/rescue.md) ·
 [Transfers](docs/transfers.md) · [Mirror](docs/mirror.md) ·
-[Image cleanup](docs/image-cleanup.md)
+[Image cleanup](docs/image-cleanup.md) · [Companion images](docs/companions.md)
 
 ## Status
 
-The current version is **1.12.0**; see the [changelog](CHANGELOG.md) and the
+The current version is **1.13.0**; see the [changelog](CHANGELOG.md) and the
 [releases](https://github.com/hatam-abolghasemi/Angry-Duck/releases). It runs
 on the clusters it was built for, through hundreds of deploys a day. Angry
 Duck targets Linux nodes running containerd 1.6 or later.

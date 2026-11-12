@@ -57,8 +57,18 @@ For each manifest or blob, by digest, the mirror:
    pulls and removals from containerd's events, so the index is about a
    second behind. A holder that can't serve it answers `404`, and the next
    one is tried;
-3. otherwise answers `404`, and containerd pulls from the registry as usual.
-   So a `404` means no node the controller knows of could serve the blob.
+3. otherwise streams it from a peer **still receiving** it in a spread (a
+   seed pulling it from the registry, or a node getting it from a peer):
+   the bytes go on to containerd as they land there, through the peer's
+   `/spread/content`. Many nodes asking for a layer at once then share one
+   registry download instead of each pulling its own. Peers whose worker
+   doesn't stream, or whose stream broke in this spread, aren't asked;
+   manifests never come this way. If that transfer fails midway, the stream
+   goes on from another copy of the blob if one is there, else it is cut
+   short and containerd's pull fails, to be retried by kubelet;
+4. otherwise answers `404`, and containerd pulls from the registry as usual.
+   So a `404` means no node the controller knows of could serve the blob,
+   whole or still arriving.
    An empty answer from the controller isn't cached, so a blob that lands on
    a peer a moment later is found on the next request.
 
@@ -139,8 +149,8 @@ it.
 
 | Metric | Meaning |
 |---|---|
-| `angryduck_worker_mirror_requests_total{kind, result}` | Requests served `local`, from a `peer`, a `miss` (registry), or `error`. |
-| `angryduck_worker_mirror_bytes_total{source}` | Bytes served, each one not downloaded from the registry. |
+| `angryduck_worker_mirror_requests_total{kind, result}` | Requests served `local`, from a `peer`, as a `stream` from a peer still receiving it, a `miss` (registry), or `error`. |
+| `angryduck_worker_mirror_bytes_total{source}` | Bytes served (`local`, `peer`, `stream`), each one not downloaded from the registry. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | Bytes this node served to other nodes' mirrors. |
 | `angryduck_worker_mirror_resolves_total{origin, result}` | Tags resolved, by the registry's answer (`ok`, `missing`, `denied`, `unreachable`, or `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). |
 

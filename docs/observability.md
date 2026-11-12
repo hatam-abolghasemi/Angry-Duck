@@ -34,7 +34,7 @@ yours there).
 | **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, streaming and the slow-chain guard, layers unpacked on arrival, seed pulls; preheat and propagation in collapsed rows. |
 | **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with why the pull failed, rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
 | **Mirror & Registry** | The mirror's hit ratio, requests and bytes; tags it resolved, by what the registry answered and where the manifest came from; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
-| **Disk Cleanup** | Cleanup state per node over time, images removable per tier, images removed, failed removals, images coming back after removal; image by image, what was removed from which node and what comes up next, and when. |
+| **Disk Cleanup** | Cleanup state per node over time, images removable per tier, images removed, failed removals, images coming back after removal; retention copies; companion images kept on every node and where each is missing; image by image, what was removed from which node and what comes up next, and when. |
 | **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method, inventory events, the controller's layer index and work in flight. |
 
 Every panel has a one-line description (hover its title). Click a node or an
@@ -66,7 +66,9 @@ every image it safely can and reports the node *stalled* rather than deleting
 more. The *Retention copies* row below the summary shows the images the
 cluster stopped running, the node keeping each and when its copy expires, and
 what happened to each copy; on the Image tab, *The Image on Each Node* shows a
-retention copy as *kept for rollbacks*.
+retention copy as *kept for rollbacks*. The *Companion images* row below it
+shows the sidecars kept on every node, the space they take, the nodes still
+missing each, and any removed under disk pressure.
 
 ![Disk Cleanup tab](images/dashboard-disk-cleanup.png)
 
@@ -184,6 +186,10 @@ the first event too.
 | `angryduck_controller_retention_copies` | gauge | `state` | [Retention copies](image-cleanup.md#retention-copies): `held` (a node keeps it), `pending` (no node picked yet), `copying` (being copied to a node with room). |
 | `angryduck_controller_retention_paused` | gauge | | 1 while copies wait because every node is at or above `GC_RETENTION_MAX_UTILIZATION`. |
 | `angryduck_controller_retention_events_total` | counter | `event` | `unused` (an image went unused everywhere), `kept` (a node keeps the copy), `copied`, `used` (runs again), `lost` (its node went away or dropped it), `gone` (no node holds it), `expired`. |
+| `angryduck_controller_companion_images` | gauge | `state` | [Companion images](companions.md): `kept`, `too_large` (above `COMPANION_MAX_MB`), `size_unknown`. |
+| `angryduck_controller_companion_bytes` | gauge | | Bytes of the kept companion images together. |
+| `angryduck_controller_companion_nodes` | gauge | `image`, `state` | Per kept companion image: nodes that `have` it, are `missing` it, or are `skipped`. One series per kept image and state. |
+| `angryduck_controller_companion_transfers_total` | counter | `result` | Companion images copied to nodes from peers: `success`, `failure`. |
 
 <a id="spread"></a>Spread. Series labeled `image` or `node` exist only while
 that image is being spread and drop when it ends, so their number follows
@@ -226,15 +232,15 @@ what is moving, not history:
 | `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
 | `angryduck_worker_spread_unpacks_total` | counter | `node`, `result` | Layers unpacked as they arrived, before the image registered: `applied`, `present` (already unpacked) or `failed` (left to the image's own unpack). |
 | `angryduck_worker_spread_finalizing` | gauge | `node` | Images being registered (imported and unpacked) right now. Different images run side by side. |
-| `angryduck_worker_mirror_requests_total` | counter | `node`, `kind`, `result` | Mirror requests (`blob`, `manifest`): `local`, `peer`, `miss`, `error`. |
-| `angryduck_worker_mirror_bytes_total` | counter | `node`, `source` | Bytes the mirror served, `local` or `peer`. |
+| `angryduck_worker_mirror_requests_total` | counter | `node`, `kind`, `result` | Mirror requests (`blob`, `manifest`): `local`, `peer`, `stream` (from a peer still receiving it in a spread; blobs only), `miss`, `error`. |
+| `angryduck_worker_mirror_bytes_total` | counter | `node`, `source` | Bytes the mirror served, `local`, `peer` or `stream`. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | counter | `node` | Bytes served to other nodes' mirrors. |
 | `angryduck_worker_mirror_resolves_total` | counter | `node`, `origin`, `result` | Tags the mirror resolved: the registry's answer (`ok`, `missing`, `denied`, `unreachable`; `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). Any `origin` but `ok` with `local` or `peer` is a pull the registry alone would have failed. |
 | `angryduck_worker_inventory_events_total` | counter | `node`, `topic` | containerd events that changed what the node can serve; each burst settles into one inventory report. |
 | `angryduck_worker_inventory_watch_up` | gauge | `node` | 1 while the node follows containerd's events, 0 while it falls back to periodic layer scans. |
-| `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `retention` (an expired [retention copy](image-cleanup.md#retention-copies)), or `error`. |
+| `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `companion` (a [companion image](companions.md), under disk pressure, last), `retention` (an expired [retention copy](image-cleanup.md#retention-copies)), or `error`. |
 | `angryduck_worker_gc_image_returns` | gauge | `node`, `image` | Images that came back within an hour of cleanup removing them, and how many times. Only images that came back in the last hour, so the series count stays small. |
-| `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`. |
+| `angryduck_worker_gc_candidates` | gauge | `node`, `tier` | Images removable right now: `old`, `pressure`, and `companion` (only under disk pressure, after the others; with companions on). |
 | `angryduck_worker_gc_retained_images` | gauge | `node` | Retention copies this node keeps (marked `angryduck.io/last-survivor`), not yet expired. Only with retention on. |
 | `angryduck_worker_gc_cleaning` | gauge | `node` | 1 while the disk is above high and not yet back to low. |
 | `angryduck_worker_broken_image` | gauge | `node`, `image` | 1 while that image is registered on the node but can't start a container. Removed once it is repaired or no longer registered. |
@@ -431,7 +437,7 @@ Useful ad-hoc queries:
 
 ```promql
 # Share of containerd's content served inside the cluster
-sum(rate(angryduck_worker_mirror_requests_total{result=~"local|peer"}[1h]))
+sum(rate(angryduck_worker_mirror_requests_total{result=~"local|peer|stream"}[1h]))
   / sum(rate(angryduck_worker_mirror_requests_total[1h]))
 
 # Average seed pull duration per node

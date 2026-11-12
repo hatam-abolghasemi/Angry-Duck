@@ -28,7 +28,8 @@ no endpoint, no metric series of its own.
 
 ```text
 GC_ENABLED                  image cleanup on each node
-└─ GC_RETENTION_ENABLED     one retention copy of every image that went unused
+├─ GC_RETENTION_ENABLED     one retention copy of every image that went unused
+└─ COMPANION_ENABLED        sidecar images of app pods kept on every node
 SPREAD_ENABLED              blob-by-blob spreading
 ├─ SPREAD_STREAM_ENABLED    serving blobs to peers while still receiving them
 └─ SPREAD_UNPACK_ENABLED    unpacking each layer as soon as it and the layers below are here
@@ -222,6 +223,20 @@ the cluster anymore, one node keeps it as the retention copy for
 | `GC_BATCH` | `5` | Images removed per batch. |
 | `GC_SETTLE_S` | `10` | Wait after a batch before re-measuring the disk. |
 | `GC_PROTECT_SUBSTRINGS` | `pause` | Never remove images whose name contains one of these. |
+
+## Companion images
+
+Images a pod runs beside an app image (sidecars) are spread to every node and
+kept there: no age rule, and under disk pressure removed only after every
+other unused image. Spreading them needs `PROPAGATE_ENABLED`; without it they
+are only kept. See [Companion images](companions.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `COMPANION_ENABLED` | `true` | Keep companion images on every node. Read by both binaries; off when `GC_ENABLED=false`. |
+| `COMPANION_APP_REGISTRIES` | *(empty)* | Controller only. The app registries, comma-separated. Empty: every registry CI preheated from, plus those in the credentials file except public ones. |
+| `COMPANION_MAX_MB` | `300` | Controller only. Larger images aren't kept; while set, nor are those whose size no node reported yet. `0`: no limit. |
+| `COMPANION_INTERVAL_S` | `30` | Controller only. How often the set is re-evaluated at least. Reports changing what runs where are acted on at once. |
 
 ## Image repair
 

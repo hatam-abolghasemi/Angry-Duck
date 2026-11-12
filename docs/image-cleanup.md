@@ -18,14 +18,17 @@ holds:
   removed oldest first, however recently they ran, until the disk is back
   down to `GC_LOW_UTILIZATION` (40%).
 
-A retention copy is outside both rules: see below.
+A retention copy is outside both rules: see below. A
+[companion image](companions.md) (a sidecar of app pods, kept on every node)
+is outside the first: disk pressure removes it too, but only after every other
+unused image.
 
 ```mermaid
 flowchart TD
     A[Every GC_INTERVAL_S] --> R[Remove expired<br/>retention copies]
     R --> B{Cleaning? Disk went<br/>above high and is<br/>not back to low}
     B -- no --> C[Remove images unused<br/>for GC_UNUSED_FOR_S]
-    B -- yes --> D[Remove a batch of unused<br/>images, oldest first]
+    B -- yes --> D[Remove a batch of unused<br/>images, oldest first,<br/>companions last]
     D --> E{Disk at low?}
     E -- yes --> F[Done]
     E -- no --> M{More unused<br/>images?}
