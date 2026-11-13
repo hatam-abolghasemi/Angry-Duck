@@ -26,7 +26,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: worker
-          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.4
+          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.5
           env:
             - name: NODE_ID
               valueFrom:

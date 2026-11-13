@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.13.5
+
+A containerd restart no longer stalls Angry Duck on that node.
+
+### Fixed
+
+- **containerd restarts.** The worker mounts containerd's socket as a single
+  file, so after containerd restarts (an unattended upgrade restarting it
+  through needrestart, a config push) the container still holds the old,
+  deleted socket and every call is refused until the pod is restarted by
+  hand. Spreads stalled cluster-wide: every transfer to such a node failed at
+  once (`creating lease: ... connection refused`), and nothing completed.
+  Now, when a dial to containerd fails, the worker checks whether its socket
+  was deleted from the node (link count 0: one stat, only after a failed
+  dial). If so, it removes its `hosts.toml` as on shutdown and exits, and
+  kubelet restarts it on the new socket. No new mounts or permissions: the
+  pod spec is unchanged.
+- **Nodes without containerd.** A worker whose listing can't reach
+  containerd says so in its report (`containerd_down`); the controller leaves
+  that node out of spread, propagation, rescue and the mirror's holders until
+  a report says containerd is back, instead of sending it work that fails
+  at once and retrying it.
+
 ## 1.13.4
 
 Blobs go straight into containerd's files: about a third of the CPU per
