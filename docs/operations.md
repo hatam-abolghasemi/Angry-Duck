@@ -49,6 +49,8 @@ utilization math.
 | Workers report no disk usage | node-exporter isn't reachable at the node IP from pods. Check `NODE_EXPORTER_URL` in the DaemonSet. |
 | Mirror never used, containerd logs `401` | A stale `hosts.toml` from a worker that died without SIGTERM; the next worker rewrites it within seconds. |
 | Worker exits with `connecting to containerd` | The socket isn't mounted at `CONTAINER_RUNTIME_ENDPOINT`. Check the `containerd-sock` hostPath. |
+| Worker exits with `containerd's socket ... was replaced` | containerd restarted (a package upgrade, needrestart, a config push) and this container still held its old socket. Expected: kubelet restarts the worker on the new socket within seconds. |
+| Node shows `containerd_down` in the controller's `/status` | Its worker can't reach containerd. The node gets no work and serves no one until containerd answers again. |
 | Most transferred layers are snapshots | containerd has `discard_unpacked_layers = true`. See [Transfers](transfers.md#integrity). |
 | Mirror requests are all `miss` | containerd's `config_path` doesn't point at `MIRROR_CONTAINERD_CONFIG_DIR`, or peers have no blobs. |
 | `image cleanup: ... nothing is removable` | Every image on the node is running, protected or being pulled. The disk needs attention beyond images. |
@@ -184,7 +186,7 @@ network); find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.4
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.13.5
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 
