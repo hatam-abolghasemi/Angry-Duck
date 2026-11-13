@@ -22,18 +22,19 @@ import (
 // Reporter periodically scrapes node-exporter and pushes disk utilization,
 // plus this node's local image inventory, to the controller.
 type Reporter struct {
-	nodeID        string
-	selfAddress   string
-	metricsURL    string
-	controllerURL string
-	token         string // sent on reports; "" sends none
-	interval      time.Duration
-	inventory     *Inventory
-	httpClient    *http.Client
-	kick          chan struct{}
-	layers        *LayerTracker          // nil: no layer inventory (no containerd, or turned off)
-	exclude       func() map[string]bool // names to leave out of reports (broken images)
-	streams       bool                   // spread streams blobs still arriving (see Spread.Streams)
+	nodeID         string
+	selfAddress    string
+	metricsURL     string
+	controllerURL  string
+	token          string // sent on reports; "" sends none
+	interval       time.Duration
+	inventory      *Inventory
+	httpClient     *http.Client
+	kick           chan struct{}
+	layers         *LayerTracker          // nil: no layer inventory (no containerd, or turned off)
+	exclude        func() map[string]bool // names to leave out of reports (broken images)
+	streams        bool                   // spread streams blobs still arriving (see Spread.Streams)
+	containerdDown bool                   // the last listing couldn't reach containerd (Run goroutine only)
 
 	// ackedInv is the inventory hash the controller last confirmed it
 	// holds. While it matches, reports leave the lists out. Only the Run
@@ -205,12 +206,13 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 	}
 
 	report := model.WorkerReport{
-		NodeID:      rp.nodeID,
-		Address:     rp.selfAddress,
-		Utilization: result.Utilization,
-		Layers:      layers,
-		Streams:     rp.streams,
-		Timestamp:   time.Now(),
+		NodeID:         rp.nodeID,
+		Address:        rp.selfAddress,
+		Utilization:    result.Utilization,
+		Layers:         layers,
+		Streams:        rp.streams,
+		Timestamp:      time.Now(),
+		ContainerdDown: rp.containerdDown,
 	}
 	onCompanions := rp.companionHook()
 	if onCompanions != nil {
@@ -283,6 +285,14 @@ func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
 // listing the worker performs.
 func (rp *Reporter) localInventory(listMaxAge time.Duration) (repos, images []string, ok bool) {
 	refs, err := rp.inventory.Get(listMaxAge)
+	if down := containerdUnreachable(err); down != rp.containerdDown {
+		rp.containerdDown = down
+		if down {
+			logging.Warnf("angryduck-worker[%s]: containerd is unreachable: telling the controller to leave this node out until it's back", rp.nodeID)
+		} else {
+			logging.Infof("angryduck-worker[%s]: containerd is reachable again", rp.nodeID)
+		}
+	}
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: failed to list local images for report: %v", rp.nodeID, err)
 		return nil, nil, false

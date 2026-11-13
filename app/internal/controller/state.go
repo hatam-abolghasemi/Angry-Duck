@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"angryduck/internal/layerindex"
+	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 )
@@ -33,6 +34,9 @@ type workerEntry struct {
 	LastSeen time.Time
 	// Streams: the worker serves spread blobs it is still receiving.
 	Streams bool
+	// ContainerdDown: the worker can't reach containerd. It neither serves
+	// nor receives anything until a report says otherwise (see isFresh).
+	ContainerdDown bool
 	// Image state for retention, when the worker reports it (ImageState):
 	// the images its containers use (sorted by digest, strings interned)
 	// and the retention copies it keeps. Replaced, never modified.
@@ -325,6 +329,14 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 	w.Utilization = rep.Utilization
 	w.LastSeen = rep.Timestamp
 	w.Streams = rep.Streams
+	if rep.ContainerdDown != w.ContainerdDown {
+		if rep.ContainerdDown {
+			logging.Warnf("angryduck-controller: node=%s reports containerd unreachable: it gets no work and serves no one until it's back", rep.NodeID)
+		} else {
+			logging.Infof("angryduck-controller: node=%s reaches containerd again", rep.NodeID)
+		}
+	}
+	w.ContainerdDown = rep.ContainerdDown
 
 	// A worker omits an unchanged inventory once we've echoed its hash.
 	// Workers that predate this never omit it.
@@ -365,10 +377,11 @@ func (r *Registry) Update(rep model.WorkerReport) model.ReportAck {
 	return ack
 }
 
-// isFresh reports whether a worker has reported within staleAfter of now.
-// Caller must hold at least a read lock.
+// isFresh reports whether a worker has reported within staleAfter of now
+// and can reach containerd: a node that can't neither holds nor receives
+// anything usable. Caller must hold at least a read lock.
 func (r *Registry) isFresh(w *workerEntry, now time.Time) bool {
-	return now.Sub(w.LastSeen) <= r.staleAfter
+	return now.Sub(w.LastSeen) <= r.staleAfter && !w.ContainerdDown
 }
 
 // FreshWorkers returns all workers that have reported recently, sorted by
@@ -433,15 +446,16 @@ func (r *Registry) Snapshot() model.ControllerStatus {
 		}
 		blobs, snaps, known := r.layers.Counts(w.NodeID)
 		out = append(out, model.WorkerStatus{
-			NodeID:      w.NodeID,
-			Address:     w.Address,
-			Utilization: w.Utilization,
-			Repos:       repos,
-			LastSeen:    w.LastSeen,
-			Fresh:       r.isFresh(w, now),
-			LayersKnown: known,
-			Blobs:       blobs,
-			Snapshots:   snaps,
+			NodeID:         w.NodeID,
+			Address:        w.Address,
+			Utilization:    w.Utilization,
+			Repos:          repos,
+			LastSeen:       w.LastSeen,
+			Fresh:          r.isFresh(w, now),
+			ContainerdDown: w.ContainerdDown,
+			LayersKnown:    known,
+			Blobs:          blobs,
+			Snapshots:      snaps,
 		})
 	}
 	target := r.targetImage

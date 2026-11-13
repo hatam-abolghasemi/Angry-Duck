@@ -12,6 +12,10 @@ type WorkerReport struct {
 	NodeID      string  `json:"node_id"`
 	Address     string  `json:"address"`     // host:port the controller can reach this worker's HTTP API on
 	Utilization float64 `json:"utilization"` // 0.0-1.0, root filesystem usage ratio
+	// ContainerdDown: the worker's last listing couldn't reach containerd.
+	// The controller gives such a node no work and sends no one to it until
+	// a report says otherwise. False from workers that predate it.
+	ContainerdDown bool `json:"containerd_down,omitempty"`
 	// Repos is the deduplicated set of bare repository identities (see
 	// imageref.Repo) present locally on this node, across every tag and
 	// alias form the runtime reports. It lets the controller prefer
@@ -211,6 +215,9 @@ type WorkerStatus struct {
 	Repos       []string  `json:"repos,omitempty"`
 	LastSeen    time.Time `json:"last_seen"`
 	Fresh       bool      `json:"fresh"`
+	// ContainerdDown: the worker reported containerd unreachable; the node
+	// counts as not fresh until it reports otherwise.
+	ContainerdDown bool `json:"containerd_down,omitempty"`
 	// Layer inventory size, when the node has sent one.
 	LayersKnown bool `json:"layers_known"`
 	Blobs       int  `json:"blobs,omitempty"`
