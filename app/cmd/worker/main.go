@@ -126,6 +126,17 @@ func main() {
 	log.Printf("angryduck-worker[%s]: starting: listen=%s self=%s metrics=%s controller=%s report_interval=%s containerd=%s namespace=%s snapshotter=%s",
 		nodeID, listenAddr, selfAddress, metricsURL, controllerURL, reportInterval, runtimeEndpoint, namespace, snapshotter)
 
+	// containerd restarted under a socket mounted as a single file: this
+	// container can't reach the new one, so it exits for kubelet to restart
+	// it (the same as a rollout restart, on this node only). Only a failed
+	// dial looks; no mounts or permissions beyond the socket itself.
+	staleSocket := make(chan string, 1)
+	worker.OnStaleSocket(func(path string) {
+		select {
+		case staleSocket <- path:
+		default:
+		}
+	})
 	client, err := containerd.New(strings.TrimPrefix(runtimeEndpoint, "unix://"),
 		containerd.WithDefaultNamespace(namespace), containerd.WithTimeout(10*time.Second),
 		containerd.WithDialOpts(worker.ContainerdDialOptions(nodeID)))
@@ -397,9 +408,17 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	log.Printf("angryduck-worker[%s]: shutting down", nodeID)
-	shutdown(nodeID, cancel, hosts, mirrorSrv, httpServer, store, pins, filepath.Join(hostRoot, stateDir))
+	select {
+	case <-sigCh:
+		log.Printf("angryduck-worker[%s]: shutting down", nodeID)
+		shutdown(nodeID, cancel, hosts, mirrorSrv, httpServer, store, pins, filepath.Join(hostRoot, stateDir))
+	case path := <-staleSocket:
+		log.Printf("angryduck-worker[%s]: containerd's socket %s was replaced (containerd restarted); this container still holds the old one: exiting so kubelet restarts it on the new socket", nodeID, path)
+		// containerd can't be reached from here: no pins to release and
+		// nothing to clean up; the next worker picks those up at startup.
+		shutdown(nodeID, cancel, hosts, mirrorSrv, httpServer, nil, nil, "")
+		os.Exit(1)
+	}
 }
 
 // shutdown runs on SIGTERM: a rollout, an eviction, or the DaemonSet being
@@ -430,6 +449,9 @@ func shutdown(nodeID string, cancel context.CancelFunc, hosts *worker.HostsConfi
 	_ = httpServer.Shutdown(ctx)
 	if pins != nil {
 		pins.ReleaseAll(ctx)
+	}
+	if stateDir == "" {
+		return // a restart, not an uninstall (containerd went away under us)
 	}
 	if !uninstalling(ctx, nodeID) {
 		return
