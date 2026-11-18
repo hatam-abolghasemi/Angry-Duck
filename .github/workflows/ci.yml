@@ -90,10 +90,15 @@ jobs:
           PY
 
   integration:
-    name: Integration tests (real containerd)
+    name: Integration tests (real containerd ${{ matrix.containerd }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.7: one layer at a time; 2.2: layers side by side (rebase).
+        containerd: ["1.7.27", "2.2.1"]
     env:
-      CONTAINERD_VERSION: "1.7.27"
+      CONTAINERD_VERSION: ${{ matrix.containerd }}
       SOCK: /run/angryduck-ci/containerd.sock
     steps:
       - uses: actions/checkout@v7
@@ -110,6 +115,7 @@ jobs:
           curl -fsSL -o /tmp/containerd.tgz \
             "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
           mkdir -p /tmp/containerd && tar -xzf /tmp/containerd.tgz -C /tmp/containerd
+          if [ "${CONTAINERD_VERSION%%.*}" = "1" ]; then
           cat > /tmp/containerd/config.toml <<'EOF'
           version = 2
           root = "/var/lib/angryduck-ci"
@@ -121,6 +127,19 @@ jobs:
             [plugins."io.containerd.grpc.v1.cri".containerd]
               snapshotter = "overlayfs"
           EOF
+          else
+          cat > /tmp/containerd/config.toml <<'EOF'
+          version = 3
+          root = "/var/lib/angryduck-ci"
+          state = "/run/angryduck-ci"
+          [grpc]
+            address = "/run/angryduck-ci/containerd.sock"
+          [plugins."io.containerd.cri.v1.runtime"]
+            disable_apparmor = true
+          [plugins."io.containerd.cri.v1.images"]
+            snapshotter = "overlayfs"
+          EOF
+          fi
           sudo mkdir -p /var/lib/angryduck-ci /run/angryduck-ci
           sudo sh -c 'nohup /tmp/containerd/bin/containerd --config /tmp/containerd/config.toml > /tmp/containerd/containerd.log 2>&1 &'
           for i in $(seq 1 30); do
