@@ -232,7 +232,7 @@ what is moving, not history:
 | `angryduck_worker_direct_writes_total` | counter | `node`, `result` | Blobs written straight into containerd's ingest files (`DIRECT_WRITES`): `ok`, or `failed` (aborted, as a failed transfer through the API would be). |
 | `angryduck_worker_page_cache_released_bytes_total` | counter | `node` | Page cache handed back after serving blob files: the pages this worker's reads brought in, once the file was idle for `PAGE_CACHE_RELEASE_AFTER_S`. |
 | `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
-| `angryduck_worker_spread_unpacks_total` | counter | `node`, `result` | Layers unpacked as they arrived, before the image registered: `applied`, `present` (already unpacked) or `failed` (left to the image's own unpack). |
+| `angryduck_worker_spread_unpacks_total` | counter | `node`, `result` | Layers unpacked as they arrived, before the image registered: `applied` (once the blob landed), `present` (already unpacked) or `failed` (left to the image's own unpack). With [unpacking while blobs arrive](stream-unpack.md) on, also `streamed` (while the blob was still arriving) and `stream_failed` (that failed: unpacked once it landed instead). |
 | `angryduck_worker_spread_finalizing` | gauge | `node` | Images being registered (imported and unpacked) right now. Different images run side by side. |
 | `angryduck_worker_mirror_requests_total` | counter | `node`, `kind`, `result` | Mirror requests (`blob`, `manifest`): `local`, `peer`, `stream` (from a peer still receiving it in a spread; blobs only), `miss`, `error`. |
 | `angryduck_worker_mirror_bytes_total` | counter | `node`, `source` | Bytes the mirror served, `local`, `peer` or `stream`. |

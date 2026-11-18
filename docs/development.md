@@ -117,6 +117,26 @@ cd app && go test -race ./...
     go test -tags integration -run TestBench -v ./internal/worker/
   ```
 
+- Unpacking while blobs arrive ([stream-unpack](stream-unpack.md)) is
+  tested against the same containerd: the snapshot trees it makes are
+  compared with containerd's own import, and a wrong chainID or a cut
+  transfer must commit nothing. Its timing runs compare it with containerd's
+  unpack:
+
+  ```sh
+  ANGRYDUCK_CONTAINERD=/run/containerd/containerd.sock \
+  ANGRYDUCK_CONTAINERD_ROOT=/var/lib/containerd ANGRYDUCK_BENCH=1 \
+    go test -tags integration -run 'StreamUnpack.*Bench' -v -timeout 40m ./internal/worker/
+  ```
+
+  `ANGRYDUCK_BENCH_MODES=stream,arrival` and `ANGRYDUCK_BENCH_ONCE=1` shorten
+  the whole-image run. Against containerd 2.2 or later it also runs the
+  side-by-side modes (`parallel`, `stream-parallel`), with
+  `ANGRYDUCK_BENCH_PARALLEL` layers at once.
+- CI runs the integration tests against containerd 1.7.27 (layers one at a
+  time) and 2.2.1 (side by side). Run them against both before changing
+  unpacking.
+
 ## Helm chart
 
 ```bash

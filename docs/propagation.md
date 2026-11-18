@@ -20,8 +20,10 @@ nothing more fits, so the first node in line doesn't take every free
 source:
 
 - **East-west first.** A node lacking a layer that some node holds fetches
-  it from that node. The rarest layer goes first (fewest holders), so new
-  sources appear where they are scarcest. A source serves
+  it from that node. Its **lowest layer goes first** (`SPREAD_BOTTOM_UP_ENABLED`),
+  the order it unpacks them in: the first layer to land can be unpacked at
+  once, and each next one while the rest still arrive. With it off, the
+  rarest layer goes first (fewest holders). A source serves
   `PROPAGATE_PER_SOURCE` transfers at a time. There is no cluster-wide cap
   and no per-receiver cap: that per-source limit is the only one, so every
   holder's link is used and the transfers in flight grow with the holders.
@@ -30,7 +32,9 @@ source:
 - **The registry only for what nobody has.** A registry pull is ordered
   only for a layer no node holds yet, at most `SPREAD_MAX_REGISTRY_PULLS`
   pulls at once cluster-wide (default: `RANK_TOP_N`). Nobody
-  pulling a layer comes first, the largest first.
+  pulling a layer comes first, the bottom one first (the largest first with
+  `SPREAD_BOTTOM_UP_ENABLED=false`). Every layer still starts early: the
+  pulls run side by side, and a node pulling one streams it on.
 - **No waiting on promises.** When every layer nobody holds is already
   being pulled, an idle node races the pull that has run longest, at most
   `SPREAD_RACE_PER_BLOB` (2) pulls per layer. A node with a bad route to the
@@ -153,10 +157,69 @@ is ready almost as soon as its last layer lands.
 - **Held by the job's lease**, like the blobs, so nothing is collected before
   the image references it. A superseded or dropped job stops unpacking and
   its lease takes the work with it.
+- **Side by side, where containerd can** (`SPREAD_UNPACK_PARALLEL_ENABLED`,
+  on): see [below](#unpacking-layers-side-by-side).
+- **While the blob still arrives**, optionally: with
+  `SPREAD_UNPACK_STREAM_ENABLED=true` (off by default: it needs privileges),
+  a layer is unpacked as its bytes come in, not once it has landed, and is
+  ready about when its last byte is. See
+  [Unpacking while blobs arrive](stream-unpack.md).
 - `SPREAD_UNPACK_ENABLED=false` leaves all unpacking to finalize.
   `angryduck_worker_spread_unpacks_total{result}` counts layers unpacked
   early (`applied`), already unpacked (`present`) and left to finalize
   (`failed`).
+
+## Unpacking layers side by side
+
+Bottom up, one at a time, a large layer still waits for every layer below it
+to be unpacked. Where containerd's snapshotter can commit a snapshot onto a
+parent ("rebase": overlayfs in containerd 2.2 and later), a node unpacks
+every layer as soon as its blob lands, side by side, and commits them bottom
+up as each layer below is committed: the commits keep the order, the
+unpacking doesn't wait. It is how containerd 2.2 unpacks in parallel itself
+(its `max_concurrent_unpacks`, off by default), through the same API.
+containerd still does the unpacking: the worker needs nothing new.
+
+- **Found at startup.** The worker asks containerd whether its snapshotter
+  has the capability, then commits a throwaway snapshot onto another and
+  reads the parent back. Anything else, containerd 1.x included: one at a
+  time, as before. The startup log says which:
+  `spread enabled: ... unpack_parallel=4`, or `unpacking layers one after
+  another: ...` with the reason.
+- **Checked as before**, and more: a layer is committed only if its content
+  chains to its chainID onto the layer below, and after the commit its
+  parent is read back. A containerd that dropped the parent would leave a
+  wrong snapshot under that chainID: it is removed at once, and from then
+  on layers are left to finalize's own unpack until the worker restarts
+  (and probes again).
+- **Whiteouts.** A layer unpacked with no parent is written as an overlay
+  upper directory, so files it deletes from the layers below stay deleted
+  (containerd issue 13030, which containerd's own parallel unpack fixed in
+  2.2.3; the worker does it with any 2.2).
+- **One difference, shared with containerd's own parallel unpack:** a
+  directory a layer only implies (a file in it, no entry for the directory)
+  gets default owner and mode instead of those of the layers below. Image
+  builders (BuildKit, Docker) always write the entry. If yours are
+  hand-made, set `SPREAD_UNPACK_PARALLEL_ENABLED=false`.
+- **At most `SPREAD_UNPACK_PARALLEL_MAX` at once** on a node, across all
+  spreads (default: a quarter of the node's CPUs, at least 2): the work runs
+  in containerd, next to the node's workloads.
+- With [unpacking while blobs arrive](stream-unpack.md) on too, the lowest
+  layer still arriving is unpacked as its bytes come in, and the others
+  side by side as they land.
+
+Measured with containerd 2.2.1 on a 2-vCPU VM (two layers at once), a
+3-layer, 980 MiB image spread to a node, first fetch order to image
+registered, two runs each:
+
+| Link per blob | One at a time | Side by side | While arriving | Both |
+|---|---|---|---|---|
+| 100 MiB/s | 10.1–10.7 s | 8.9–9.1 s | 7.6–7.7 s | 9.1–9.2 s |
+| 400 MiB/s | 9.4–9.6 s | 7.2–7.4 s | 7.6–7.7 s | 7.1–7.7 s |
+
+On two CPUs the CPU is the limit, so the two together do no better than
+either alone; side by side gains with the CPUs a node has. Measure on your
+own nodes (`bench/`).
 
 ## Blobs held until the image exists
 

@@ -13,6 +13,8 @@ how to use it from CI and workloads, and what it can't do.
 | `image_pull_progress_timeout` | `1m` instead of `5m` | When a registry stops answering, kubelet reports `ErrImagePull` only after this timeout, and [rescue](rescue.md) can't start before that. |
 | `max_concurrent_downloads` | `3` (default) or more | Layers one pull downloads in parallel, for seeds and for any pull that misses the preheated image. |
 | `snapshotter` | `overlayfs` (the default) | The only snapshotter Angry Duck supports. |
+| containerd version | 2.2 or later | Lets Angry Duck [unpack layers side by side](propagation.md#unpacking-layers-side-by-side). With 1.x, one at a time. |
+| `max_concurrent_unpacks` (transfer service, 2.2+) | `1` (default) on 2.2.0–2.2.2; more from 2.2.3 | containerd's own parallel unpack, for its own pulls. Before 2.2.3 it loses whiteouts on overlayfs (containerd issue 13030): files an image deletes show up again. Angry Duck's parallel unpack doesn't depend on this setting. |
 
 Where they live:
 

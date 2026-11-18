@@ -27,6 +27,15 @@ Work that needs privileges on the node (unpacking layers, mounting
 snapshots, writing files with their owners, modes and whiteouts) happens
 inside containerd, which already has them.
 
+**The one exception is opt-in**: [unpacking while blobs
+arrive](stream-unpack.md) (`worker.streamUnpack.enabled`, off by default)
+has the worker write layers into containerd's snapshots itself. It adds
+`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_MKNOD`,
+`CAP_SETFCAP` and `CAP_SYS_ADMIN`, and mounts
+`/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs` read-write:
+power over every image on the node. Everything on this page assumes it is
+off.
+
 The containerd socket is still root-equivalent on the node: anything that
 can drive containerd can run a privileged container. That is inherent to a
 tool that manages images, and it is the trust the worker keeps. What is

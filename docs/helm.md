@@ -13,7 +13,7 @@ references `registry-pull`, `angryduck-rescue-token` and
 `angryduck-webhook-token` but doesn't create them.
 
 ```bash
-helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.13.5 \
+helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.14.0 \
   --namespace angryduck --create-namespace \
   -f my-values.yaml
 ```
@@ -70,6 +70,7 @@ Install into `angryduck`, as the manifests do. In another namespace, set
 | `worker.image.tag` | the chart's `appVersion` | |
 | `worker.resources` | as in `k8s/` | See [Sizing](operations.md#sizing). |
 | `worker.tolerations` | `[{operator: Exists}]` | Every node, tainted ones included. |
+| `worker.streamUnpack.enabled` | `false` | Unpack layers while their blobs arrive. Adds seven capabilities, `CAP_SYS_ADMIN` among them, and mounts containerd's overlayfs snapshots writable: read [Unpacking while blobs arrive](stream-unpack.md) first. |
 | `registryCredentials.secretName` | `registry-pull` | dockerconfigjson Secret for seed pulls and manifest reads. |
 | `registryCredentials.optional` | `true` | Start without the Secret. Set `false` to make a missing Secret block the pods. |
 | `ingress.enabled` | `true` | Expose the webhook. |
