@@ -35467,7 +35467,7 @@
         "spec": {
           "id": 177,
           "title": "Layers Unpacked on Arrival by Result",
-          "description": "Per minute, layers a node unpacked as soon as the layer and the ones below it were there, before the image registered: unpacked on arrival, already unpacked (nothing to do), or left to finalize (the early unpack failed, so the image's own unpack does it at registration). Hidden when none happened.",
+          "description": "Per minute, layers a node unpacked as soon as the layer and the ones below it were there, before the image registered: unpacked on arrival, already unpacked (nothing to do), or left to finalize (the early unpack failed, so the image's own unpack does it at registration). With stream unpacking on (opt-in), also layers unpacked while their blob was still arriving (streamed), and those where that failed and the layer was unpacked once it landed instead (stream_failed). Hidden when none happened.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -35642,6 +35642,46 @@
                         "value": "failed (left to finalize)"
                       }
                     ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "streamed"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#3c9874",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "streamed (unpacked while arriving)"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "stream_failed"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "stream_failed (unpacked once landed)"
+                      }
+                    ]
                   }
                 ]
               }
@@ -35655,7 +35695,7 @@
         "spec": {
           "id": 178,
           "title": "Layers Unpacked on Arrival per Node",
-          "description": "Per minute, layers each node unpacked while the rest of the image was still arriving. This unpacking used to run all at once after the last layer landed; the more of it happens here, the sooner the image is ready. Hidden when none happened.",
+          "description": "Per minute, layers each node unpacked while the rest of the image was still arriving (with stream unpacking on, those unpacked while their own blob was still arriving count too). This unpacking used to run all at once after the last layer landed; the more of it happens here, the sooner the image is ready. Hidden when none happened.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -35673,7 +35713,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "(\nsum by (node) (rate(angryduck_worker_spread_unpacks_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"applied\"}[$__rate_interval])) * 60\n)\nand on () (sum(increase(angryduck_worker_spread_unpacks_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=\"applied\"}[$__range] @ end())) > 0)",
+                        "expr": "(\nsum by (node) (rate(angryduck_worker_spread_unpacks_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"applied|streamed\"}[$__rate_interval])) * 60\n)\nand on () (sum(increase(angryduck_worker_spread_unpacks_total{k8s_source_cluster=~\"$cluster\", node=~\"$node\", result=~\"applied|streamed\"}[$__range] @ end())) > 0)",
                         "legendFormat": "{{node}}",
                         "range": true
                       }
