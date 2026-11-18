@@ -314,6 +314,7 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		StreamMaxDepth:  config.Int("SPREAD_STREAM_MAX_DEPTH", 0),
 		ExpressMaxBytes: int64(config.Int("SPREAD_EXPRESS_MAX_MB", 32)) << 20,
 		SlowFactor:      config.Float("SPREAD_SLOW_FACTOR", 2),
+		BottomUp:        feat.SpreadBottomUp,
 	}
 	switch {
 	case !cfg.Stream:

@@ -533,3 +533,71 @@ func TestUnpackOfPlacesEachLayerOnTheOneBelow(t *testing.T) {
 		t.Fatalf("a layer without a media type is left to finalize, got %+v", u)
 	}
 }
+
+// With BottomUp, every node gets its layers bottom first, the order it
+// unpacks them in: the registry starts (and races) the bottom layer first,
+// and peers send each node its lowest missing layer first. Without it, the
+// largest and rarest go first.
+func TestSpreader_BottomUpOrdersEachNodesLayersBottomFirst(t *testing.T) {
+	for _, bottomUp := range []bool{true, false} {
+		f := &spreadFleet{busy: map[string]bool{}}
+		reg := NewRegistry(time.Hour, time.Minute)
+		for _, n := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
+			report(reg, n, f.worker(t, n), 0.2)
+		}
+		s := NewSpreader(reg, fakeImageResolver{testResolved()}, rescueToken, SpreaderConfig{
+			Interval: time.Hour, MaxRegistry: 5, RacePerBlob: 2, PerSource: 5, MaxUtilization: 0.7,
+			RetryAfter: time.Minute, BackoffMax: time.Hour, TransferTimeout: time.Hour,
+			ResolveTimeout: time.Second, Platform: "linux/amd64", BottomUp: bottomUp,
+		})
+		if _, err := s.Start(context.Background(), img); err != nil {
+			t.Fatal(err)
+		}
+		s.wg.Wait()
+		perLayer := map[string]int{}
+		for _, r := range f.take() {
+			perLayer[r.Digest]++
+		}
+		// Five pulls for three layers: each started once, two raced.
+		want := map[string]int{dL0: 2, dL1: 2, dL2: 1}
+		if !bottomUp {
+			want = map[string]int{dL0: 1, dL1: 2, dL2: 2}
+		}
+		for d, n := range want {
+			if perLayer[d] != n {
+				t.Fatalf("bottomUp=%t: registry pulls per layer = %v, want %v", bottomUp, perLayer, want)
+			}
+		}
+
+		// w1 ends up with every layer; the others fetch from it, PerSource
+		// (5) of them at once: each gets its first pick.
+		job := s.jobFor(img)
+		for _, d := range []string{dL0, dL1, dL2} {
+			s.done(model.SpreadDone{Node: "w1", Job: job.id, Digest: d, Path: model.SpreadPathRegistry, Result: model.SpreadResultOK, Bytes: 1})
+		}
+		s.tick(context.Background())
+		s.wg.Wait()
+		peers := byPath(f.take(), model.SpreadPathPeer)
+		if len(peers) == 0 {
+			t.Fatalf("bottomUp=%t: no peer orders", bottomUp)
+		}
+		first := map[string]string{}
+		for _, p := range peers {
+			if _, ok := first[p.node]; !ok || p.Digest < first[p.node] {
+				first[p.node] = p.Digest // dL0 < dL1 < dL2
+			}
+		}
+		for n, d := range first {
+			if bottomUp && d != dL0 {
+				t.Fatalf("node %s's first peer layer is %s, want the bottom one %s", n, d, dL0)
+			}
+		}
+		if !bottomUp {
+			for _, p := range peers {
+				if p.Digest == dL0 {
+					t.Fatalf("without bottomUp, the largest layer goes first, not %s to %s", dL0, p.node)
+				}
+			}
+		}
+	}
+}

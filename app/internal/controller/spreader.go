@@ -125,6 +125,11 @@ type SpreaderConfig struct {
 	// from finished transfers) is late, and the slow-chain guard acts on
 	// it. 0: no guard.
 	SlowFactor float64
+	// BottomUp: each node gets its layers bottom first (SPREAD_BOTTOM_UP_ENABLED),
+	// the order a node unpacks them in, so unpacking starts with the first
+	// layer that lands and keeps up with the rest. Off: rarest layer first
+	// to peers, largest first from the registry.
+	BottomUp bool
 }
 
 // Slow-chain guard timing.
@@ -172,9 +177,14 @@ func (s *Spreader) streamDepth(nodes int) int {
 // first node in line doesn't take every free source before the others get
 // one.
 //
-// Peer transfers go to the rarest layer first (fewest holders), so new
-// sources appear where they are scarcest. Nodes with a pod waiting for the
-// image come first, then the nodes that lack the fewest bytes.
+// Each node gets its layers bottom first (BottomUp), the order it unpacks
+// them in: a layer is unpacked onto the one below it, so the first to land
+// can be unpacked at once, and each next one while the rest still arrive.
+// Every layer still starts early: the registry serves the ones no node has
+// yet side by side, and a node receiving a layer streams it on. Without
+// BottomUp, peer transfers go to the rarest layer first (fewest holders),
+// so new sources appear where they are scarcest. Nodes with a pod waiting
+// for the image come first, then the nodes that lack the fewest bytes.
 //
 // A node still receiving a large blob is a source for it too, if its
 // worker streams (see SpreaderConfig.StreamMinBytes): the receiver gets the
@@ -751,8 +761,9 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 		active = append(active, nd)
 	}
 
-	// East-west: rarest layer first, then largest, from the least busy
-	// holder. One new transfer per node per round, until nothing more fits.
+	// East-west: bottom layer first (BottomUp), otherwise rarest first,
+	// then largest; from the least busy holder. One new transfer per node
+	// per round, until nothing more fits.
 	maxDepth := s.streamDepth(len(fresh))
 	streamers := s.streamersLocked(j, holders, byNode, maxDepth)
 	// load is the budget a transfer of layer i counts against.
@@ -781,6 +792,9 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 				len(holders[i]) == len(holders[best]) && layers[i].Size > layers[best].Size {
 				best, src, stream = i, h, st
 			}
+			if s.cfg.BottomUp {
+				break // missing is bottom first: the lowest one with a source
+			}
 		}
 		if best < 0 {
 			return false
@@ -796,8 +810,9 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 				Peer: &model.Holder{NodeID: src, Address: byNode[src].Address}, Stream: stream, ID: x.id, ExpectRate: s.rates[model.SpreadPathPeer], Unpack: unpackOf(layers, best)}})
 		return true
 	}
-	// North-south: only blobs no node holds. Unstarted ones first, largest
-	// first; otherwise race the pull that has run longest.
+	// North-south: only blobs no node holds. Unstarted ones first, the
+	// bottom one (BottomUp) or the largest; otherwise race the pull that
+	// has run longest.
 	regOrder := func(nd need) bool {
 		n, w := nd.n, nd.w
 		if *regBusy >= s.cfg.MaxRegistry {
@@ -810,7 +825,7 @@ func (s *Spreader) planLocked(j *sjob, fresh []*workerEntry, byNode map[string]*
 				n.streaming(i) && !regLate[i] {
 				continue
 			}
-			if best < 0 || betterPull(i, best, regPulls, regSince, layers) {
+			if best < 0 || betterPull(i, best, regPulls, regSince, layers, s.cfg.BottomUp) {
 				best = i
 			}
 		}
@@ -999,14 +1014,18 @@ func (s *Spreader) expireLocked(j *sjob, node string, n *snode, now time.Time) {
 // nobody is pulling beats one being raced, the larger of two unstarted
 // ones first (it takes longest), and of two being pulled, the one pulled
 // longest (most likely stuck on a slow node).
-func betterPull(a, b int, pulls []int, since []time.Time, layers []registryLayer) bool {
+func betterPull(a, b int, pulls []int, since []time.Time, layers []registryLayer, bottomUp bool) bool {
 	switch {
 	case (pulls[a] == 0) != (pulls[b] == 0):
 		return pulls[a] == 0
+	case pulls[a] == 0 && bottomUp:
+		return a < b
 	case pulls[a] == 0:
 		return layers[a].Size > layers[b].Size
 	case !since[a].Equal(since[b]):
 		return since[a].Before(since[b])
+	case bottomUp:
+		return a < b
 	default:
 		return layers[a].Size > layers[b].Size
 	}
