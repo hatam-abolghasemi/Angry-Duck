@@ -56,6 +56,11 @@ spec:
               value: "http://$(HOST_IP):9100/metrics"
             - name: HOST_NETWORK
               value: {{ .Values.worker.hostNetwork | quote }}
+            {{- if .Values.worker.streamUnpack.enabled }}
+            # Unpacking layers while their blobs arrive (docs/stream-unpack.md).
+            - name: SPREAD_UNPACK_STREAM_ENABLED
+              value: "true"
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: angryduck-config
@@ -88,6 +93,13 @@ spec:
               mountPath: /etc/containerd/certs.d
             - name: state
               mountPath: /var/lib/angryduck
+            {{- if .Values.worker.streamUnpack.enabled }}
+            # Writable, at the path containerd's mounts name: layers are
+            # unpacked into the snapshots the worker prepares through
+            # containerd (docs/stream-unpack.md).
+            - name: containerd-snapshots
+              mountPath: /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -111,6 +123,12 @@ spec:
             runAsUser: 0
             capabilities:
               drop: ["ALL"]
+              {{- if .Values.worker.streamUnpack.enabled }}
+              # Writing image files as they are: owners, modes, setuid,
+              # file capabilities, whiteouts (devices), opaque directories
+              # (trusted.* xattrs). Power over every image on the node.
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "MKNOD", "SETFCAP", "SYS_ADMIN"]
+              {{- end }}
       volumes:
         - name: registry-creds
           secret:
@@ -146,6 +164,14 @@ spec:
           hostPath:
             path: /var/lib/angryduck
             type: DirectoryOrCreate
+        {{- if .Values.worker.streamUnpack.enabled }}
+        - name: containerd-snapshots
+          hostPath:
+            path: /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
+            # OrCreate: on a node with another snapshotter the worker still
+            # starts, and its probe leaves the feature off with a warning.
+            type: DirectoryOrCreate
+        {{- end }}
       {{- with .Values.worker.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

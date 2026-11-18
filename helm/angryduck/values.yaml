@@ -30,6 +30,13 @@ worker:
   # address only (18081) and the mirror on the node's loopback (18082).
   # false: the worker runs on the pod network, where NetworkPolicy applies.
   hostNetwork: true
+  # Unpack layers while their blobs still arrive, instead of once they have
+  # landed: a large layer is ready about when its last byte is. Off by
+  # default: it gives the worker CAP_SYS_ADMIN and six more capabilities
+  # and containerd's overlayfs snapshots writable, which is power over
+  # every image on the node. Read docs/stream-unpack.md before turning it on.
+  streamUnpack:
+    enabled: false
 
 registryCredentials:
   secretName: registry-pull
@@ -111,7 +118,10 @@ config:
   SPREAD_BACKOFF_MAX_S: "600"
   SPREAD_TRANSFER_TIMEOUT_S: "1800"
   SPREAD_STREAM_ENABLED: "true"
+  SPREAD_BOTTOM_UP_ENABLED: "true"
   SPREAD_UNPACK_ENABLED: "true"
+  SPREAD_UNPACK_PARALLEL_ENABLED: "true"
+  SPREAD_UNPACK_PARALLEL_MAX: "0"
   SPREAD_STREAM_MIN_MB: "32"
   SPREAD_STREAM_MAX_DEPTH: "0"
   SPREAD_EXPRESS_MAX_MB: "32"
