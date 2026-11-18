@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.14.0
+
+Layers reach each node bottom first, unpack side by side where containerd
+2.2+ allows it, and, opt-in, unpack while their blobs still arrive.
+
+### Added
+
+- **Bottom-up layer order** (`SPREAD_BOTTOM_UP_ENABLED`, on). A node unpacks
+  an image's layers bottom up, each onto the one below. Spreading now sends
+  each node its layers in that order: peers give a node its lowest missing
+  layer first (it was the rarest), and the registry starts and races the
+  bottom layer first (it was the largest). The first layer to land can be
+  unpacked at once and each next one while the rest arrive, instead of the
+  top layers waiting, landed, for the bottom one. Every layer still starts
+  early: registry pulls run side by side, and a node receiving a layer
+  streams it on. `false` restores the old order.
+- **Unpacking while blobs arrive** (`SPREAD_UNPACK_STREAM_ENABLED`, Helm
+  `worker.streamUnpack.enabled`, **off by default**). A node unpacks a layer
+  as its bytes come in, not once its blob has landed, so a large layer is
+  ready about when its last byte is. The worker writes the layer into a
+  snapshot it prepares through containerd on the layer below, with
+  containerd's own archive code, and commits it only when the bytes hash to
+  the blob's digest and the tar to the diffID its chainID names; anything
+  else is removed and the layer is unpacked through containerd once it
+  lands. Reading, decompressing (klauspost's gzip decoder) and writing
+  overlap on three goroutines. On a 2-vCPU test VM: a 600 MiB gzip layer
+  unpacks in 4.8 s instead of 5.8 s, and a 980 MiB image is registered in
+  7.7–9.1 s instead of 9.8–10.6 s. It needs seven capabilities
+  (`CAP_SYS_ADMIN` among them) and containerd's overlayfs snapshots mounted
+  writable: power over every image on the node. The chart adds them only
+  when it is on; a startup probe keeps it off, with a warning, where they
+  are missing. zstd layers are left to containerd (their decoder would cost
+  the worker about 13 MiB more). See
+  [Unpacking while blobs arrive](docs/stream-unpack.md).
+- **Unpacking layers side by side** (`SPREAD_UNPACK_PARALLEL_ENABLED`, on;
+  `SPREAD_UNPACK_PARALLEL_MAX`). Where containerd's snapshotter can commit a
+  snapshot onto a parent (overlayfs, containerd 2.2 and later, found at
+  startup with a live probe), a node unpacks each layer as soon as its blob
+  lands, without waiting for the layers below, and commits them bottom up:
+  how containerd 2.2 unpacks in parallel itself, through the same API, so
+  the worker needs no privileges. Each commit's parent is read back, and a
+  layer unpacked without its parent keeps its whiteouts (the fix for
+  containerd issue 13030, applied with any 2.2). On containerd 1.x nothing
+  changes. On a 2-vCPU test VM with containerd 2.2.1, a 980 MiB image is
+  registered in 7.2–9.1 s instead of 9.4–10.7 s. A directory a layer only
+  implies, without an entry of its own, gets default owner and mode, as
+  with containerd's own parallel unpack; image builders always write the
+  entry.
+- CI runs the integration tests against containerd 2.2.1 as well as 1.7.27.
+- `angryduck_worker_spread_unpacks_total{result}`: `streamed` and
+  `stream_failed`. The dashboard's *Layers Unpacked on Arrival* panels show
+  them.
+
 ## 1.13.5
 
 A containerd restart no longer stalls Angry Duck on that node.
