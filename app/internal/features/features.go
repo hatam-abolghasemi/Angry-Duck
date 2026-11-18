@@ -11,7 +11,10 @@
 //	  COMPANION_ENABLED         sidecar images of app pods kept on every node
 //	SPREAD_ENABLED              blob-by-blob spreading
 //	  SPREAD_STREAM_ENABLED     serving blobs still arriving
+//	  SPREAD_BOTTOM_UP_ENABLED  each node gets its layers bottom first
 //	  SPREAD_UNPACK_ENABLED     unpacking layers as they arrive
+//	    SPREAD_UNPACK_STREAM_ENABLED    ... while their blobs still arrive (off by default: needs privileges)
+//	    SPREAD_UNPACK_PARALLEL_ENABLED  ... side by side, where containerd supports it (2.2+)
 //	PROPAGATE_ENABLED           whole-image propagation
 //	RESCUE_ENABLED              rescue of pods stuck on pulls
 //	MIRROR_ENABLED              the pull-only registry mirror
@@ -33,19 +36,26 @@ import (
 
 // Flags is the resolved set of switches.
 type Flags struct {
-	GC              bool
-	GCRetention     bool
-	Companion       bool
-	Spread          bool
-	SpreadStream    bool
-	SpreadUnpack    bool
-	Propagate       bool
-	Rescue          bool
-	Mirror          bool
-	MirrorResolve   bool
-	Repair          bool
-	LayerInventory  bool
-	InventoryEvents bool
+	GC             bool
+	GCRetention    bool
+	Companion      bool
+	Spread         bool
+	SpreadStream   bool
+	SpreadBottomUp bool
+	SpreadUnpack   bool
+	// SpreadUnpackStream is the only switch off by default: it gives the
+	// worker privileges over the node's images (docs/stream-unpack.md).
+	SpreadUnpackStream bool
+	// SpreadUnpackParallel takes effect only where containerd can commit
+	// a snapshot onto a parent (2.2 and later).
+	SpreadUnpackParallel bool
+	Propagate            bool
+	Rescue               bool
+	Mirror               bool
+	MirrorResolve        bool
+	Repair               bool
+	LayerInventory       bool
+	InventoryEvents      bool
 
 	// Notes says which features are off only because a parent is, one
 	// line each, for the startup log.
@@ -66,7 +76,10 @@ var tree = []switchDef{
 	{"COMPANION_ENABLED", true, "GC_ENABLED", func(f *Flags, v bool) { f.Companion = v }},
 	{"SPREAD_ENABLED", true, "", func(f *Flags, v bool) { f.Spread = v }},
 	{"SPREAD_STREAM_ENABLED", true, "SPREAD_ENABLED", func(f *Flags, v bool) { f.SpreadStream = v }},
+	{"SPREAD_BOTTOM_UP_ENABLED", true, "SPREAD_ENABLED", func(f *Flags, v bool) { f.SpreadBottomUp = v }},
 	{"SPREAD_UNPACK_ENABLED", true, "SPREAD_ENABLED", func(f *Flags, v bool) { f.SpreadUnpack = v }},
+	{"SPREAD_UNPACK_STREAM_ENABLED", false, "SPREAD_UNPACK_ENABLED", func(f *Flags, v bool) { f.SpreadUnpackStream = v }},
+	{"SPREAD_UNPACK_PARALLEL_ENABLED", true, "SPREAD_UNPACK_ENABLED", func(f *Flags, v bool) { f.SpreadUnpackParallel = v }},
 	{"PROPAGATE_ENABLED", true, "", func(f *Flags, v bool) { f.Propagate = v }},
 	{"RESCUE_ENABLED", true, "", func(f *Flags, v bool) { f.Rescue = v }},
 	{"MIRROR_ENABLED", true, "", func(f *Flags, v bool) { f.Mirror = v }},
@@ -98,6 +111,6 @@ func resolve(get func(key string, def bool) bool) Flags {
 
 // String lists every switch as resolved, for the startup log.
 func (f Flags) String() string {
-	return fmt.Sprintf("gc=%t gc_retention=%t companion=%t spread=%t spread_stream=%t spread_unpack=%t propagate=%t rescue=%t mirror=%t mirror_resolve=%t repair=%t layer_inventory=%t inventory_events=%t",
-		f.GC, f.GCRetention, f.Companion, f.Spread, f.SpreadStream, f.SpreadUnpack, f.Propagate, f.Rescue, f.Mirror, f.MirrorResolve, f.Repair, f.LayerInventory, f.InventoryEvents)
+	return fmt.Sprintf("gc=%t gc_retention=%t companion=%t spread=%t spread_stream=%t spread_bottom_up=%t spread_unpack=%t spread_unpack_stream=%t spread_unpack_parallel=%t propagate=%t rescue=%t mirror=%t mirror_resolve=%t repair=%t layer_inventory=%t inventory_events=%t",
+		f.GC, f.GCRetention, f.Companion, f.Spread, f.SpreadStream, f.SpreadBottomUp, f.SpreadUnpack, f.SpreadUnpackStream, f.SpreadUnpackParallel, f.Propagate, f.Rescue, f.Mirror, f.MirrorResolve, f.Repair, f.LayerInventory, f.InventoryEvents)
 }
