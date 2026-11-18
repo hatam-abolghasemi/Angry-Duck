@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/containerd"
@@ -75,6 +76,13 @@ type ContainerdStore struct {
 	// files (see directwrite.go), labelled with nodeID in metrics.
 	directWrites bool
 	nodeID       string
+
+	// streamUnpack: layers are unpacked into snapshots by this worker
+	// while their blobs arrive (see streamunpack.go).
+	streamUnpack bool
+	// parallelUnpack: containerd commits snapshots onto a parent, so
+	// layers are unpacked side by side (see parallelunpack.go).
+	parallelUnpack atomic.Bool
 }
 
 // NewContainerdStore wraps a connected client.

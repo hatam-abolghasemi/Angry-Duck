@@ -255,7 +255,35 @@ func main() {
 			sp.EnableUnpack(a)
 			unpacks = true
 		}
-		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t unpack_on_arrival=%t", nodeID, platform, timeout, streams, unpacks)
+		// Unpacking while blobs still arrive: off unless asked for, and
+		// only once a probe shows this worker can write into containerd's
+		// snapshots (docs/stream-unpack.md).
+		unpackStream := false
+		if unpacks && feat.SpreadUnpackStream {
+			switch err := store.EnableStreamUnpack(context.Background()); {
+			case err != nil:
+				log.Printf("angryduck-worker[%s]: WARNING: unpacking while blobs arrive is off: %v (it needs the worker's extra capabilities and containerd's %s snapshots mounted: see docs/stream-unpack.md)", nodeID, err, snapshotter)
+			case !sp.EnableStreamUnpack(store):
+				log.Printf("angryduck-worker[%s]: WARNING: unpacking while blobs arrive is off: it reads blobs still arriving, which needs containerd's content store mounted and SPREAD_STREAM_ENABLED", nodeID)
+			default:
+				unpackStream = true
+			}
+		}
+		// Unpacking layers side by side, where containerd can commit a
+		// snapshot onto a parent (2.2+); sequential everywhere else.
+		unpackParallel := 0
+		if unpacks && feat.SpreadUnpackParallel {
+			max := config.Int("SPREAD_UNPACK_PARALLEL_MAX", 0)
+			if max <= 0 {
+				max = parallelUnpackDefault(runtime.NumCPU())
+			}
+			if err := store.EnableParallelUnpack(context.Background()); err != nil {
+				log.Printf("angryduck-worker[%s]: unpacking layers one after another: %v", nodeID, err)
+			} else if sp.EnableParallelUnpack(store, max) {
+				unpackParallel = max
+			}
+		}
+		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t unpack_on_arrival=%t unpack_while_arriving=%t unpack_parallel=%d", nodeID, platform, timeout, streams, unpacks, unpackStream, unpackParallel)
 	}
 
 	// Images being pulled or received right now: cleanup and repair never
@@ -570,4 +598,11 @@ func bindHost(addr, ip string) string {
 		return addr
 	}
 	return net.JoinHostPort(ip, port)
+}
+
+// parallelUnpackDefault is how many layers a node unpacks at once when
+// SPREAD_UNPACK_PARALLEL_MAX isn't set: a quarter of its CPUs, at least 2.
+// containerd does the unpacking, next to the node's workloads.
+func parallelUnpackDefault(cpus int) int {
+	return max(2, cpus/4)
 }

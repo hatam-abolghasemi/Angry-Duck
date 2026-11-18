@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"io"
+	"sort"
 	"time"
 
 	"angryduck/internal/logging"
@@ -12,7 +14,7 @@ import (
 
 var spreadUnpacksTotal = metrics.NewCounterVec(
 	"angryduck_worker_spread_unpacks_total",
-	"Layers unpacked as they arrived, before the image was registered, by result: \"applied\", \"present\" (already unpacked) or \"failed\" (left to the image's own unpack).",
+	"Layers unpacked as they arrived, before the image was registered, by result: \"applied\" (once the blob landed), \"streamed\" (while the blob was still arriving), \"present\" (already unpacked), \"stream_failed\" (unpacking while arriving failed: unpacked once it landed instead) or \"failed\" (left to the image's own unpack).",
 	"node", "result",
 )
 
@@ -22,8 +24,24 @@ type LayerApplier interface {
 	ApplyLayer(ctx context.Context, lease string, l LayerSpec) (applied bool, err error)
 }
 
+// LayerStreamApplier unpacks a layer from its blob's bytes as they arrive
+// (see streamunpack.go). ContainerdStore has it.
+type LayerStreamApplier interface {
+	ApplyLayerStream(ctx context.Context, lease string, l LayerSpec, r io.Reader) (applied bool, err error)
+}
+
 // unpackTimeout bounds one layer's unpack, as finalize bounds a whole image.
 const unpackTimeout = 15 * time.Minute
+
+// errStreamUnpackDone ends the reading side of a stream unpack.
+var errStreamUnpackDone = errors.New("stream unpack ended")
+
+// pendingLayer is a layer waiting to be unpacked: landed, or (stream
+// unpacking) still arriving.
+type pendingLayer struct {
+	LayerSpec
+	arriving bool
+}
 
 // unpackJob is one spread job's unpacking on this node. Layers are
 // unpacked as their blobs land, bottom up: a layer whose layer below isn't
@@ -37,9 +55,24 @@ type unpackJob struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	pending map[string]LayerSpec // landed, not unpacked yet, by chainID
-	ready   map[string]bool      // chainIDs unpacked here (by us, or already)
-	waiting map[string]bool      // tried once, the layer below was missing
+	pending  map[string]pendingLayer // not unpacked yet, by chainID
+	ready    map[string]bool         // chainIDs unpacked here (by us, or already)
+	waiting  map[string]bool         // tried once, the layer below was missing
+	noStream map[string]bool         // unpacking while arriving failed: wait for the blob
+
+	// Parallel unpacking (see parallelunpack.go and parallelKickLocked):
+	// layers being worked on (unpacked or streamed), unpacked but not
+	// committed yet, tried for a commit since their layer below was last
+	// unpacked here, the order they were queued in, and the goroutines
+	// running for the job.
+	busy        map[string]bool
+	extracted   map[string]extractedLayer
+	commitTried map[string]bool
+	seq         map[string]int
+	nextSeq     int
+	workers     int
+	streaming   bool // a layer is being unpacked while it arrives
+	committing  bool
 
 	running bool
 	again   bool          // a layer landed during a run
@@ -56,26 +89,104 @@ func (s *Spread) EnableUnpack(a LayerApplier) {
 	s.applier = a
 }
 
-// landed queues the layer of a blob that is here now for unpacking.
-func (s *Spread) landed(job string, o model.SpreadFetch) {
+// EnableStreamUnpack unpacks layers while their blobs still arrive
+// (SPREAD_UNPACK_STREAM_ENABLED). It needs unpacking on arrival on and the
+// blobs still arriving readable here (the content store mounted, streaming
+// on); false when they aren't.
+func (s *Spread) EnableStreamUnpack(a LayerStreamApplier) bool {
+	if s.applier == nil || s.ingest == nil {
+		return false
+	}
+	for _, r := range []string{"streamed", "stream_failed"} {
+		spreadUnpacksTotal.Add(0, s.nodeID, r)
+	}
+	s.streamApplier = a
+	return true
+}
+
+// layerOf is the layer a fetch order places, if it says.
+func layerOf(o model.SpreadFetch) (LayerSpec, bool) {
 	u := o.Unpack
-	if s.applier == nil || u == nil || !validDigest(u.ChainID) || u.Parent != "" && !validDigest(u.Parent) ||
+	if u == nil || !validDigest(u.ChainID) || u.Parent != "" && !validDigest(u.Parent) ||
 		u.MediaType == "" || len(u.MediaType) > 255 {
+		return LayerSpec{}, false
+	}
+	return LayerSpec{Digest: o.Digest, Size: o.Size, MediaType: u.MediaType, ChainID: u.ChainID, Parent: u.Parent}, true
+}
+
+// arrives queues the layer of a blob whose transfer just started, for
+// unpacking while it arrives (stream unpacking only).
+func (s *Spread) arrives(job string, o model.SpreadFetch) {
+	if s.streamApplier == nil {
 		return
 	}
-	l := LayerSpec{Digest: o.Digest, Size: o.Size, MediaType: u.MediaType, ChainID: u.ChainID, Parent: u.Parent}
+	if l, ok := layerOf(o); ok && streamUnpackable(l.MediaType) {
+		s.queueUnpack(job, l, true)
+	}
+}
+
+// streamUnpackable: layers unpacked while they arrive are gzip or plain
+// tar. A zstd layer's decoder holds the frame's whole window (8 MiB with
+// common settings), about 13 MiB more for the worker while it runs: those
+// are unpacked once they land, through containerd, as before.
+func streamUnpackable(mediaType string) bool {
+	switch mediaType {
+	case "application/vnd.oci.image.layer.v1.tar",
+		"application/vnd.oci.image.layer.v1.tar+gzip",
+		"application/vnd.docker.image.rootfs.diff.tar.gzip",
+		"application/vnd.docker.image.rootfs.diff.tar":
+		return true
+	}
+	return false
+}
+
+// landed queues the layer of a blob that is here now for unpacking.
+func (s *Spread) landed(job string, o model.SpreadFetch) {
+	if s.applier == nil {
+		return
+	}
+	if l, ok := layerOf(o); ok {
+		s.queueUnpack(job, l, false)
+	}
+}
+
+// queueUnpack adds a layer to job's unpacking and starts it if idle.
+func (s *Spread) queueUnpack(job string, l LayerSpec, arriving bool) {
 	s.mu.Lock()
 	j := s.unpacks[job]
 	if j == nil {
 		ctx, cancel := context.WithCancel(context.Background())
-		j = &unpackJob{ctx: ctx, cancel: cancel, pending: map[string]LayerSpec{}, ready: map[string]bool{}, waiting: map[string]bool{}}
+		j = &unpackJob{ctx: ctx, cancel: cancel, pending: map[string]pendingLayer{}, ready: map[string]bool{},
+			waiting: map[string]bool{}, noStream: map[string]bool{}, busy: map[string]bool{},
+			extracted: map[string]extractedLayer{}, commitTried: map[string]bool{}, seq: map[string]int{}}
 		s.unpacks[job] = j
 	}
 	if j.stopped || j.ready[l.ChainID] {
 		s.mu.Unlock()
 		return
 	}
-	j.pending[l.ChainID] = l
+	if _, ok := j.extracted[l.ChainID]; ok {
+		s.mu.Unlock() // unpacked on its own, waiting to be committed
+		return
+	}
+	if p, ok := j.pending[l.ChainID]; ok && arriving && !p.arriving {
+		s.mu.Unlock() // landed already: a later transfer of it changes nothing
+		return
+	}
+	j.pending[l.ChainID] = pendingLayer{LayerSpec: l, arriving: arriving}
+	if _, ok := j.seq[l.ChainID]; !ok {
+		j.seq[l.ChainID] = j.nextSeq
+		j.nextSeq++
+	}
+	if s.extractor != nil {
+		s.parallelKickLocked(job, j)
+		s.mu.Unlock()
+		return
+	}
+	if arriving && j.noStream[l.ChainID] {
+		s.mu.Unlock() // waits for its blob
+		return
+	}
 	if j.running {
 		j.again = true
 		s.mu.Unlock()
@@ -114,12 +225,17 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 			s.mu.Unlock()
 			return
 		}
-		var todo []LayerSpec
+		var todo []pendingLayer
 		for _, l := range j.pending {
+			if l.arriving && (s.streamApplier == nil || j.noStream[l.ChainID]) {
+				continue // waits for its blob
+			}
 			if l.Parent == "" || j.ready[l.Parent] || !j.waiting[l.ChainID] {
 				todo = append(todo, l)
 			}
 		}
+		// Landed layers first: they don't wait on any transfer.
+		sort.SliceStable(todo, func(a, b int) bool { return !todo[a].arriving && todo[b].arriving })
 		s.mu.Unlock()
 		if len(todo) == 0 {
 			return
@@ -134,9 +250,16 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 				return
 			}
 			start := time.Now()
-			ctx, cancel := context.WithTimeout(j.ctx, unpackTimeout)
-			applied, err := s.applier.ApplyLayer(ctx, lease, l)
-			cancel()
+			var applied bool
+			var err error
+			if l.arriving {
+				applied, err = s.unpackStreaming(j.ctx, lease, l.LayerSpec)
+			} else {
+				ctx, cancel := context.WithTimeout(j.ctx, unpackTimeout)
+				applied, err = s.applier.ApplyLayer(ctx, lease, l.LayerSpec)
+				cancel()
+			}
+			streamFailed := false
 			s.mu.Lock()
 			switch {
 			case err == nil:
@@ -146,11 +269,19 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 				progress = true
 			case errors.Is(err, errParentMissing):
 				j.waiting[l.ChainID] = true
+			case l.arriving && j.ctx.Err() == nil:
+				// Unpacked once its blob lands instead, through containerd.
+				// If it landed meanwhile, landed() asked for another pass.
+				j.noStream[l.ChainID] = true
+				streamFailed = true
 			default:
 				delete(j.pending, l.ChainID)
 			}
 			s.mu.Unlock()
 			switch {
+			case err == nil && applied && l.arriving:
+				spreadUnpacksTotal.Inc(s.nodeID, "streamed")
+				logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) while it arrived, done %s after starting", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 			case err == nil && applied:
 				spreadUnpacksTotal.Inc(s.nodeID, "applied")
 				logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) in %s", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
@@ -159,12 +290,35 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 			case errors.Is(err, errParentMissing):
 			case j.ctx.Err() != nil:
 				return // dropped
+			case streamFailed:
+				spreadUnpacksTotal.Inc(s.nodeID, "stream_failed")
+				logging.Warnf("angryduck-worker[%s]: spread: unpacking %s while it arrived failed: %v (unpacking it once it lands instead)", s.nodeID, l.Digest, err)
 			default:
 				spreadUnpacksTotal.Inc(s.nodeID, "failed")
 				logging.Warnf("angryduck-worker[%s]: spread: unpacking %s early failed: %v (the image unpacks it at finalize)", s.nodeID, l.Digest, err)
 			}
 		}
 	}
+}
+
+// unpackStreaming unpacks l from its blob as it arrives: the bytes come
+// from whatever transfer of it runs here, then the committed blob, as a
+// peer streaming from this node gets them (see stream).
+func (s *Spread) unpackStreaming(jctx context.Context, lease string, l LayerSpec) (bool, error) {
+	ctx, cancel := context.WithTimeout(jctx, s.timeout+unpackTimeout)
+	defer cancel()
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := s.stream(ctx, pw, l.Digest, l.Size)
+		pw.CloseWithError(err) // nil: the whole blob, then EOF
+	}()
+	applied, err := s.streamApplier.ApplyLayerStream(ctx, lease, l, pr)
+	pr.CloseWithError(errStreamUnpackDone)
+	cancel()
+	<-done
+	return applied, err
 }
 
 // unpackStop ends a job's early unpacking. Finalize waits for a layer
@@ -185,6 +339,7 @@ func (s *Spread) unpackStop(ctx context.Context, job string, cancel bool) {
 	s.mu.Unlock()
 	if cancel || !running {
 		j.cancel()
+		s.discardExtracted(j)
 		return
 	}
 	select {
@@ -192,6 +347,7 @@ func (s *Spread) unpackStop(ctx context.Context, job string, cancel bool) {
 	case <-ctx.Done():
 	}
 	j.cancel()
+	s.discardExtracted(j)
 }
 
 // pruneUnpacksLocked forgets stopped jobs once no late transfer of theirs

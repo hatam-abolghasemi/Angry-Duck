@@ -147,8 +147,14 @@ type Spread struct {
 
 	// Unpacking layers as they arrive (see spreadunpack.go): nil applier
 	// when off.
-	applier LayerApplier
-	unpacks map[string]*unpackJob // by job, under mu
+	applier       LayerApplier
+	streamApplier LayerStreamApplier    // nil unless stream unpacking is on
+	unpacks       map[string]*unpackJob // by job, under mu
+	// Parallel unpacking (spreadparallel.go): nil extractor when off;
+	// extracting counts the layers being unpacked now across jobs, under mu.
+	extractor  LayerExtractor
+	extractMax int
+	extracting int
 }
 
 type spreadJob struct {
@@ -351,6 +357,8 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 	// Streamable from the moment the order is accepted: the controller
 	// may send peers here as soon as it sees the 202.
 	x.feed = s.feedStart(o.Digest, x.ref, o.Size)
+	// Its layer may be unpacked while it arrives (stream unpacking).
+	s.arrives(o.Job, o)
 
 	s.wg.Add(1)
 	go s.run(ctx, x, o)

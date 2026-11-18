@@ -6,6 +6,7 @@ require (
 	github.com/containerd/containerd v1.7.36
 	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/platforms v0.2.1
+	github.com/klauspost/compress v1.16.7
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	golang.org/x/sys v0.49.0
@@ -37,7 +38,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/klauspost/compress v1.16.7 // indirect
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/sys/mountinfo v0.6.2 // indirect
 	github.com/moby/sys/sequential v0.5.0 // indirect
