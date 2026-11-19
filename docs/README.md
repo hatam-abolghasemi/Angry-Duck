@@ -27,6 +27,14 @@
 - [API](api.md): controller and worker endpoints.
 - [Development](development.md): building and testing.
 
+**Maintaining it**
+
+- [Maintaining Angry Duck](maintaining/README.md): for whoever changes the
+  code: the [code map](maintaining/code-map.md), the [rules](maintaining/rules.md)
+  every change keeps, [features end to end](maintaining/features.md),
+  [checklists](maintaining/changing.md), [debugging](maintaining/debugging.md)
+  and [known limits](maintaining/limits.md).
+
 **Background**
 
 - [How Angry Duck came to be](story.md): the problems that shaped it, one by one.

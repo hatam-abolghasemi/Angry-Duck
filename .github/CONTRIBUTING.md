@@ -17,7 +17,9 @@ and code are all welcome.
 ## Making a change
 
 1. Read [Design](../docs/design.md): start early, run in parallel, never
-   block, and never make a deploy depend on Angry Duck.
+   block, and never make a deploy depend on Angry Duck. Then the
+   [rules](../docs/maintaining/rules.md) every change keeps, and the
+   [checklist](../docs/maintaining/changing.md) for the kind of change you make.
 2. Build and test as in [Development](../docs/development.md):
    `cd app && go test -race ./...`, and the integration tests if you touched
    the worker's containerd code.

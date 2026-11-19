@@ -162,7 +162,9 @@ it with **Share → Export → Save to file** with *Export for sharing externall
 enabled, and replace `grafana/angryduck-dashboard.json`. Before committing,
 make sure it carries no cluster of yours: the *Data source* and *Cluster*
 variables saved empty, `metadata` reduced to `name`, and no internal
-registries in the image color mappings.
+registries in the image color mappings. Every query must parse and hold on a
+week of a busy cluster: see the dashboard rules in
+[Maintaining](maintaining/rules.md#10-the-dashboard-is-designed).
 
 ## CI and releases
 
