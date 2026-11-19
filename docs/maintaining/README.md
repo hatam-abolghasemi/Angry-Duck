@@ -27,6 +27,8 @@ change one, change the page in the same commit.
    and code that explain it.
 6. [Known limits](limits.md): what Angry Duck doesn't handle yet, and what
    to watch.
+7. [Resource ledger](resources.md): what an idle worker holds and does on
+   its own, and the reason for each.
 
 [Development](../development.md) has the mechanics: building, the test
 suites, the integration tests against a real containerd, CI and the release

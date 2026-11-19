@@ -13,7 +13,7 @@ import (
 )
 
 // Steady-state benchmarks: what the controller does all the time, at the
-// scale of sahand-k8s-stg (21 workers reporting every 15s, 150 images each,
+// scale of a 21-node staging cluster (21 workers reporting every 15s, 150 images each,
 // 20 companion images kept). Run with:
 //
 //	go test ./internal/controller -run '^$' -bench Steady -benchmem

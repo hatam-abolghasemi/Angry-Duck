@@ -41,10 +41,22 @@ integration tests; uninstall it on a test node and start pods.
 
 ## 3. Small, and only when used
 
-- **Worker memory: about 10 MiB, 16 MiB at most** (`rss_anon`, not the
-  container limit). If a feature isn't in use right now, its memory isn't
-  held: no caches kept "just in case", buffers pooled and handed back,
-  freed heap returned after bursts (`memlimit`).
+Every byte held and every call made needs a reason that names the work it
+serves. "It's only 2 MiB" is not a reason; what those 2 MiB are, and why
+they can't be fetched when needed, is. Holding something in reserve is the
+hardest thing to justify, and is done only when the trade-off is measured.
+A spike while work runs is expected and fine; usage that stays up after the
+work ended is a bug, whatever its size. The [resource ledger](resources.md)
+lists what an idle worker holds and does, and why.
+
+- **Worker memory: about 10 MiB, 16 MiB at most**, counting everything the
+  kernel charges to the container, not only the process: `rss_anon`, page
+  cache from files the worker read or wrote, and the kernel's records of
+  files it created (`slab_reclaimable`). The container limit is not the
+  budget. If a feature isn't in use right now, its memory isn't held: no
+  caches kept "just in case", buffers pooled and handed back, freed heap
+  returned after bursts (`memlimit`), page cache dropped once a file is
+  done.
 - **CPU: no spikes, no busy loops.** A change must not raise CPU or memory on
   a busy cluster, or raise them barely, with a reason.
 - Every call is worth making: fewer containerd calls, listings shared,
@@ -57,9 +69,18 @@ images of any tag ([Development](../development.md#profiling)).
 
 ## 4. Events, not intervals
 
-A loop that checks every N seconds adds N seconds of nothing. Prefer
-containerd's events, the pod watch, and "something finished" wake-ups
-(`wake.go`). Periodic scans stay only as safety nets behind an event stream.
+A loop that checks every N seconds adds N seconds of nothing, and does its
+work whether or not anything changed. Prefer containerd's events, the pod
+watch, and "something finished" wake-ups (`wake.go`). A timer stays only
+when one of these holds, and the [resource ledger](resources.md) says which:
+
+- **Time is the event**: an age or a deadline. One timer set for the exact
+  moment, never a poll.
+- **Nothing announces the change**: a disk filling up, files damaged outside
+  containerd. The check is the cheapest one possible (`statfs`, not a
+  listing).
+- **A safety net for lost events**: rare, and comparing something small.
+- **Liveness**: the controller can only notice a dead worker by its silence.
 
 ## 5. Every feature is a switch
 
