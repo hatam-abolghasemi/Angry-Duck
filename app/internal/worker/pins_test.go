@@ -95,3 +95,27 @@ func TestCleanupLeftovers_RemovesOnlyOurTempSnapshots(t *testing.T) {
 		t.Fatalf("removed something that wasn't ours: %v", snaps)
 	}
 }
+
+// Run releases a pin when it expires, with no sweep in between, and sleeps
+// while there are no pins.
+func TestPinsReleasedAtExpiry(t *testing.T) {
+	st := blobship.NewMemStore()
+	p := NewPins(st, "n1", 150*time.Millisecond, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx, time.Minute)
+	if _, ok := p.nextExpiry(); ok {
+		t.Fatal("an expiry with no pins")
+	}
+	p.Add("sha256:aa")
+	if !p.Has("sha256:aa") {
+		t.Fatal("not pinned")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for p.Has("sha256:aa") {
+		if time.Now().After(deadline) {
+			t.Fatal("pin not released after it expired")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

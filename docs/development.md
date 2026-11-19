@@ -153,7 +153,8 @@ difference. Keep `version` and `appVersion` in
 
 Copy `app/.env.example` to `app/.env`, set `SELF_ADDRESS` and
 `CONTROLLER_URL`, and run the binaries directly. The worker needs a local
-containerd and node-exporter.
+containerd (and node-exporter only if containerd's content store isn't
+visible to it).
 
 ## Dashboard
 

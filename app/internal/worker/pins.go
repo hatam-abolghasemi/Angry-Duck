@@ -49,8 +49,9 @@ type Pins struct {
 	ttl    time.Duration
 	path   string // on the node's filesystem (via HOST_ROOT); "" = memory only
 
-	mu   sync.Mutex
-	pins map[string]time.Time // chainID -> expiry
+	mu    sync.Mutex
+	pins  map[string]time.Time // chainID -> expiry
+	added chan struct{}        // a pin was added: Run looks at its expiry
 }
 
 // NewPins loads any saved pins from path.
@@ -58,7 +59,7 @@ func NewPins(store blobship.Store, nodeID string, ttl time.Duration, path string
 	for _, k := range []string{"temp_snapshot", "temp_image", "expired_pin"} {
 		rescueCleanupsTotal.Add(0, nodeID, k)
 	}
-	p := &Pins{store: store, nodeID: nodeID, ttl: ttl, path: path, pins: map[string]time.Time{}}
+	p := &Pins{store: store, nodeID: nodeID, ttl: ttl, path: path, pins: map[string]time.Time{}, added: make(chan struct{}, 1)}
 	if path != "" {
 		if b, err := os.ReadFile(path); err == nil {
 			if err := json.Unmarshal(b, &p.pins); err != nil {
@@ -77,6 +78,10 @@ func (p *Pins) Add(chainID string) {
 	p.pins[chainID] = time.Now().Add(p.ttl)
 	p.saveLocked()
 	p.mu.Unlock()
+	select {
+	case p.added <- struct{}{}:
+	default:
+	}
 }
 
 // Has reports whether chainID is currently pinned by a rescue.
@@ -145,18 +150,52 @@ func (p *Pins) unpin(ctx context.Context, chainIDs []string, metricKind string) 
 	p.publish()
 }
 
-// Run sweeps expired pins every interval until ctx is done.
-func (p *Pins) Run(ctx context.Context, interval time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
+// Run releases each pin when it expires, until ctx is done: one timer for
+// the next expiry, nothing while there are no pins. A pin whose release
+// failed is tried again retry later.
+func (p *Pins) Run(ctx context.Context, retry time.Duration) {
+	failed := false
 	for {
+		var fire <-chan time.Time
+		var t *time.Timer
+		if next, ok := p.nextExpiry(); ok {
+			wait := time.Until(next)
+			if failed {
+				wait = max(wait, retry)
+			}
+			t = time.NewTimer(max(wait, 0))
+			fire = t.C
+		}
 		select {
 		case <-ctx.Done():
+			if t != nil {
+				t.Stop()
+			}
 			return
-		case <-t.C:
+		case <-p.added:
+			failed = false
+		case <-fire:
 			p.Sweep(ctx)
+			next, ok := p.nextExpiry()
+			failed = ok && !next.After(time.Now()) // an expired pin stayed: its release failed
+		}
+		if t != nil {
+			t.Stop()
 		}
 	}
+}
+
+// nextExpiry is when the next pin expires; false when there is none.
+func (p *Pins) nextExpiry() (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var next time.Time
+	for _, until := range p.pins {
+		if next.IsZero() || until.Before(next) {
+			next = until
+		}
+	}
+	return next, !next.IsZero()
 }
 
 func (p *Pins) publish() {

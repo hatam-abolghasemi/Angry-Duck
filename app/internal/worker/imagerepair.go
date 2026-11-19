@@ -147,9 +147,10 @@ type ImageRepair struct {
 	broken  map[string]string   // target digest -> image label (its main name)
 	names   map[string][]string // target digest -> every name, for Broken
 
-	wakeMu sync.Mutex
-	queue  map[string]string // image -> reason
-	wake   chan struct{}
+	wakeMu  sync.Mutex
+	queue   map[string]string // image -> reason
+	wake    chan struct{}
+	deleted chan struct{} // an image or content deletion (Deleted)
 }
 
 // NewImageRepair builds the repair. busy reports images being pulled or
@@ -175,7 +176,7 @@ func NewImageRepair(store RepairStore, registry RepairRegistry, platform, nodeID
 		}},
 		ctl:    &http.Client{Timeout: 5 * time.Second},
 		broken: map[string]string{}, names: map[string][]string{}, known: map[string]knownImage{},
-		queue: map[string]string{}, wake: make(chan struct{}, 1),
+		queue: map[string]string{}, wake: make(chan struct{}, 1), deleted: make(chan struct{}, 1),
 	}
 }
 
@@ -196,17 +197,50 @@ func (r *ImageRepair) Run(ctx context.Context) {
 	}
 	t := time.NewTimer(first)
 	defer t.Stop()
+	var soon *time.Timer
+	var soonC <-chan time.Time
+	defer func() {
+		if soon != nil {
+			soon.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-r.wake:
 			r.handleWakes(ctx)
+		case <-r.deleted:
+			// Checked repairChangeDelay after a deletion: containerd's own
+			// garbage collection removes the blobs a moment later.
+			if soon == nil {
+				soon = time.NewTimer(repairChangeDelay)
+				soonC = soon.C
+			}
+		case <-soonC:
+			soon, soonC = nil, nil
+			r.handleWakes(ctx)
+			r.Pass(ctx)
+			t.Reset(r.interval)
 		case <-t.C:
 			r.handleWakes(ctx)
 			r.Pass(ctx)
 			t.Reset(r.interval)
 		}
+	}
+}
+
+// repairChangeDelay is how long after an image or content deletion the
+// next check runs: a blob another image shared may be gone with it.
+const repairChangeDelay = 30 * time.Second
+
+// Deleted says an image or content was deleted on this node: the next
+// check comes repairChangeDelay later instead of at its interval. Bursts
+// of deletions bring one check.
+func (r *ImageRepair) Deleted() {
+	select {
+	case r.deleted <- struct{}{}:
+	default:
 	}
 }
 

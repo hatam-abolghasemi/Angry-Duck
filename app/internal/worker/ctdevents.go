@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/containerd/containerd/events"
@@ -29,6 +30,15 @@ var (
 // image event anyway.
 var inventoryTopics = []string{"/images/create", "/images/update", "/images/delete", "/content/delete"}
 
+// containerTopics are the events that change which images containers use
+// (a sandbox becoming ready or not is its task starting or exiting). Only
+// followed when someone asks (OnContainers): image cleanup.
+var containerTopics = []string{"/containers/create", "/containers/update", "/containers/delete", "/tasks/start", "/tasks/exit"}
+
+// deleteTopics are the inventory events after which containerd's own
+// garbage collection removes blobs a moment later, without an event.
+var deleteTopics = map[string]bool{"/images/delete": true, "/content/delete": true}
+
 // EventSubscriber is containerd's event stream (*containerd.Client has it).
 type EventSubscriber interface {
 	Subscribe(ctx context.Context, filters ...string) (ch <-chan *events.Envelope, errs <-chan error)
@@ -45,13 +55,23 @@ type EventSubscriber interface {
 // regular interval until it is back, and reports once more on reconnecting
 // in case something changed meanwhile. One idle gRPC stream, no polling.
 type InventoryWatch struct {
-	sub       EventSubscriber
-	namespace string
-	nodeID    string
-	settle    time.Duration
-	changed   func()
-	live      func(bool)
+	sub         EventSubscriber
+	namespace   string
+	nodeID      string
+	settle      time.Duration
+	changed     func()
+	live        func(bool)
+	contChanged func() // nil: container events aren't followed
+	deleted     func() // nil: nothing to do after deletions
 }
+
+// OnContainers follows container events too, calling fn (non-blocking) on
+// each. Call before Run.
+func (w *InventoryWatch) OnContainers(fn func()) { w.contChanged = fn }
+
+// OnDeleted calls fn (non-blocking) after an image or content deletion.
+// Call before Run.
+func (w *InventoryWatch) OnDeleted(fn func()) { w.deleted = fn }
 
 // NewInventoryWatch builds a watch; changed is the reporter's Kick, live
 // switches the layer tracker between resync and regular scans.
@@ -64,8 +84,12 @@ func NewInventoryWatch(sub EventSubscriber, namespace, nodeID string, changed fu
 }
 
 func (w *InventoryWatch) filters() []string {
-	out := make([]string, 0, len(inventoryTopics))
-	for _, t := range inventoryTopics {
+	topics := inventoryTopics
+	if w.contChanged != nil {
+		topics = append(append([]string{}, inventoryTopics...), containerTopics...)
+	}
+	out := make([]string, 0, len(topics))
+	for _, t := range topics {
 		out = append(out, `namespace=="`+w.namespace+`",topic=="`+t+`"`)
 	}
 	return out
@@ -123,6 +147,15 @@ func (w *InventoryWatch) follow(ctx context.Context, ch <-chan *events.Envelope,
 		case env, ok := <-ch:
 			if !ok {
 				return nil
+			}
+			if slices.Contains(containerTopics, env.Topic) {
+				if w.contChanged != nil {
+					w.contChanged()
+				}
+				continue
+			}
+			if deleteTopics[env.Topic] && w.deleted != nil {
+				w.deleted()
 			}
 			inventoryEventsTotal.Inc(w.nodeID, env.Topic)
 			if timer == nil {

@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"angryduck/internal/imageref"
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/model"
 	"angryduck/internal/sharedtoken"
 )
@@ -25,6 +27,8 @@ type Reporter struct {
 	nodeID         string
 	selfAddress    string
 	metricsURL     string
+	disk           func() (UtilizationResult, error) // nil: node-exporter at metricsURL
+	eventsLive     atomic.Bool                       // containerd's events are followed: ticks reuse the listing
 	controllerURL  string
 	token          string // sent on reports; "" sends none
 	interval       time.Duration
@@ -150,8 +154,12 @@ func (rp *Reporter) Kick() {
 func (rp *Reporter) Run(ctx context.Context) {
 	ticker := time.NewTicker(rp.interval)
 	defer ticker.Stop()
-	logging.Infof("angryduck-worker[%s]: reporter started: interval=%s metrics_url=%s controller_url=%s",
-		rp.nodeID, rp.interval, rp.metricsURL, rp.controllerURL)
+	disk := "node-exporter " + rp.metricsURL
+	if rp.disk != nil {
+		disk = "statfs on containerd's content store"
+	}
+	logging.Infof("angryduck-worker[%s]: reporter started: interval=%s disk_usage=%s controller_url=%s",
+		rp.nodeID, rp.interval, disk, rp.controllerURL)
 	// Send one report immediately so the controller doesn't wait a full
 	// interval to learn this worker exists.
 	rp.reportOnce(0)
@@ -161,12 +169,28 @@ func (rp *Reporter) Run(ctx context.Context) {
 			logging.Infof("angryduck-worker[%s]: reporter stopping", rp.nodeID)
 			return
 		case <-ticker.C:
-			rp.reportOnce(inventoryMaxAge(rp.interval))
+			maxAge := inventoryMaxAge(rp.interval)
+			if rp.eventsLive.Load() {
+				// Every change to the images arrives as an event and
+				// kicks a report with a fresh listing: a tick is a
+				// heartbeat, and reuses the last one.
+				maxAge = liveListingMaxAge
+			}
+			rp.reportOnce(maxAge)
 		case <-rp.kick:
 			rp.reportOnce(0) // a pull just landed; the listing must include it
 		}
 	}
 }
+
+// liveListingMaxAge is how old a listing a heartbeat may reuse while
+// containerd's events are followed: a safety net, as the layer inventory's
+// resync is.
+const liveListingMaxAge = 10 * time.Minute
+
+// SetEventsLive says whether containerd's image events are being followed
+// (InventoryWatch's live).
+func (rp *Reporter) SetEventsLive(on bool) { rp.eventsLive.Store(on) }
 
 // inventoryMaxAge is how old an image listing a regular report may reuse.
 // Reports go out every REPORT_INTERVAL_S for liveness and disk usage, but
@@ -182,12 +206,24 @@ func inventoryMaxAge(interval time.Duration) time.Duration {
 	return time.Minute
 }
 
+// SetDiskUsage makes reports read disk usage from fn (statfs on
+// containerd's content store) instead of node-exporter. Call before Run.
+func (rp *Reporter) SetDiskUsage(fn func() (UtilizationResult, error)) { rp.disk = fn }
+
+func (rp *Reporter) diskUsage() (UtilizationResult, error) {
+	if rp.disk != nil {
+		return rp.disk()
+	}
+	return FetchRootUtilization(rp.metricsURL, 5*time.Second)
+}
+
 // reportOnce sends one report. listMaxAge lets a tick reuse a listing
 // taken moments ago instead of running the same command again.
 func (rp *Reporter) reportOnce(listMaxAge time.Duration) {
-	result, err := FetchRootUtilization(rp.metricsURL, 5*time.Second)
+	defer memlimit.Soon() // the report and any listing are garbage now
+	result, err := rp.diskUsage()
 	if err != nil {
-		logging.Warnf("angryduck-worker[%s]: failed to read node-exporter metrics from %s: %v", rp.nodeID, rp.metricsURL, err)
+		logging.Warnf("angryduck-worker[%s]: failed to read disk usage: %v", rp.nodeID, err)
 		return
 	}
 

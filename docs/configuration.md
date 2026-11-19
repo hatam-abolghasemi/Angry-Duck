@@ -122,7 +122,8 @@ How pushed images reach every node blob by blob. See
 | `SPREAD_BOTTOM_UP_ENABLED` | `true` | Each node gets its layers bottom first, the order it unpacks them in, so unpacking starts with the first layer that lands ([order](propagation.md#how-a-push-spreads)). `false`: rarest layer first to peers, largest first from the registry, as before 1.14.0. Read by the controller. |
 | `SPREAD_UNPACK_ENABLED` | `true` | A node unpacks each layer as soon as its blob and the layers below it are here, while the rest still arrive, instead of all at once when the image registers ([unpacking](propagation.md#unpacking-as-layers-arrive)). Read by the worker. |
 | `SPREAD_UNPACK_PARALLEL_ENABLED` | `true` | Where containerd's snapshotter can commit onto a parent (containerd 2.2+, found at startup), a node unpacks layers side by side as they land and commits them bottom up ([side by side](propagation.md#unpacking-layers-side-by-side)). Elsewhere: one at a time. Read by the worker. |
-| `SPREAD_UNPACK_PARALLEL_MAX` | `0` | Layers a node unpacks at once, across all spreads. `0`: a quarter of the node's CPUs, at least 2. |
+| `RECLAIM_CGROUP_DIR` | `/run/angryduck/cgroup` | With `SPREAD_UNPACK_STREAM_ENABLED`: where the worker mounts its own cgroup to hand back, after each unpack, the page cache and kernel file records its unpacked files leave (`memory.reclaim`). Used only when `/sys/fs/cgroup` is read-only, as in a container. |
+| `SPREAD_UNPACK_PARALLEL_MAX` | `0` | Layers a node unpacks at once, across all spreads: side by side through containerd, and with `SPREAD_UNPACK_STREAM_ENABLED`, every layer of an image while it arrives. `0`: a quarter of the node's CPUs, at least 2. |
 | `SPREAD_UNPACK_STREAM_ENABLED` | `false` | A node unpacks each layer while its blob is still arriving, instead of once it has landed ([unpacking while blobs arrive](stream-unpack.md)). **Needs seven capabilities and containerd's snapshots mounted writable**: set it with Helm's `worker.streamUnpack.enabled`, which adds them. Read by the worker. |
 | `SPREAD_STREAM_MIN_MB` | `32` | Only blobs at least this large are streamed; smaller ones go node to node whole, as before. |
 | `SPREAD_STREAM_MAX_DEPTH` | `0` | Longest chain of nodes receiving a blob through each other: 1 is the node getting it from the registry or a full copy, 2 a node streaming from it, and so on. `0`: no cap but the number of nodes. `1`: nothing is streamed. |
@@ -178,8 +179,8 @@ The whole-image fallback, and the limits spread shares.
 | `WORKER_LISTEN_ADDR` | `:18081` | Listen address. With `HOST_NETWORK=true`, an address without a host is bound to `POD_IP` (the node's address), not to every interface of the node. |
 | `HOST_NETWORK` | `false` | Set by the DaemonSet when the worker shares the node's network (Helm `worker.hostNetwork`, `true` by default): the worker API binds the node's address only and the mirror the node's loopback. |
 | `CONTROLLER_URL` | `http://angryduck-controller:8080` | Controller base URL. |
-| `REPORT_INTERVAL_S` | `15` | How often the worker reports. |
-| `NODE_EXPORTER_URL` | `http://localhost:9100/metrics` | Source of root filesystem utilization. The DaemonSet sets it to `http://$(HOST_IP):9100/metrics`. |
+| `REPORT_INTERVAL_S` | `15` | How often the worker reports: its heartbeat, with disk usage. With containerd's events followed, a report lists images only after an event said they changed (or every 10 minutes); without them, at least once a minute. |
+| `NODE_EXPORTER_URL` | `http://localhost:9100/metrics` | Only used when containerd's content store isn't mounted: the worker then reads the root filesystem's usage from node-exporter. Normally disk usage comes from one `statfs` call on the content store, the disk images fill, with no dependency on node-exporter. The DaemonSet sets it to `http://$(HOST_IP):9100/metrics`. |
 | `POD_IP`, `POD_NAMESPACE`, `HOST_IP` | from the downward API | Set by the DaemonSet. On the pod network `POD_IP` is the mirror's address in `hosts.toml`; on the node's network it is the node's address, which the worker API binds. |
 | `DAEMONSET_NAME` | `angryduck-worker` | The DaemonSet the worker checks on shutdown: gone or being deleted means an uninstall, and the worker cleans up the node. |
 | `CONTAINER_RUNTIME` | `containerd` | Only containerd is supported. `crictl` and `ctr`, from older configurations, are accepted and mean the same. |
@@ -191,7 +192,7 @@ The whole-image fallback, and the limits spread shares.
 | `DIRECT_WRITES` | `true` | Write blobs of 1 MiB or more straight into the data file of the write the worker opens through containerd, and let containerd hash and commit it, instead of sending every byte through its content API: about a third of the CPU per blob, worker and containerd together, in half the time. Needs containerd's `ingest` directory mounted writable (the manifests do) and the content store mounted; a probe at startup checks the whole path, and any failure leaves it off, through the API as before. The worker keeps at most 16 MiB of a blob it is writing in page cache (8 MiB, more only for a peer reading behind), and none once written. |
 | `LAYER_INVENTORY_ENABLED` | `true` | Report layer blobs and snapshot chainIDs to the controller. |
 | `LAYER_SCAN_INTERVAL_S` | `60` | Time between layer scans while containerd's event stream is down (or `INVENTORY_EVENTS_ENABLED=false`). A transfer triggers one at once. |
-| `INVENTORY_EVENTS_ENABLED` | `true` | Follow containerd's events (images created, updated or deleted, content deleted): any pull or removal, kubelet's included, reaches the controller in about a second. |
+| `INVENTORY_EVENTS_ENABLED` | `true` | Follow containerd's events (images created, updated or deleted, content deleted, and containers and tasks for image cleanup): any pull or removal, kubelet's included, reaches the controller in about a second, and the worker lists images and containers only after a change. `false`: everything polls on its interval. |
 | `LAYER_RESYNC_INTERVAL_S` | `600` | Time between layer scans while the event stream is up: a safety net only. |
 | `PREHEAT_ATTRIBUTION_INTERVAL_S` | `300` | How often running containers from preheated repos are sampled. `0` disables it. |
 | `PREHEAT_ATTRIBUTION_RETENTION_S` | `360` | How long after a preheat its repo still counts. |
@@ -226,7 +227,7 @@ the cluster anymore, one node keeps it as the retention copy for
 | Variable | Default | Description |
 |---|---|---|
 | `GC_ENABLED` | `true` | Clean up images on each node. |
-| `GC_INTERVAL_S` | `60` | How often usage is sampled and the disk checked. |
+| `GC_INTERVAL_S` | `60` | How often the disk (`statfs`) and the age rule are checked. With containerd's events followed, images and running containers are listed again only after an image or container event (at most every 30s), every 10 minutes as a safety net, and always before removing anything; without them, at every check. |
 | `GC_UNUSED_FOR_S` | `3600` | Remove images unused this long, whatever the disk usage. |
 | `GC_HIGH_UTILIZATION` | `0.70` | Above this, remove unused images oldest first... Keep it below kubelet's `imageGCHighThresholdPercent`. |
 | `GC_LOW_UTILIZATION` | `0.40` | ...until the disk is back down to this. Must be below `GC_HIGH_UTILIZATION`, else both defaults are used, with a warning. |
@@ -277,4 +278,4 @@ none. See [Operations](operations.md#an-image-is-present-but-containers-cant-be-
 | Variable | Default | Description |
 |---|---|---|
 | `IMAGE_REPAIR_ENABLED` | `true` | Find and repair images that can't start a container. |
-| `IMAGE_REPAIR_INTERVAL_S` | `120` | How often every image is checked. An image's metadata is read once per digest (it never changes); later checks use the worker's shared listings only, with no containerd call of their own. A container failing on a broken image triggers a repair right away instead (sent by the controller), so this only bounds how long a broken image nothing uses goes unnoticed. |
+| `IMAGE_REPAIR_INTERVAL_S` | `120` | How often every image is checked. An image's metadata is read once per digest (it never changes); later checks use the worker's shared listings only, with no containerd call of their own. A container failing on a broken image triggers a repair right away instead (sent by the controller), so this only bounds how long a broken image nothing uses goes unnoticed. Also checked 30 seconds after an image or content deletion: a blob another image shared may be gone with it. |

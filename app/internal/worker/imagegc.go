@@ -162,6 +162,47 @@ type ImageGC struct {
 	pubMu       sync.Mutex // one publish at a time, so they arrive in order
 
 	comp *gcCompanions // nil: companions off (see EnableCompanions)
+
+	// Listing only when something changed (see SetEventsLive): while
+	// containerd's events are followed, a tick works from the last
+	// listing, and lists again only after an image or container event, a
+	// removal to decide, or gcRelist. All under mu.
+	eventsLive bool
+	changed    bool // an event came since the last listing
+	listedAt   time.Time
+	lastGroups map[string][]string
+	lastInUse  map[string]bool
+	wake       chan struct{}
+}
+
+// While containerd's events are followed, a tick lists images and running
+// containers only when an event said something changed, and at least every
+// gcRelist (a safety net), and always right before removing anything. An
+// event brings the listing forward, at most once per gcEventGap: a
+// crash-looping pod starts and stops containers all the time.
+const (
+	gcRelist   = 10 * time.Minute
+	gcEventGap = 30 * time.Second
+)
+
+// SetEventsLive says whether containerd's image and container events are
+// being followed. Without them, every tick lists, as before.
+func (g *ImageGC) SetEventsLive(on bool) {
+	g.mu.Lock()
+	g.eventsLive, g.changed = on, true
+	g.mu.Unlock()
+}
+
+// Changed says an image or a container changed on this node: the next
+// listing comes within gcEventGap instead of the next tick.
+func (g *ImageGC) Changed() {
+	g.mu.Lock()
+	g.changed = true
+	g.mu.Unlock()
+	select {
+	case g.wake <- struct{}{}:
+	default:
+	}
 }
 
 // A batch that frees less than gcMinFree of the disk means the disk isn't
@@ -207,7 +248,7 @@ func NewImageGC(store ImageStore, inUse func() ([]string, error), util func() (f
 	}
 	g := &ImageGC{store: store, inUse: inUse, util: util, busy: busy, nodeID: nodeID, cfg: cfg,
 		firstSeen: map[string]time.Time{}, lastUsed: map[string]time.Time{},
-		removed: map[string]removal{}, returned: map[string]*churn{}}
+		removed: map[string]removal{}, returned: map[string]*churn{}, wake: make(chan struct{}, 1)}
 	g.load()
 	return g
 }
@@ -229,12 +270,30 @@ func (g *ImageGC) Run(ctx context.Context) {
 		g.nodeID, g.cfg.Interval, g.cfg.High, g.cfg.Low, g.cfg.UnusedFor, g.cfg.Retention, g.cfg.Batch, g.cfg.ProtectSubstrings, g.cfg.StatePath)
 	t := time.NewTicker(g.cfg.Interval)
 	defer t.Stop()
+	var soon *time.Timer
+	var soonC <-chan time.Time
+	defer func() {
+		if soon != nil {
+			soon.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			g.save(true)
 			return
 		case <-t.C:
+			g.Tick(ctx)
+		case <-g.wake:
+			if soon == nil {
+				g.mu.Lock()
+				wait := max(time.Second, gcEventGap-time.Since(g.listedAt))
+				g.mu.Unlock()
+				soon = time.NewTimer(wait)
+				soonC = soon.C
+			}
+		case <-soonC:
+			soon, soonC = nil, nil
 			g.Tick(ctx)
 		}
 	}
@@ -251,7 +310,35 @@ type candidate struct {
 // sample updates usage times and returns the names per digest, and which
 // digests are in use. With Retention on it also refreshes g.retained from
 // the same listing.
-func (g *ImageGC) sample(ctx context.Context, now time.Time) (groups map[string][]string, inUse map[string]bool, err error) {
+func (g *ImageGC) sample(ctx context.Context, now time.Time, force bool) (groups map[string][]string, inUse map[string]bool, fresh bool, err error) {
+	g.mu.Lock()
+	if !force && g.eventsLive && !g.changed && g.lastGroups != nil && now.Sub(g.listedAt) < gcRelist {
+		// Nothing changed since the last listing: the same images, used
+		// by the same containers, which are in use right now.
+		groups, inUse = g.lastGroups, g.lastInUse
+		for d := range inUse {
+			g.lastUsed[d] = now
+		}
+		g.mu.Unlock()
+		return groups, inUse, false, nil
+	}
+	g.changed = false // an event from now on asks for the next listing
+	g.mu.Unlock()
+	groups, inUse, err = g.list(ctx, now)
+	if err != nil {
+		g.mu.Lock()
+		g.changed = true
+		g.mu.Unlock()
+		return nil, nil, false, err
+	}
+	g.mu.Lock()
+	g.lastGroups, g.lastInUse, g.listedAt = groups, inUse, now
+	g.mu.Unlock()
+	return groups, inUse, true, nil
+}
+
+// list lists images and running containers: the sample itself.
+func (g *ImageGC) list(ctx context.Context, now time.Time) (groups map[string][]string, inUse map[string]bool, err error) {
 	label := ""
 	if g.cfg.Retention {
 		label = RetainLabel
@@ -367,7 +454,7 @@ func namesByTarget(targets map[string]string, skipTemp bool) map[string][]string
 func (g *ImageGC) Tick(ctx context.Context) {
 	defer memlimit.Soon()
 	now := time.Now()
-	groups, inUse, err := g.sample(ctx, now)
+	groups, inUse, fresh, err := g.sample(ctx, now, false)
 	if err != nil {
 		logging.Warnf("angryduck-worker[%s]: image cleanup: %v", g.nodeID, err)
 		return
@@ -418,6 +505,19 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	}
 
 	unused, expired, kept := g.plan(groups, inUse, now)
+	if !fresh && removalDue(unused, expired, cleaning && !stalled) {
+		// Something is to be removed: decide on a fresh listing, never
+		// on one kept from before.
+		if groups, inUse, _, err = g.sample(ctx, now, true); err != nil {
+			logging.Warnf("angryduck-worker[%s]: image cleanup: %v", g.nodeID, err)
+			return
+		}
+		if g.cfg.Retention {
+			g.unretainInUse(ctx, groups, inUse)
+			g.publishState(groups, inUse)
+		}
+		unused, expired, kept = g.plan(groups, inUse, now)
+	}
 	var old []candidate
 	companions := 0
 	for _, c := range unused {
@@ -487,6 +587,21 @@ func (g *ImageGC) Tick(ctx context.Context) {
 	if removed > 0 && g.onDone != nil {
 		g.onDone()
 	}
+}
+
+// removalDue reports whether a plan removes anything: an expired retention
+// copy, an image unused for UnusedFor, or, under disk pressure, any
+// unused image.
+func removalDue(unused, expired []candidate, pressure bool) bool {
+	if len(expired) > 0 || pressure && len(unused) > 0 {
+		return true
+	}
+	for _, c := range unused {
+		if c.tier == "old" {
+			return true
+		}
+	}
+	return false
 }
 
 // stall stops disk-pressure removals (see gcStallFor).

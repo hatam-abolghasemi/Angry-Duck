@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -160,8 +161,15 @@ func main() {
 	// Reading a blob file to serve it caches it, charged to this pod: give
 	// those pages back once the file has been idle this long (0 keeps them).
 	store.ReleasePageCache(config.Duration("PAGE_CACHE_RELEASE_AFTER_S", 30), nodeID)
+	// Disk usage: statfs on containerd's content store when it is mounted
+	// (the disk images fill, one system call), else node-exporter.
+	diskUsage := func() (worker.UtilizationResult, error) {
+		return worker.FetchRootUtilization(metricsURL, 5*time.Second)
+	}
 	if dir := store.UseBlobDir(config.String("CONTAINERD_ROOT", ""), filepath.Join(hostRoot, "/etc/containerd/config.toml")); dir != "" {
-		log.Printf("angryduck-worker[%s]: reading blobs directly from %s", nodeID, dir)
+		diskUsage = func() (worker.UtilizationResult, error) { return worker.DiskUtilization(dir) }
+		reporter.SetDiskUsage(diskUsage)
+		log.Printf("angryduck-worker[%s]: reading blobs directly from %s; disk usage from statfs on it", nodeID, dir)
 		if err := store.VerifyStreaming(context.Background()); err != nil {
 			log.Printf("angryduck-worker[%s]: WARNING: spread streaming off: %v (set CONTAINERD_ROOT to containerd's root)", nodeID, err)
 		} else if config.Bool("DIRECT_WRITES", true) {
@@ -174,7 +182,7 @@ func main() {
 			}
 		}
 	} else {
-		log.Printf("angryduck-worker[%s]: containerd's content store isn't mounted (set CONTAINERD_ROOT to where it is): serving blobs through containerd's content API", nodeID)
+		log.Printf("angryduck-worker[%s]: containerd's content store isn't mounted (set CONTAINERD_ROOT to where it is): serving blobs through containerd's content API, disk usage from node-exporter at %s", nodeID, metricsURL)
 	}
 	token, tokenErr := sharedtoken.Load(config.String("RESCUE_TOKEN_PATH", "/etc/angryduck/rescue-token/token"))
 	if tokenErr != nil {
@@ -198,23 +206,48 @@ func main() {
 		tracker = worker.NewLayerTracker(store, nodeID, interval)
 		reporter.SetLayerTracker(tracker)
 	}
+	// containerd's events, followed once everything below that reacts to
+	// them is set up (the watch starts after image cleanup): who reacts to
+	// what is collected in these hooks first.
+	var watch *worker.InventoryWatch
+	var liveHooks []func(bool) // the event stream came up or broke
+	var changedHooks []func()  // images or content changed
+	var deletedHooks []func()  // an image or content was deleted
 	if store != nil && feat.InventoryEvents {
 		// containerd's events report pulls and removals as they happen;
-		// periodic scans then only resync.
+		// periodic scans then only resync, and reports reuse their image
+		// listing between events.
 		scan := config.Duration("LAYER_SCAN_INTERVAL_S", 60)
 		resync := config.Duration("LAYER_RESYNC_INTERVAL_S", 600)
 		live := func(on bool) {
-			if tracker == nil {
-				return
+			reporter.SetEventsLive(on)
+			if tracker != nil {
+				if on {
+					tracker.SetInterval(resync)
+				} else {
+					tracker.SetInterval(scan)
+				}
 			}
-			if on {
-				tracker.SetInterval(resync)
-			} else {
-				tracker.SetInterval(scan)
+			for _, h := range liveHooks {
+				h(on)
 			}
 		}
+		changed := func() {
+			reporter.Kick()
+			for _, h := range changedHooks {
+				h()
+			}
+		}
+		// containerd's own garbage collection removes blobs a moment after
+		// a deletion, without an event: one more report then.
+		deletedHooks = append(deletedHooks, debounce(30*time.Second, reporter.Kick))
 		log.Printf("angryduck-worker[%s]: inventory follows containerd events (namespace=%s): resync=%s, scans every %s while the stream is down", nodeID, namespace, resync, scan)
-		go worker.NewInventoryWatch(client, namespace, nodeID, reporter.Kick, live).Run(ctx)
+		watch = worker.NewInventoryWatch(client, namespace, nodeID, changed, live)
+		watch.OnDeleted(func() {
+			for _, h := range deletedHooks {
+				h()
+			}
+		})
 	}
 	metrics.PublishBuildInfo("worker", version.Version, nodeID)
 	go metrics.TrackProcessMemory(ctx, "worker")
@@ -258,6 +291,11 @@ func main() {
 		// Unpacking while blobs still arrive: off unless asked for, and
 		// only once a probe shows this worker can write into containerd's
 		// snapshots (docs/stream-unpack.md).
+		// How many layers unpack at once on this node, across spreads.
+		unpackSlots := config.Int("SPREAD_UNPACK_PARALLEL_MAX", 0)
+		if unpackSlots <= 0 {
+			unpackSlots = parallelUnpackDefault(runtime.NumCPU())
+		}
 		unpackStream := false
 		if unpacks && feat.SpreadUnpackStream {
 			switch err := store.EnableStreamUnpack(context.Background()); {
@@ -266,21 +304,25 @@ func main() {
 			case !sp.EnableStreamUnpack(store):
 				log.Printf("angryduck-worker[%s]: WARNING: unpacking while blobs arrive is off: it reads blobs still arriving, which needs containerd's content store mounted and SPREAD_STREAM_ENABLED", nodeID)
 			default:
+				// Every layer of an image unpacks while it arrives, side
+				// by side, attached bottom up (spreadwhole.go).
+				sp.SetUnpackSlots(unpackSlots)
 				unpackStream = true
+				// The files it writes leave page cache and inode records
+				// charged to the worker: hand them back after each unpack.
+				if err := memlimit.EnableReclaim(config.String("RECLAIM_CGROUP_DIR", "/run/angryduck/cgroup")); err != nil {
+					log.Printf("angryduck-worker[%s]: WARNING: memory left by unpacked files is not handed back, so it shows as the worker's until the kernel needs it: %v (see docs/stream-unpack.md)", nodeID, err)
+				}
 			}
 		}
 		// Unpacking layers side by side, where containerd can commit a
 		// snapshot onto a parent (2.2+); sequential everywhere else.
 		unpackParallel := 0
 		if unpacks && feat.SpreadUnpackParallel {
-			max := config.Int("SPREAD_UNPACK_PARALLEL_MAX", 0)
-			if max <= 0 {
-				max = parallelUnpackDefault(runtime.NumCPU())
-			}
 			if err := store.EnableParallelUnpack(context.Background()); err != nil {
-				log.Printf("angryduck-worker[%s]: unpacking layers one after another: %v", nodeID, err)
-			} else if sp.EnableParallelUnpack(store, max) {
-				unpackParallel = max
+				log.Printf("angryduck-worker[%s]: containerd unpacks landed layers one after another: %v", nodeID, err)
+			} else if sp.EnableParallelUnpack(store, unpackSlots) {
+				unpackParallel = unpackSlots
 			}
 		}
 		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t unpack_on_arrival=%t unpack_while_arriving=%t unpack_parallel=%d", nodeID, platform, timeout, streams, unpacks, unpackStream, unpackParallel)
@@ -307,6 +349,7 @@ func main() {
 			extra = append(extra, repair.Register)
 		}
 		reporter.SetExclude(repair.Broken)
+		deletedHooks = append(deletedHooks, repair.Deleted)
 		log.Printf("angryduck-worker[%s]: image repair enabled: interval=%s, from peers=%t then the registry", nodeID, interval, tokenErr == nil)
 		go repair.Run(ctx)
 	} else if store != nil {
@@ -328,7 +371,7 @@ func main() {
 		gc := worker.NewImageGC(store,
 			rt.ListInUseImages,
 			func() (float64, error) {
-				r, err := worker.FetchRootUtilization(metricsURL, 5*time.Second)
+				r, err := diskUsage()
 				return r.Utilization, err
 			},
 			busy,
@@ -360,10 +403,20 @@ func main() {
 		} else {
 			go unretain(ctx, store, nodeID)
 		}
+		if watch != nil {
+			// Lists images and running containers only after a change.
+			watch.OnContainers(gc.Changed)
+			changedHooks = append(changedHooks, gc.Changed)
+			liveHooks = append(liveHooks, gc.SetEventsLive)
+		}
 		go gc.Run(ctx)
 	} else if store != nil {
 		log.Printf("angryduck-worker[%s]: image cleanup disabled (GC_ENABLED=false): kubelet's own image GC is all there is", nodeID)
 		go unretain(ctx, store, nodeID)
+	}
+
+	if watch != nil {
+		go watch.Run(ctx)
 	}
 
 	var hosts *worker.HostsConfig
@@ -571,7 +624,7 @@ func newRescue(ctx context.Context, nodeID, hostRoot, stateDir string, store *wo
 	cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	worker.CleanupLeftovers(cleanupCtx, store, pins, nodeID)
 	cancel()
-	go pins.Run(ctx, 5*time.Minute)
+	go pins.Run(ctx, time.Minute) // a release that failed is tried again a minute later
 	return worker.NewRescue(store, pins, token, nodeID, platform, maxConcurrent), pins
 }
 
@@ -611,6 +664,27 @@ func bindHost(addr, ip string) string {
 // parallelUnpackDefault is how many layers a node unpacks at once when
 // SPREAD_UNPACK_PARALLEL_MAX isn't set: a quarter of its CPUs, at least 2.
 // containerd does the unpacking, next to the node's workloads.
+// debounce returns a func that runs fn once, d after the first of a burst
+// of calls.
+func debounce(d time.Duration, fn func()) func() {
+	var mu sync.Mutex
+	var pending bool
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if pending {
+			return
+		}
+		pending = true
+		time.AfterFunc(d, func() {
+			mu.Lock()
+			pending = false
+			mu.Unlock()
+			fn()
+		})
+	}
+}
+
 func parallelUnpackDefault(cpus int) int {
 	return max(2, cpus/4)
 }

@@ -17,7 +17,8 @@ Go dependencies.
 Each worker posts a report to the controller every `REPORT_INTERVAL_S` (15s),
 and right away when containerd reports a pull or removal. A report has:
 
-- root filesystem utilization, read from the local node-exporter;
+- disk utilization of the filesystem holding containerd's content store
+  (one `statfs` call);
 - every image reference on the node;
 - its **layer inventory**: the blob digests and snapshot chainIDs it holds,
   sent as numbered deltas so reports stay small on large nodes.
