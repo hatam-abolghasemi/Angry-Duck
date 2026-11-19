@@ -80,6 +80,7 @@ var pullOrdersTotal = metrics.NewCounterVec(
 type Ranker struct {
 	registry            *Registry
 	topN                int
+	maxUtilization      float64 // seeds skip nodes fuller than this (0: no limit)
 	interval            time.Duration
 	excludeSubstrings   []string
 	preferImageLocality bool
@@ -173,6 +174,25 @@ func NewRanker(registry *Registry, topN int, interval time.Duration, excludeSubs
 	}
 }
 
+// SetMaxUtilization keeps seeds off nodes whose disk is fuller than max
+// (0-1), as spreads and propagation already do (PROPAGATE_MAX_UTILIZATION).
+// 0 leaves every node eligible.
+func (rk *Ranker) SetMaxUtilization(max float64) { rk.maxUtilization = max }
+
+// withRoom drops nodes fuller than maxUtilization.
+func (rk *Ranker) withRoom(workers []*workerEntry) []*workerEntry {
+	if rk.maxUtilization <= 0 {
+		return workers
+	}
+	out := workers[:0:0]
+	for _, w := range workers {
+		if w.Utilization <= rk.maxUtilization {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // Run blocks, re-ranking and re-ordering on every tick until ctx is done.
 func (rk *Ranker) Run(ctx context.Context) {
 	ticker := time.NewTicker(rk.interval)
@@ -218,6 +238,11 @@ func (rk *Ranker) orderLowestN(image string) []string {
 	if len(eligible) == 0 {
 		logging.Warnf("angryduck-controller: cannot order preheat for image=%s: %d fresh worker(s) reported, but all matched an excluded-node substring (%v)",
 			image, len(fresh), rk.excludeSubstrings)
+		return nil
+	}
+	if eligible = rk.withRoom(eligible); len(eligible) == 0 {
+		logging.Warnf("angryduck-controller: cannot order preheat for image=%s: every eligible node's disk is fuller than %.0f%% (PROPAGATE_MAX_UTILIZATION)",
+			image, rk.maxUtilization*100)
 		return nil
 	}
 

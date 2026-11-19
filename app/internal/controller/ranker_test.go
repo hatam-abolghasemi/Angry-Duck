@@ -384,3 +384,36 @@ func TestRankerReplacesAFailedSeed(t *testing.T) {
 		t.Fatalf("slot filled; nothing more expected, got %v", got)
 	}
 }
+
+// Seeds skip nodes fuller than PROPAGATE_MAX_UTILIZATION, as spreads and
+// propagation do: a node holding the repo but with no room is passed over.
+func TestRankerSkipsFullNodes(t *testing.T) {
+	full := newPullOrderRecorder(t)
+	room := newPullOrderRecorder(t)
+
+	registry := NewRegistry(time.Minute, time.Minute)
+	registry.Update(model.WorkerReport{
+		NodeID: "node-full", Address: full.address,
+		Utilization: 0.90,
+		Repos:       []string{"registry.example.com/app"},
+		Timestamp:   time.Now(),
+	})
+	registry.Update(model.WorkerReport{
+		NodeID: "node-room", Address: room.address,
+		Utilization: 0.30,
+		Timestamp:   time.Now(),
+	})
+
+	rk := NewRanker(registry, 1, time.Hour, nil, true, false)
+	rk.SetMaxUtilization(0.70)
+	ordered := rk.OrderNow("registry.example.com/app:2.0.0")
+	waitForPulls(t, full, room)
+	if len(ordered) != 1 || ordered[0] != "node-room" {
+		t.Fatalf("ordered %v, want only the node with room", ordered)
+	}
+
+	registry.Update(model.WorkerReport{NodeID: "node-room", Address: room.address, Utilization: 0.80, Timestamp: time.Now()})
+	if got := rk.OrderNow("registry.example.com/app:3.0.0"); len(got) != 0 {
+		t.Fatalf("every node full: ordered %v, want none", got)
+	}
+}
