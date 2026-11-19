@@ -114,7 +114,7 @@ them, so there is nothing to clone or build:
 
 ```bash
 helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck \
-  --version 1.14.1 --namespace angryduck --create-namespace \
+  --version 1.14.2 --namespace angryduck --create-namespace \
   --set ingress.host=angryduck.example.com
 ```
 
@@ -158,6 +158,7 @@ or [Helm](docs/helm.md), then pick a setup from [Recipes](docs/recipes.md).
 | [API](docs/api.md) | Controller and worker HTTP endpoints. |
 | [Security](docs/security.md) | Privileges, trust boundaries and hardening. |
 | [Development](docs/development.md) | Code layout, building and testing. |
+| [Maintaining](docs/maintaining/README.md) | For whoever changes the code: code map, the rules every change keeps, features end to end, checklists, debugging, known limits. |
 | [Comparison](docs/comparison.md) | Similar tools, feature by feature, and why one tool. |
 
 Feature guides: [Preheat](docs/preheat.md) ·
@@ -168,7 +169,7 @@ Feature guides: [Preheat](docs/preheat.md) ·
 
 ## Status
 
-The current version is **1.14.1**; see the [changelog](CHANGELOG.md) and the
+The current version is **1.14.2**; see the [changelog](CHANGELOG.md) and the
 [releases](https://github.com/hatam-abolghasemi/Angry-Duck/releases). It runs
 on the clusters it was built for, through hundreds of deploys a day. Angry
 Duck targets Linux nodes running containerd 1.6 or later.
@@ -180,8 +181,9 @@ Running Angry Duck, or thinking about it? Tell us how it goes in
 Bugs and feature requests go in
 [Issues](https://github.com/hatam-abolghasemi/Angry-Duck/issues), and security
 reports through the [private advisory form](https://github.com/hatam-abolghasemi/Angry-Duck/security/advisories/new).
-See [Contributing](.github/CONTRIBUTING.md) to send a change, and
-[Development](docs/development.md) to build and test it.
+See [Contributing](.github/CONTRIBUTING.md) to send a change,
+[Development](docs/development.md) to build and test it, and
+[Maintaining](docs/maintaining/README.md) for the rules a change keeps.
 
 ## License
 

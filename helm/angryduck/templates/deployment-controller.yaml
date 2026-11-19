@@ -8,14 +8,9 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: 1
-  # One controller at a time: its state lives in memory, so two side by side
-  # during an update would both order spreads, propagation and retention.
-  # For the few seconds with none, a preheat webhook gets no answer (that
-  # image is pulled from the registry, as without Angry Duck) and mirrors
-  # send containerd straight to the registry.
   strategy:
     type: Recreate
-    rollingUpdate: null # drops the defaults a RollingUpdate Deployment carries, which Recreate refuses
+    rollingUpdate: null
   selector:
     matchLabels:
       app.kubernetes.io/name: angryduck

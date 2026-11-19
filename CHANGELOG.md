@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.14.2
+
+### Fixed
+
+- **Unpacking while blobs arrive never ran with parallel unpacking on.**
+  With `SPREAD_UNPACK_STREAM_ENABLED` and parallel unpacking (on by default
+  where containerd supports it), a layer was only unpacked while it arrived
+  onto a layer below that the same spread had unpacked. The layer below is
+  usually on the node already (a shared base), so every layer waited for
+  its blob instead: `angryduck_worker_spread_unpacks_total{result="streamed"}`
+  stayed at 0. Now a layer is tried once whatever its layer below, as
+  without parallel unpacking; if that one isn't there yet (containerd says
+  so before anything is read), the layer waits for it to be unpacked here,
+  then streams if its blob is still arriving.
+
+### Added
+
+- **Where a worker's memory goes.** `angryduck_process_memory_bytes` splits
+  the page cache charged to the container into `page_cache_active` (what
+  counts in its working set, and so toward its memory limit) and
+  `page_cache_inactive`, and adds `page_cache_dirty` and `shmem`. The worker's
+  page cache tracker reports what it holds:
+  `angryduck_worker_page_cache_tracked_bytes` and `_files`, by `state`
+  (`reading`, `idle`). Workers on 1.13 showed container memory that stayed up
+  for hours, then fell at a restart; with these, the next time shows whether
+  it is file cache, and whether a reader never let go of it. The dashboard's
+  Runtime tab has them in a new Page cache row.
+- **Maintainer docs** ([`docs/maintaining/`](docs/maintaining/README.md)):
+  a map of the code, the rules every change keeps, each feature from its
+  entry point to its metrics, checklists for common changes and releases, a
+  debugging playbook and the known limits.
+
+### Changed
+
+- **The dashboard holds on long ranges and busy clusters.** Stats "in range"
+  read the whole range at every sparkline point, and several joined every
+  pod of the range: at a week on a busy cluster they failed. Counts and bytes
+  now add up per interval (the sparkline shows when it happened); ratios,
+  percentiles and distinct counts are read once; the filter that limited
+  pods to images Angry Duck knows, a 12-metric regex over the range, is
+  gone; Busiest Workloads covers the last 24 hours.
+- **Image filters:** a new **Image** filter (the image without its tag)
+  between **Registry** and each tab's filter, now called **Tag**. Registry
+  narrows Image, Image narrows Tag, and every panel that filters by
+  registry filters by image too.
+- **Images on the nodes:** an *On the nodes* row on the Image tab: images per
+  node by state (in use, unused, retention copy, broken, due within the
+  hour), and every node and image with its state, pods, removal countdown,
+  size and arrival. Removal countdowns turn red under 10 minutes, orange
+  under an hour.
+- **Panels no longer hide themselves.** Grafana 13 hid panels that had data
+  when they were set to hide while empty. Rows of rare events (seeds,
+  propagation, rescues, repairs, broken images, transfers running now) start
+  collapsed instead, and empty panels say so.
+- **Annotations: 3 toggles instead of 7.** *Restarts* marks only restarts
+  that kept their version (crashes, evictions, reboots), not every process of
+  a rollout; rescue and repair failures, stalled cleanups and unreachable
+  registries are one *Problems* toggle.
+- The mirror hit ratio per node over time (a line per node, on two tabs) is
+  gone: the Overview's node table has each node's hit ratio. The retention
+  events that read as grey have their own colors: *went unused* slate blue,
+  *used again* green (*unused* and *used* in Retention History).
+- The controller Deployment's manifests no longer carry comments; why it
+  uses `Recreate` is in [Operations](docs/operations.md#upgrading).
+
 ## 1.14.1
 
 A controller that stops answering no longer slows every pull in the

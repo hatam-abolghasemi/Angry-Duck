@@ -159,6 +159,14 @@ On a node holding 304 images, 614 snapshots and 918 blobs, with containerd 2.2:
    reports within seconds, and workers keep serving peers during a controller
    restart.
 
+The controller's Deployment uses the `Recreate` strategy: its state lives in
+memory, so two controllers side by side during an update would both give
+orders. For the few seconds with none, a preheat webhook gets no answer (that
+image is pulled from the registry, as without Angry Duck) and mirrors send
+containerd straight to the registry. `rollingUpdate: null` in the manifests
+drops the defaults an existing RollingUpdate Deployment carries, which
+Kubernetes refuses next to `Recreate`.
+
 ## Rotating the token
 
 The token is read once at startup. Update the Secret, then restart the
@@ -186,7 +194,7 @@ network); find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.1
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.2
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 
