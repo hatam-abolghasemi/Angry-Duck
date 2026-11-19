@@ -495,7 +495,7 @@
         "spec": {
           "id": 100,
           "title": "Memory by Kind, per Process",
-          "description": "What one process holds, by kind, averaged over the selected workers (and the controller). rss_anon: memory it really holds. working_set: what kubectl top shows, which also counts its own code and file cache. heap_live: what the Go heap needs now; heap_retained: freed heap kept for reuse; stacks: goroutine stacks; page_cache: file cache charged to the container. Memory already handed back to the OS (heap_released) isn't shown.",
+          "description": "What one process holds, by kind, averaged over the selected workers (and the controller). rss_anon: memory it really holds. working_set: what kubectl top shows, which also counts its own code and file cache. heap_live: what the Go heap needs now; heap_retained: freed heap kept for reuse; stacks: goroutine stacks; page_cache: file cache charged to the container; slab_reclaimable: the kernel's records of files the container created or opened (inodes, directory entries), counted in working_set, gone once the files are deleted. Memory already handed back to the OS (heap_released) isn't shown.",
           "links": [],
           "data": {
             "kind": "QueryGroup",

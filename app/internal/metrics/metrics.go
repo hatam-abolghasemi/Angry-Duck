@@ -268,9 +268,29 @@ func (r *registry) snapshot() []metric {
 
 // Handler serves every registered metric in Prometheus text exposition
 // format. Mount it at /metrics.
+// scrapeHooks run at the start of every scrape: metrics read only when
+// someone asks for them, instead of on a timer.
+var scrapeHooks struct {
+	mu  sync.Mutex
+	fns []func()
+}
+
+// OnScrape runs fn at the start of every scrape, before anything is written.
+func OnScrape(fn func()) {
+	scrapeHooks.mu.Lock()
+	scrapeHooks.fns = append(scrapeHooks.fns, fn)
+	scrapeHooks.mu.Unlock()
+}
+
 func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		scrapeHooks.mu.Lock()
+		hooks := scrapeHooks.fns
+		scrapeHooks.mu.Unlock()
+		for _, fn := range hooks {
+			fn()
+		}
 		for _, m := range defaultRegistry.snapshot() {
 			m.write(w)
 		}

@@ -6,12 +6,13 @@ import (
 	"runtime/metrics"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 var processMemory = NewGaugeVec(
 	"angryduck_process_memory_bytes",
-	"This process's memory, refreshed every 15s. rss_anon is what it really "+
+	"This process's memory, read at each scrape. rss_anon is what it really "+
 		"holds; rss_file is its own code, shared and reclaimable by the kernel. "+
 		"heap_live is what the Go heap needs right now; heap_retained is freed "+
 		"heap kept for reuse (returned to the OS when idle); heap_released was "+
@@ -21,13 +22,20 @@ var processMemory = NewGaugeVec(
 		"binary), split into page_cache_active (counted in working_set) and "+
 		"page_cache_inactive (not counted, first to go); page_cache_dirty is "+
 		"written but not yet on disk, shmem is tmpfs and shared memory (kept "+
-		"until freed, never dropped like file cache).",
+		"until freed, never dropped like file cache). slab_reclaimable is the "+
+		"kernel's records of files the container created or opened (inodes, "+
+		"directory entries): counted in working_set, freed once the files are "+
+		"deleted or the node needs memory, and no process can hand it back "+
+		"itself (cgroup v2 only).",
 	"component", "kind")
 
-// TrackProcessMemory publishes angryduck_process_memory_bytes until ctx
-// ends, so how much memory is actually needed is measurable, separately
-// from what the kernel or Go's allocator happens to keep around.
+// TrackProcessMemory publishes angryduck_process_memory_bytes, read at each
+// scrape (nothing runs between scrapes), so how much memory is actually
+// needed is measurable, separately from what the kernel or Go's allocator
+// happens to keep around. ctx is unused, kept for callers.
 func TrackProcessMemory(ctx context.Context, component string) {
+	_ = ctx
+	var mu sync.Mutex
 	samples := []metrics.Sample{
 		{Name: "/memory/classes/heap/objects:bytes"},
 		{Name: "/memory/classes/heap/unused:bytes"},
@@ -36,6 +44,8 @@ func TrackProcessMemory(ctx context.Context, component string) {
 		{Name: "/memory/classes/heap/stacks:bytes"},
 	}
 	update := func() {
+		mu.Lock()
+		defer mu.Unlock()
 		metrics.Read(samples)
 		v := func(i int) float64 { return float64(samples[i].Value.Uint64()) }
 		processMemory.Set(v(0), component, "heap_live")
@@ -53,19 +63,13 @@ func TrackProcessMemory(ctx context.Context, component string) {
 			processMemory.Set(m.inactiveFile, component, "page_cache_inactive")
 			processMemory.Set(m.dirty, component, "page_cache_dirty")
 			processMemory.Set(m.shmem, component, "shmem")
+			if m.hasSlab {
+				processMemory.Set(m.slabReclaimable, component, "slab_reclaimable")
+			}
 		}
 	}
 	update()
-	t := time.NewTicker(15 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			update()
-		}
-	}
+	OnScrape(update)
 }
 
 func rss() (anon, file float64, ok bool) {
@@ -96,6 +100,8 @@ func rss() (anon, file float64, ok bool) {
 // cgroupMem is a container's memory, from its cgroup.
 type cgroupMem struct {
 	usage, file, activeFile, inactiveFile, dirty, shmem float64
+	slabReclaimable                                     float64
+	hasSlab                                             bool // memory.stat has it (cgroup v2)
 }
 
 // workingSet is usage minus inactive file pages, the way cAdvisor (and so
@@ -106,11 +112,12 @@ func (m cgroupMem) workingSet() float64 {
 
 // memStatKeys names memory.stat's fields: cgroup v2's, and cgroup v1's
 // hierarchical ones.
-type memStatKeys struct{ file, active, inactive, dirty, shmem string }
+// slab is "" where memory.stat doesn't have it (cgroup v1).
+type memStatKeys struct{ file, active, inactive, dirty, shmem, slab string }
 
 var (
-	memStatV2 = memStatKeys{"file", "active_file", "inactive_file", "file_dirty", "shmem"}
-	memStatV1 = memStatKeys{"total_cache", "total_active_file", "total_inactive_file", "total_dirty", "total_shmem"}
+	memStatV2 = memStatKeys{"file", "active_file", "inactive_file", "file_dirty", "shmem", "slab_reclaimable"}
+	memStatV1 = memStatKeys{"total_cache", "total_active_file", "total_inactive_file", "total_dirty", "total_shmem", ""}
 )
 
 // parseMemStat reads the fields of a memory.stat file.
@@ -136,6 +143,8 @@ func parseMemStat(s string, k memStatKeys) cgroupMem {
 			m.dirty = f
 		case k.shmem:
 			m.shmem = f
+		case k.slab:
+			m.slabReclaimable, m.hasSlab = f, true
 		}
 	}
 	return m
