@@ -1,5 +1,117 @@
 # Changelog
 
+## 1.14.3
+
+Resource use, measured: the bench now reports what Angry Duck costs, and
+every byte held and every call made on its own needs a reason (the new
+[resource ledger](docs/maintaining/resources.md)).
+
+### Fixed
+
+- **Unpacking while blobs arrive barely ran on multi-layer images.** A layer
+  could only start once the layer below was unpacked, one at a time, so of
+  an image's layers arriving together only the lowest unpacked while it
+  arrived: on an 8-layer image spread to 18 nodes, 10 of 144 layer unpacks.
+  Now every layer starts unpacking as its bytes arrive, side by side (up to
+  `SPREAD_UNPACK_PARALLEL_MAX` on the node): one whose layer below isn't
+  there yet goes into a snapshot of its own and is attached once that layer
+  is, bottom up, by moving its files (renames: instant) and giving the
+  directories it only implies the owner, mode and xattrs they have below,
+  as containerd's unpack does. Works on containerd 1.7 and 2.x alike. On a
+  2-vCPU VM with containerd 1.7.27, a 469 MiB 3-layer image is ready 1.0 to
+  1.6 s after its last byte lands instead of 4.7 to 5.4 s. An integration
+  test compares every file with containerd's own unpack, with layers
+  arriving top first and every kind of implied directory. Landed layers
+  still go to containerd whenever the layer below is there.
+- **Unpacking while blobs arrive left small files' page cache charged to
+  the worker.** Only files of 1 MiB or more had their pages dropped once
+  written; a layer of small files (a `vendor/` or `node_modules/` tree) left
+  tens of MiB of file cache in every worker's container memory, until image
+  cleanup removed the image. Every file written now has its writeback
+  started once complete and its pages dropped a few files later (at most 64
+  files or 8 MiB in flight; a layer's last files 2s after it ends, so
+  finishing a layer never waits on the disk).
+- **Unpacking while blobs arrive left the kernel's records of the files it
+  wrote charged to the worker** (`slab_reclaimable`, about 1.6 KiB a file),
+  until the image was removed or the container neared its limit: tens of
+  MiB that never came back and read as a leak. A few seconds after the
+  last unpack ends, the worker now hands its cgroup's reclaimable memory
+  back to the kernel through `memory.reclaim` (kernel 5.19+, cgroup v2).
+  On a stg worker after a 20,000-file layer: `slab_reclaimable` 40.9 to
+  2.2 MB and page cache 110 to 0 MB in one write. The worker mounts its own
+  cgroup for it (private cgroup namespace: only its own), so the chart
+  gives it a small in-memory `emptyDir` and, with stream unpack on, the
+  AppArmor profile `Unconfined` (the default profile denies mount;
+  Kubernetes 1.30+). Where it can't, it logs a warning and works as before.
+
+### Changed
+
+- **An idle worker works from events, not timers.** With containerd's events
+  followed (`INVENTORY_EVENTS_ENABLED`, on by default):
+  - reports between events are heartbeats that reuse the last image
+    listing (for up to 10 minutes), instead of listing at least once a
+    minute;
+  - image cleanup checks disk usage and its age rule every `GC_INTERVAL_S`
+    on the last listing, in memory, and lists images and running containers
+    only after an image or container event (at most every 30s), every 10
+    minutes as a safety net, and always right before removing anything;
+  - image repair and the layer inventory also look again 30s after an image
+    or content deletion (containerd's garbage collection removes blobs a
+    moment later, without an event); their intervals are unchanged
+    (`IMAGE_REPAIR_INTERVAL_S` 120s, `LAYER_RESYNC_INTERVAL_S` 10 min);
+  - rescue pins are released by one timer at the next expiry instead of a
+    sweep every 5 minutes;
+  - `angryduck_process_memory_bytes` is read when Prometheus scrapes,
+    instead of every 15s;
+  - freed heap goes back to the OS only after work ends, not also once a
+    minute.
+  Without the event stream, everything polls as before.
+- **A layer unpacked while it arrives is hashed once.** The worker no
+  longer computes the blob's digest itself: containerd checks it when it
+  commits the blob, and the diffID check already proves the unpacked
+  content is the layer's. One fewer full pass over every layer.
+- **Disk usage comes from `statfs`, not node-exporter.** One system call on
+  containerd's content store, the disk images actually fill, instead of an
+  HTTP request to node-exporter and parsing its page every report and every
+  cleanup tick (about 4 MB allocated per worker every 20 minutes for two
+  numbers). node-exporter is no longer needed; it stays a fallback for a
+  worker without containerd's content store mounted. On a node where
+  containerd's data lives on another disk than `/`, cleanup and the spread's
+  room check now follow that disk.
+- **Workers are replaced all at once on an upgrade**
+  (`worker.updateStrategy`, `maxUnavailable: 100%`). Workers don't depend on
+  each other and nothing on a node waits for its worker; one by one only
+  stretched the time two versions ran side by side. A broken new version
+  now takes every worker down at once (nodes pull from the registry
+  meanwhile); `maxUnavailable: 1` brings back the old rollout. The upgrade
+  docs add an optional step: preheat the new worker image through the
+  running Angry Duck first.
+
+### Added
+
+- **`slab_reclaimable` in `angryduck_process_memory_bytes`** (cgroup v2):
+  the kernel's records of files the container created or opened (inodes,
+  directory entries). It counts in `working_set`, and no process can hand it
+  back itself; it leaves when the files are deleted or the node needs
+  memory. The dashboard's Memory by Kind panel shows it.
+- **The bench measures what Angry Duck costs.** Every `bench` run writes
+  `bench/results/resources.csv`: working set, held memory, Go heap, page
+  cache, `slab_reclaimable`, CPU seconds and peak, and containerd calls, per
+  component, before, during and up to `RES_AFTER` (5 minutes) after the
+  run. New: a `files` size (20,000 small files in one layer), `burst`
+  (several images preheated at once) and `idle` (does anything creep), and
+  `STREAM_UNPACK=on|off` to compare unpacking while blobs arrive. A run now
+  also waits for its spread to settle before it ends.
+  It also samples containerd's own cgroup on every node over SSH
+  (`RES_CONTAINERD`), so a comparison with unpacking left to containerd
+  counts the whole cost, and records Go's freed-but-held heap and goroutine
+  stacks. `bench.env.example` uses neutral placeholders.
+- **Resource ledger** ([`docs/maintaining/resources.md`](docs/maintaining/resources.md)):
+  what an idle worker holds and does on its own, and the reason for each.
+  The rules now count all memory the kernel charges to the container (page
+  cache, file records), not only the process's, and name the only cases a
+  timer may stay.
+
 ## 1.14.2
 
 ### Fixed
