@@ -192,9 +192,10 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node_id and address are required", http.StatusBadRequest)
 		return
 	}
-	if rep.Timestamp.IsZero() {
-		rep.Timestamp = time.Now()
-	}
+	// Liveness is judged by when the report arrived, on the controller's
+	// clock: a worker whose node clock is off would otherwise look stale
+	// (clock behind) or stay fresh after it stopped reporting (clock ahead).
+	rep.Timestamp = time.Now()
 	ack := s.registry.Update(rep)
 	if rep.Layers != nil {
 		l := rep.Layers

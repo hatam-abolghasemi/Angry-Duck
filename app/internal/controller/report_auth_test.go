@@ -84,3 +84,32 @@ func TestWebhookRequiresToken(t *testing.T) {
 		t.Fatalf("valid token rejected")
 	}
 }
+
+// Liveness follows the controller's clock: a worker whose node clock is far
+// behind still counts as fresh while it reports, and one far ahead doesn't
+// outlive its last report.
+func TestReportLivenessUsesReceiptTime(t *testing.T) {
+	reg := NewRegistry(30*time.Second, time.Minute)
+	srv := NewServer(reg, NewRanker(reg, 1, time.Hour, nil, false, false))
+	srv.SetToken(testToken)
+	post := func(node string, ts time.Time) {
+		body, _ := json.Marshal(model.WorkerReport{NodeID: node, Address: "10.0.0.1:18081", Utilization: 0.1, Timestamp: ts})
+		req := httptest.NewRequest(http.MethodPost, "/report", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("report from %s: status %d", node, rec.Code)
+		}
+	}
+	post("behind", time.Now().Add(-time.Hour))
+	post("ahead", time.Now().Add(time.Hour))
+	if n := reg.FreshCount(); n != 2 {
+		t.Fatalf("fresh workers = %d, want both: their clocks don't matter", n)
+	}
+	for _, w := range reg.Snapshot().Workers {
+		if d := time.Since(w.LastSeen); d < 0 || d > time.Minute {
+			t.Fatalf("node %s last seen %s ago, want the receipt time", w.NodeID, d)
+		}
+	}
+}
