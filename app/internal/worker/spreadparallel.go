@@ -34,9 +34,14 @@ func (s *Spread) EnableParallelUnpack(x LayerExtractor, max int) bool {
 }
 
 // parallelKickLocked starts what job can do now: unpacking while it arrives
-// the lowest layer whose layer below is unpacked (stream unpacking, one at
-// a time), unpacking landed layers within the node's slots, and committing
-// unpacked ones. Caller holds s.mu.
+// the lowest layer whose layer below is unpacked, or may be (stream
+// unpacking, one at a time), unpacking landed layers within the node's
+// slots, and committing unpacked ones. Caller holds s.mu.
+//
+// A layer below that this spread didn't unpack may be on the node already
+// (a shared base): the layer is tried once, and the applier says
+// errParentMissing, having read nothing, if it isn't. Then it waits for the
+// layer below to be unpacked here, as the sequential path does.
 func (s *Spread) parallelKickLocked(job string, j *unpackJob) {
 	if j.stopped {
 		return
@@ -49,7 +54,7 @@ func (s *Spread) parallelKickLocked(job string, j *unpackJob) {
 		switch {
 		case !l.arriving:
 			landed = append(landed, l)
-		case s.streamApplier != nil && !j.noStream[c] && (l.Parent == "" || j.ready[l.Parent]):
+		case s.streamApplier != nil && !j.noStream[c] && (l.Parent == "" || j.ready[l.Parent] || !j.waiting[c]):
 			stream = append(stream, l)
 		}
 	}
@@ -155,6 +160,7 @@ func (s *Spread) streamWorker(job string, j *unpackJob, l LayerSpec) {
 	switch {
 	case err == nil:
 		delete(j.pending, l.ChainID)
+		delete(j.waiting, l.ChainID)
 		j.ready[l.ChainID] = true
 		clear(j.commitTried) // what waited on it may commit now
 		if applied {
@@ -163,6 +169,10 @@ func (s *Spread) streamWorker(job string, j *unpackJob, l LayerSpec) {
 		} else {
 			spreadUnpacksTotal.Inc(s.nodeID, "present")
 		}
+	case errors.Is(err, errParentMissing) && !dropped:
+		// The layer below isn't here yet: tried again once it is unpacked
+		// here, if the blob is still arriving (else it is unpacked once landed).
+		j.waiting[l.ChainID] = true
 	case !dropped:
 		// Unpacked once its blob lands instead.
 		j.noStream[l.ChainID] = true

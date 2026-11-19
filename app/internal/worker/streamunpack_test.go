@@ -264,3 +264,93 @@ func TestSpreadLeavesZstdLayersToUnpackOnceLanded(t *testing.T) {
 		t.Fatalf("streamed %v, applied %v", ap.streamed, ap.order)
 	}
 }
+
+// With parallel unpacking on, a layer whose layer below is already on the
+// node (a shared base, so not part of this spread) unpacks while it
+// arrives. It used to wait for its blob instead: the parallel path only
+// streamed onto a layer below that this spread itself had unpacked.
+func TestSpreadParallelStreamsOntoALayerAlreadyHere(t *testing.T) {
+	blob := make([]byte, 200000)
+	rand.Read(blob)
+	d := digestOf(blob)
+	base, chain := "sha256:"+strings.Repeat("b", 64), "sha256:"+strings.Repeat("c", 64)
+	ap := &fakeStreamApplier{fakeApplier: newFakeApplier(), firstBytes: make(chan struct{})}
+	ap.snaps[base] = true
+	sp, srv, reg := streamUnpackTestSpread(t, ap)
+	fx := newFakeExtractor()
+	fx.snaps[base] = true
+	if !sp.EnableParallelUnpack(fx, 2) {
+		t.Fatal("refused")
+	}
+	reg.size[d] = int64(len(blob))
+	o := model.SpreadFetch{Job: "s1", Image: "r.io/app:1", Digest: d, Size: int64(len(blob)), Path: model.SpreadPathRegistry,
+		Unpack: &model.SpreadUnpack{ChainID: chain, Parent: base, MediaType: "application/vnd.oci.image.layer.v1.tar+gzip"}}
+	if resp := postSpreadURL(t, srv, "/spread/fetch", o); resp.StatusCode != 202 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	<-reg.ready
+	reg.pipe(d).Write(blob[:100000])
+	select {
+	case <-ap.firstBytes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unpack didn't start before the blob was complete")
+	}
+	reg.pipe(d).Write(blob[100000:])
+	reg.pipe(d).Close()
+	sp.wg.Wait()
+	if len(ap.streamed) != 1 || ap.streamed[0] != chain {
+		t.Fatalf("streamed %v, want the layer while it arrived", ap.streamed)
+	}
+	if len(fx.order) != 0 {
+		t.Fatalf("also unpacked once landed: %v", fx.order)
+	}
+}
+
+// When the layer below isn't on the node yet, the layer waits for it
+// instead of giving up on unpacking while it arrives: once the layer below
+// is unpacked by the same spread, it streams.
+func TestSpreadParallelStreamWaitsForTheLayerBelow(t *testing.T) {
+	low, high := make([]byte, 60000), make([]byte, 200000)
+	rand.Read(low)
+	rand.Read(high)
+	dl, dh := digestOf(low), digestOf(high)
+	cl, ch := "sha256:"+strings.Repeat("1", 64), "sha256:"+strings.Repeat("2", 64)
+	ap := &fakeStreamApplier{fakeApplier: newFakeApplier()}
+	sp, srv, reg := streamUnpackTestSpread(t, ap)
+	fx := newFakeExtractor()
+	if !sp.EnableParallelUnpack(fx, 2) {
+		t.Fatal("refused")
+	}
+	reg.size[dl], reg.size[dh] = int64(len(low)), int64(len(high))
+	gz := "application/vnd.oci.image.layer.v1.tar+gzip"
+	// The upper layer's transfer starts first; the one below comes after.
+	postSpreadURL(t, srv, "/spread/fetch", model.SpreadFetch{Job: "s1", Image: "r.io/app:1", Digest: dh, Size: int64(len(high)),
+		Path: model.SpreadPathRegistry, Unpack: &model.SpreadUnpack{ChainID: ch, Parent: cl, MediaType: gz}})
+	<-reg.ready
+	reg.pipe(dh).Write(high[:1000])
+	postSpreadURL(t, srv, "/spread/fetch", model.SpreadFetch{Job: "s1", Image: "r.io/app:1", Digest: dl, Size: int64(len(low)),
+		Path: model.SpreadPathRegistry, Unpack: &model.SpreadUnpack{ChainID: cl, MediaType: gz}})
+	<-reg.ready
+	reg.pipe(dl).Write(low)
+	reg.pipe(dl).Close()
+	// The lower layer streams in full and lands; the upper one is still arriving.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ap.mu.Lock()
+		done := ap.snaps[cl]
+		ap.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lower layer was never unpacked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	reg.pipe(dh).Write(high[1000:])
+	reg.pipe(dh).Close()
+	sp.wg.Wait()
+	if strings.Join(ap.streamed, ",") != cl+","+ch {
+		t.Fatalf("streamed %v, want both, bottom first", ap.streamed)
+	}
+}
