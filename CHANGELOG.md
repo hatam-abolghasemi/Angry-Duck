@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.14.1
+
+A controller that stops answering no longer slows every pull in the
+cluster, and node clocks, mistyped settings and full disks can't quietly
+switch parts of Angry Duck off.
+
+### Fixed
+
+- **The mirror leaves a controller that doesn't answer alone.** A
+  controller that was down but still routable (its node died before the
+  Service dropped it, or it was starved of CPU) made every layer of every
+  pull on every node wait 3 s for its answer before containerd went to the
+  registry. Now the mirror waits `MIRROR_CONTROLLER_TIMEOUT_MS` (1000, was a
+  fixed 3 s), and after a timeout leaves the controller alone for
+  `MIRROR_CONTROLLER_BACKOFF_MIN_MS` (1000): it still serves what the node
+  holds, and sends the rest straight to the registry. Then one request asks
+  again while the others still skip. Each timeout in a row doubles the wait
+  up to `MIRROR_CONTROLLER_BACKOFF_MAX_MS` (10000); any answer starts over,
+  so a blip is over within a second or two. A refused connection (no
+  controller pod, as during an update) costs nothing and doesn't count, so
+  peers serve again the moment a new controller answers.
+  `angryduck_worker_mirror_controller_unreachable` is `1` meanwhile. See
+  [When the controller doesn't answer](docs/mirror.md#when-the-controller-doesnt-answer).
+- **Liveness follows the controller's clock.** A worker counted as alive by
+  the time written in its report, on its node's clock. A node clock more
+  than `WORKER_STALE_AFTER_S` behind made a healthy worker look stale and
+  get no work; one ahead kept a dead worker looking alive. Now it is when
+  the report arrived.
+- **Seeds skip full nodes.** When an image can't be spread blob by blob and
+  is seeded whole, seeds could land on nodes fuller than
+  `PROPAGATE_MAX_UTILIZATION`, which spreads and propagation already skip.
+  Now they skip them too; with every node full, nothing is seeded.
+- **One controller at a time.** The controller's Deployment used Kubernetes'
+  default rolling update, so during each upgrade two controllers ran side by
+  side, each with its own state, both giving orders. It is now `Recreate`
+  (Helm chart and `k8s/`).
+
+### Changed
+
+- **Settings that can't be used are logged.** An unparsable number or
+  boolean fell back to its default silently. A utilization written as a
+  percentage (`GC_HIGH_UTILIZATION=70`) was taken as 7000%, quietly turning
+  disk-pressure cleanup off (`PROPAGATE_MAX_UTILIZATION=70`: no node ever
+  full). Now both fall back to the default with a warning naming the
+  setting. `GC_LOW_UTILIZATION` at or above `GC_HIGH_UTILIZATION` uses both
+  defaults, with a warning. Spaces around a value are ignored.
+
 ## 1.14.0
 
 Layers reach each node bottom first, unpack side by side where containerd
