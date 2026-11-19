@@ -103,6 +103,26 @@ A registry that gave no answer is left alone on that node for
 `MIRROR_RESOLVE_UNREACHABLE_TTL_S`, so pulls during an outage don't each wait
 for the timeout.
 
+## When the controller doesn't answer
+
+The mirror asks the controller which nodes hold a blob, and about tags. A
+controller that is down but still routable (its node died and the Service
+still points at it, or it is starved of CPU) would make every layer of every
+pull on every node wait out `MIRROR_CONTROLLER_TIMEOUT_MS` before containerd
+goes to the registry. So after one timeout, the node's mirror leaves the
+controller alone for `MIRROR_CONTROLLER_BACKOFF_MIN_MS` (1 s): it still
+serves what the node holds itself, and blobs whose holders it looked up
+lately, and sends containerd straight to the registry for the rest. Then
+one request asks again while the others still skip. Each timeout in a row
+doubles the wait (1, 2, 4, 8 s), up to `MIRROR_CONTROLLER_BACKOFF_MAX_MS`
+(10 s); any answer starts over. So a blip is over within a second or two,
+and a controller that stays down costs one timeout per node per 10 s.
+`angryduck_worker_mirror_controller_unreachable` is `1` meanwhile.
+
+A refused connection (no controller pod behind the Service, as during an
+update) fails at once and costs nothing, so it doesn't count: peers serve
+again the moment a new controller answers.
+
 ## Design choices
 
 - **The registry decides while it can answer.** A tag resolves to what the
@@ -153,11 +173,13 @@ it.
 | `angryduck_worker_mirror_bytes_total{source}` | Bytes served (`local`, `peer`, `stream`), each one not downloaded from the registry. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | Bytes this node served to other nodes' mirrors. |
 | `angryduck_worker_mirror_resolves_total{origin, result}` | Tags resolved, by the registry's answer (`ok`, `missing`, `denied`, `unreachable`, or `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). |
+| `angryduck_worker_mirror_controller_unreachable` | `1` while the mirror leaves a controller that didn't answer in time alone (see [When the controller doesn't answer](#when-the-controller-doesnt-answer)). |
 
 ## Settings
 
 `MIRROR_ENABLED`, `MIRROR_LISTEN_ADDR`, `MIRROR_CONTAINERD_CONFIG_DIR`,
-`MIRROR_REGISTRIES`, `MIRROR_RESOLVE_ENABLED`, `MIRROR_RESOLVE_TIMEOUT_MS`,
+`MIRROR_REGISTRIES`, `MIRROR_CONTROLLER_TIMEOUT_MS`,
+`MIRROR_CONTROLLER_BACKOFF_MIN_MS`, `MIRROR_CONTROLLER_BACKOFF_MAX_MS`, `MIRROR_RESOLVE_ENABLED`, `MIRROR_RESOLVE_TIMEOUT_MS`,
 `MIRROR_RESOLVE_UNREACHABLE_TTL_S`, `MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS`,
 `MIRROR_RESOLVE_NEWEST_CACHE_S`, `MIRROR_RESOLVE_NEWEST_TIMEOUT_MS`. The mirror
 needs the shared token for peer fetches. See

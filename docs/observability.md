@@ -238,6 +238,7 @@ what is moving, not history:
 | `angryduck_worker_mirror_bytes_total` | counter | `node`, `source` | Bytes the mirror served, `local`, `peer` or `stream`. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | counter | `node` | Bytes served to other nodes' mirrors. |
 | `angryduck_worker_mirror_resolves_total` | counter | `node`, `origin`, `result` | Tags the mirror resolved: the registry's answer (`ok`, `missing`, `denied`, `unreachable`; `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). Any `origin` but `ok` with `local` or `peer` is a pull the registry alone would have failed. |
+| `angryduck_worker_mirror_controller_unreachable` | gauge | `node` | `1` while the node's mirror leaves the controller alone after it didn't answer in time (from `MIRROR_CONTROLLER_BACKOFF_MIN_MS`, doubling up to `MIRROR_CONTROLLER_BACKOFF_MAX_MS`): content the node doesn't hold goes straight to the registry. |
 | `angryduck_worker_inventory_events_total` | counter | `node`, `topic` | containerd events that changed what the node can serve; each burst settles into one inventory report. |
 | `angryduck_worker_inventory_watch_up` | gauge | `node` | 1 while the node follows containerd's events, 0 while it falls back to periodic layer scans. |
 | `angryduck_worker_gc_images_deleted_total` | counter | `node`, `tier` | Images removed: `old`, `pressure`, `companion` (a [companion image](companions.md), under disk pressure, last), `retention` (an expired [retention copy](image-cleanup.md#retention-copies)), or `error`. |

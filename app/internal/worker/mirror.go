@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -45,6 +46,11 @@ var (
 		"angryduck_worker_mirror_resolves_total",
 		"Tags containerd asked this node's mirror to resolve, by what the registry answered (origin: ok, missing, denied, unreachable; unchecked: no node holds the tag, so nobody asked) and where the manifest came from (result: local, peer, miss: containerd asks the registry itself). With any origin but ok, the newest copy a node holds was served.",
 		"node", "origin", "result",
+	)
+	mirrorControllerDown = metrics.NewGaugeVec(
+		"angryduck_worker_mirror_controller_unreachable",
+		"1 while this node's mirror leaves the controller alone after it didn't answer in time (MIRROR_CONTROLLER_BACKOFF_MIN_MS, doubling up to MIRROR_CONTROLLER_BACKOFF_MAX_MS): content it doesn't hold itself goes straight to the registry.",
+		"node",
 	)
 )
 
@@ -88,9 +94,16 @@ type Mirror struct {
 	downFor        time.Duration
 	askTimeout     time.Duration // for the controller's answers about tags
 
-	mu      sync.Mutex
-	holders map[string]holderEntry
-	down    map[string]time.Time // registry host -> when to ask it again
+	ctrlTimeout    time.Duration // for the controller's answers about holders
+	ctrlBackoffMin time.Duration // first wait after the controller didn't answer in time...
+	ctrlBackoffMax time.Duration // ...doubling up to this (0: asked every time)
+
+	mu          sync.Mutex
+	holders     map[string]holderEntry
+	down        map[string]time.Time // registry host -> when to ask it again
+	ctrlDown    bool                 // the controller last didn't answer in time
+	ctrlUntil   time.Time            // until then, nobody asks it (see controllerSkip)
+	ctrlBackoff time.Duration        // the current wait; doubles per timeout in a row
 }
 
 type holderEntry struct {
@@ -119,6 +132,7 @@ func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 		mirrorBytesTotal.Add(0, nodeID, src)
 	}
 	mirrorServedTotal.Add(0, nodeID)
+	mirrorControllerDown.Set(0, nodeID)
 	return &Mirror{
 		store: store, nodeID: nodeID, token: token, controllerURL: strings.TrimRight(controllerURL, "/"),
 		client: &http.Client{Transport: &http.Transport{
@@ -126,8 +140,91 @@ func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 			DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
 			ResponseHeaderTimeout: 30 * time.Second,
 		}},
-		holders: map[string]holderEntry{},
+		holders:        map[string]holderEntry{},
+		ctrlTimeout:    time.Second,
+		ctrlBackoffMin: time.Second,
+		ctrlBackoffMax: 10 * time.Second,
 	}
+}
+
+// SetControllerTimeouts sets how long the mirror waits for the controller's
+// answers about holders, and how long it leaves a controller that didn't
+// answer in time alone: backoffMin after the first timeout, doubling with
+// each timeout in a row up to backoffMax (backoffMax 0: asked every time).
+func (m *Mirror) SetControllerTimeouts(timeout, backoffMin, backoffMax time.Duration) {
+	if timeout > 0 {
+		m.ctrlTimeout = timeout
+	}
+	if backoffMax >= 0 {
+		m.ctrlBackoffMax = backoffMax
+	}
+	if backoffMin > 0 {
+		m.ctrlBackoffMin = backoffMin
+	}
+	if m.ctrlBackoffMin > m.ctrlBackoffMax {
+		m.ctrlBackoffMin = m.ctrlBackoffMax
+	}
+}
+
+// controllerSkip reports whether the controller is to be left alone: it
+// didn't answer in time, and its current wait isn't over. A controller that
+// is down but still routable (its node died, it is starved of CPU) would
+// otherwise cost every layer of every pull on every node a full timeout
+// before containerd goes to the registry. Once the wait is over, one request
+// asks again while the others still skip. The wait starts short, so a blip
+// is over fast, and doubles with each timeout in a row up to its cap, so a
+// controller that stays down costs one timeout per node per cap.
+func (m *Mirror) controllerSkip() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.ctrlDown {
+		return false
+	}
+	now := time.Now()
+	if now.Before(m.ctrlUntil) {
+		return true
+	}
+	m.ctrlUntil = now.Add(m.ctrlTimeout) // this request asks; the rest skip meanwhile
+	return false
+}
+
+// controllerAnswered records how asking the controller went. Only a
+// timeout leaves it alone: a refused connection (no controller pod behind
+// the Service) fails at once and costs nothing, so peers are back the
+// moment a new controller answers.
+func (m *Mirror) controllerAnswered(err error) {
+	slow := err != nil && isTimeout(err) && m.ctrlBackoffMax > 0
+	m.mu.Lock()
+	was := m.ctrlDown
+	if slow {
+		if !was {
+			m.ctrlBackoff = m.ctrlBackoffMin
+		} else {
+			m.ctrlBackoff = min(2*m.ctrlBackoff, m.ctrlBackoffMax)
+		}
+		m.ctrlDown, m.ctrlUntil = true, time.Now().Add(m.ctrlBackoff)
+	} else {
+		m.ctrlDown, m.ctrlUntil, m.ctrlBackoff = false, time.Time{}, 0
+	}
+	wait := m.ctrlBackoff
+	m.mu.Unlock()
+	switch {
+	case slow && !was:
+		mirrorControllerDown.Set(1, m.nodeID)
+		logging.Warnf("angryduck-worker[%s]: mirror: the controller didn't answer in time (%v): content this node doesn't hold goes straight to the registry; asking again in %s, then less often up to every %s", m.nodeID, err, wait, m.ctrlBackoffMax)
+	case !slow && was:
+		mirrorControllerDown.Set(0, m.nodeID)
+		logging.Infof("angryduck-worker[%s]: mirror: the controller answers again: peers serve again", m.nodeID)
+	}
+}
+
+// isTimeout reports whether err is a deadline running out, not a refusal.
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // EnableResolve makes the mirror resolve tags (see resolve). Each
@@ -342,19 +439,23 @@ func (m *Mirror) atOrigin(ctx context.Context, image, host string) (string, stri
 // askTag asks the controller how many fresh nodes hold image and, with
 // newest, which digest the newest of their copies points at.
 func (m *Mirror) askTag(ctx context.Context, image string, newest bool) model.TagHolders {
+	var ans model.TagHolders
+	if m.controllerSkip() {
+		return ans
+	}
 	ctx, cancel := context.WithTimeout(ctx, m.askTimeout)
 	defer cancel()
 	u := m.controllerURL + "/images/tag?image=" + url.QueryEscape(image)
 	if newest {
 		u += "&newest=1"
 	}
-	var ans model.TagHolders
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return ans
 	}
 	sharedtoken.Set(req, m.token)
 	resp, err := m.client.Do(req)
+	m.controllerAnswered(err)
 	if err != nil {
 		logging.Debugf("angryduck-worker[%s]: mirror: asking the controller about %s: %v", m.nodeID, image, err)
 		return ans
@@ -437,7 +538,10 @@ func (m *Mirror) lookup(ctx context.Context, digest string) []model.Holder {
 		return e.list
 	}
 	m.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	if m.controllerSkip() {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, m.ctrlTimeout)
 	defer cancel()
 	u := m.controllerURL + "/layers/holders?digest=" + url.QueryEscape(digest) + "&exclude=" + url.QueryEscape(m.nodeID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -447,6 +551,7 @@ func (m *Mirror) lookup(ctx context.Context, digest string) []model.Holder {
 	sharedtoken.Set(req, m.token)
 	var list []model.Holder
 	resp, err := m.client.Do(req)
+	m.controllerAnswered(err)
 	if err == nil {
 		if resp.StatusCode == http.StatusOK {
 			_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&list)
