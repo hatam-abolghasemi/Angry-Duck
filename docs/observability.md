@@ -8,15 +8,20 @@ ServiceMonitors for the Prometheus Operator that scrape every 15 seconds.
 [`grafana/angryduck-dashboard.json`](../grafana/angryduck-dashboard.json) has
 one tab per concern. Each opens with a summary row: six numbers, then a status
 table with one row per node, image, registry or process, then charts in pairs.
-Detail rows follow, the rarely needed ones collapsed.
+Detail rows follow.
 
-Charts and tables for things that didn't happen in the time range hide
-themselves: on a quiet cluster seed pulls, propagation, repairs, streaming or
-pinned snapshots simply don't show, so what is on screen is what happened.
-Widen the time range to bring them back. Status tables don't hide: when empty
-they say so ("Nothing is stuck pulling right now"). Lines don't break: a
-series that disappears for a while (nothing stuck, no spread running) is drawn
-at 0. Long tables page.
+Rows of things that only happen when something goes wrong, or only while a
+spread runs (seed pulls, propagation, rescues, repairs, broken images, peer
+traffic and leftovers, the transfers running right now), start collapsed: a
+row title on a healthy cluster, the panels one click away. Empty panels say so
+("Nothing is stuck pulling right now"). Lines don't break: a series that
+disappears for a while (nothing stuck, no spread running) is drawn at 0. Long
+tables page.
+
+Numbers "in range" stay cheap on long ranges: counts and bytes are added up
+interval by interval (their sparkline shows when it happened), ratios,
+percentiles and distinct counts are read once. Busiest Workloads, which joins
+every pod of the range, covers the last 24 hours.
 
 Colors keep one meaning across the dashboard: green is fine, amber needs a
 look, red is critical (a softer red when it is retried anyway), sky blue is
@@ -28,14 +33,14 @@ yours there).
 
 | Tab | Answers |
 |---|---|
-| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up out of the nodes the DaemonSet should run on, images that can't be pulled and images that can't start, spreads in the time range, mirror hit ratio, bytes from peers; a node table, worst first (uptime, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); where delivered image bytes came from, and all of them against the registry's share, added up over the range; stuck and broken images and the mirror hit ratio per node; the nodes that lost containerd's events in the time range, if any. |
+| **Overview** | Is Angry Duck healthy, and is it saving anything? Workers up out of the nodes the DaemonSet should run on, images that can't be pulled and images that can't start, spreads in the time range, mirror hit ratio, bytes from peers; a node table, worst first (uptime, stuck, broken, cleanup, mirror hits, bytes from and to peers, memory, containerd calls); where delivered image bytes came from, and all of them against the registry's share, added up over the range; stuck and broken images per node, and the nodes that lost containerd's events in the time range, if any. |
 | **Impact** | What Angry Duck changes for the pods, and what it costs. Activity: new image versions, pod starts, kubelet's own pulls, pulls per pod start, pulls Angry Duck saved, restarts, and the workloads creating the most pods. Pulls and pod start: time spent pulling, its share of pod start, kubelet's pull p95, bytes kept off the registry, failed pulls, disk pressure, containers waiting on images, image delivery against all inbound node traffic. Kubelet pulls: pull time as a heatmap and as percentiles, pulls by image size, and pull time per image size and per node. Disk: containerd's disk per node, and disk pressure, evictions and kubelet's image GC if they happened. The node: Angry Duck's CPU throttling and memory against its limits, and disk busy. |
-| **Image** | Everything about one image (pick it in **Image**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side; the components and pods using it, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the same tables list every recent image. |
+| **Image** | Everything about one image (pick it in **Tag**, or click it anywhere): the spread's progress, how long it took and how it ended; per node, how it got the image (peer, registry, seed, rescue, ...), how long after the preheat, bytes and time per side. *On the nodes*: per node, how many images are in use, unused, kept as the retention copy or broken, and how many go within the hour; then every node and image with its state, the pods running it there, when the cleanup removes it (red under 10 minutes), its size and when the node got it. The components and pods using one picked tag, on which nodes and in which state; seed pulls, repairs, which nodes removed it and when the next ones will. On *All*, the tables list every recent image. |
 | **Delivery** | How images reach nodes: every running spread with nodes and layers per state, what each node still lacks, the transfers running, throughput per path, streaming and the slow-chain guard, layers unpacked on arrival, seed pulls; preheat and propagation in collapsed rows. |
 | **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with why the pull failed, rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
-| **Mirror & Registry** | The mirror's hit ratio, requests and bytes; tags it resolved, by what the registry answered and where the manifest came from; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
+| **Mirror & Registry** | The mirror's hit ratio (per node in the Overview's node table), requests and bytes; tags it resolved, by what the registry answered and where the manifest came from; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
 | **Disk Cleanup** | Cleanup state per node over time, images removable per tier, images removed, failed removals, images coming back after removal; retention copies; companion images kept on every node and where each is missing; image by image, what was removed from which node and what comes up next, and when. |
-| **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method, inventory events, the controller's layer index and work in flight. |
+| **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method; the Page cache row: file cache counted as each worker's memory, next to what its page cache tracker holds; inventory events, the controller's layer index and work in flight. |
 
 Every panel has a one-line description (hover its title). Click a node or an
 image anywhere, in a table or a chart, to focus the whole dashboard on it.
@@ -94,12 +99,20 @@ Variables:
 - **Registry**: the registries of the images Angry Duck is busy with, or has
   [history](#image-history) for in the time range. Applies to every image on
   every tab.
-- **Image**, on each tab that lists images (Image, Delivery, Rescue & Repair,
-  Mirror & Registry, Disk Cleanup): those images, within the picked
-  registries: spreading, delivered, stuck, broken, repaired, pulled, removed or
-  coming up for removal, gone from their registry. Clicking an image in a table
-  picks it on that tab. Counters over time carry no image label, by design, to
-  keep the number of series bounded.
+- **Image**: those images without their tag (`registry/path/name`), within the
+  picked registries. Applies to every image on every tab, tagged or not.
+- **Tag**, on each tab that lists images (Image, Delivery, Rescue & Repair,
+  Mirror & Registry, Disk Cleanup): the tags of the picked images:
+  spreading, delivered, stuck, broken, repaired, pulled, removed or coming up
+  for removal, gone from their registry. Clicking an image in a table picks it
+  on that tab. Counters over time carry no image label, by design, to keep the
+  number of series bounded.
+
+Annotations, in the dashboard's controls: **Rollouts** (a new version's first
+process), **Restarts** (a process restarted with the same version: a crash, an
+eviction, a reboot; a rollout's restarts aren't marked), **Problems** (a
+rescue or repair failed, a cleanup stalled, a registry unreachable; the mark
+says which, and where) and **Spreads** (off by default).
 
 The pod and component views use kube-state-metrics in the same data source
 (`kube_pod_container_info`, `kube_pod_info`, `kube_pod_owner`,
@@ -231,6 +244,8 @@ what is moving, not history:
 | `angryduck_worker_spread_active` | gauge | `node`, `path` | Blobs coming in right now on that path (any number; one blob at most once per path). |
 | `angryduck_worker_direct_writes_total` | counter | `node`, `result` | Blobs written straight into containerd's ingest files (`DIRECT_WRITES`): `ok`, or `failed` (aborted, as a failed transfer through the API would be). |
 | `angryduck_worker_page_cache_released_bytes_total` | counter | `node` | Page cache handed back after serving blob files: the pages this worker's reads brought in, once the file was idle for `PAGE_CACHE_RELEASE_AFTER_S`. |
+| `angryduck_worker_page_cache_tracked_bytes` | gauge | `node`, `state` | Page cache this worker's reads of blob files may have brought in (pages that weren't cached before), by `state`: `reading` (a reader still has the file open) or `idle` (handed back once `PAGE_CACHE_RELEASE_AFTER_S` passes). It falls back to 0 between transfers; a level that holds for hours is a reader that never let go. |
+| `angryduck_worker_page_cache_tracked_files` | gauge | `node`, `state` | Blob files whose page cache the worker tracks, by `state`. |
 | `angryduck_worker_spread_finalizes_total` | counter | `node`, `result` | Images registered from spread blobs. |
 | `angryduck_worker_spread_unpacks_total` | counter | `node`, `result` | Layers unpacked as they arrived, before the image registered: `applied` (once the blob landed), `present` (already unpacked) or `failed` (left to the image's own unpack). With [unpacking while blobs arrive](stream-unpack.md) on, also `streamed` (while the blob was still arriving) and `stream_failed` (that failed: unpacked once it landed instead). |
 | `angryduck_worker_spread_finalizing` | gauge | `node` | Images being registered (imported and unpacked) right now. Different images run side by side. |
@@ -261,7 +276,7 @@ The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `angryduck_build_info` | gauge | `component`, `version`, `node` | One series per process: its version, and as the value the Unix time it started. |
-| `angryduck_process_memory_bytes` | gauge | `component`, `kind` | Refreshed every 15s. `rss_anon`: memory the process really holds. `rss_file`: its own code, shared and reclaimable by the kernel. `heap_live`: what the Go heap needs right now. `heap_retained`: freed heap kept for reuse. `heap_released`: already returned to the OS. `stacks`: goroutine stacks. From the container's cgroup: `working_set`, what `kubectl top` and `container_memory_working_set_bytes` show, and `page_cache`, the file cache charged to the container (files it read, its own binary). |
+| `angryduck_process_memory_bytes` | gauge | `component`, `kind` | Refreshed every 15s. `rss_anon`: memory the process really holds. `rss_file`: its own code, shared and reclaimable by the kernel. `heap_live`: what the Go heap needs right now. `heap_retained`: freed heap kept for reuse. `heap_released`: already returned to the OS. `stacks`: goroutine stacks. From the container's cgroup: `working_set`, what `kubectl top` and `container_memory_working_set_bytes` show, and `page_cache`, the file cache charged to the container (files it read, its own binary), split into `page_cache_active` (counted in `working_set`) and `page_cache_inactive` (not counted, the first the kernel takes back); `page_cache_dirty`, written but not yet on disk; `shmem`, tmpfs and shared memory, which stays until freed. |
 
 `rss_anon` is the number to size against; container memory usage
 (`container_memory_working_set_bytes`, `working_set` here) also counts
@@ -274,6 +289,12 @@ cache its blob reads brought in once a blob has been idle for
 `PAGE_CACHE_RELEASE_AFTER_S`, so serving images doesn't leave its
 `working_set` high.
 
+If a worker's `working_set` stays up anyway, `page_cache_active` shows how much
+of it is file cache, and `angryduck_worker_page_cache_tracked_bytes` whether the
+worker still tracks those pages: held there, a reader never let go; at zero, the
+pages came from somewhere the worker doesn't track. The dashboard's Runtime tab
+puts the two side by side (Page cache row).
+
 Useful queries:
 
 ```promql
@@ -281,6 +302,8 @@ Useful queries:
 sum by (node) (rate(angryduck_worker_containerd_calls_total[5m])) * 60
 # memory each worker really holds
 angryduck_process_memory_bytes{component="worker", kind="rss_anon"}
+# file cache counted in each worker's memory
+angryduck_process_memory_bytes{component="worker", kind="page_cache_active"}
 ```
 
 <a id="image-history"></a>
