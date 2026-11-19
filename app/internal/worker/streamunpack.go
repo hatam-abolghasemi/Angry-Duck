@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,6 @@ import (
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sys/unix"
 )
 
@@ -204,15 +204,93 @@ func (s *ContainerdStore) ApplyLayerStream(ctx context.Context, lease string, l 
 	if err != nil {
 		return false, err
 	}
+	var opts []archive.ApplyOpt
+	if len(mounts) == 1 && mounts[0].Type == "overlay" {
+		opts = append(opts, archive.WithConvertWhiteout(archive.OverlayConvertWhiteout))
+		if len(parents) > 0 {
+			opts = append(opts, archive.WithParents(parents))
+		}
+	}
+	diffID, err := streamInto(ctx, root, opts, nil, l, r)
+	if err != nil {
+		return false, err
+	}
+	if err := sn.Commit(ctx, l.ChainID, key); err != nil {
+		if errdefs.IsAlreadyExists(err) {
+			return false, nil // unpacked meanwhile: theirs is as good
+		}
+		return false, fmt.Errorf("committing %s: %w", l.ChainID, err)
+	}
+	committed = true
+	s.labelUncompressed(ctx, l, diffID)
+	return true, nil
+}
 
+// ExtractLayerStream unpacks a layer from its blob as it arrives into a
+// snapshot of its own, with no layer below, so it doesn't wait for the
+// layer below to be unpacked first: every layer of an image unpacks at the
+// same time as its bytes arrive. Nothing is committed: CommitExtracted
+// attaches it onto the layer below once that one is, bottom up.
+//
+// Whiteouts are written as overlay whiteouts (as onto a parent), and the
+// directories the layer only implies (an entry inside them, none for
+// themselves) are noted: unpacked alone they get the default owner and
+// mode, and CommitExtracted gives them those of the layers below, as an
+// unpack onto them would have.
+func (s *ContainerdStore) ExtractLayerStream(ctx context.Context, lease string, l LayerSpec, r io.Reader) (ExtractedLayer, error) {
+	if !s.streamUnpack {
+		return ExtractedLayer{}, errStreamUnpackUnsupported
+	}
+	ctx = leases.WithLease(s.ns(ctx), lease)
+	sn := s.snapshotterSvc()
+	if _, err := sn.Stat(ctx, l.ChainID); err == nil {
+		return ExtractedLayer{Present: true}, nil
+	} else if !errdefs.IsNotFound(err) {
+		return ExtractedLayer{}, err
+	}
+	key := "angryduck-unpack-" + randomSuffix()
+	mounts, err := sn.Prepare(ctx, key, "")
+	if err != nil {
+		return ExtractedLayer{}, fmt.Errorf("preparing a snapshot: %w", err)
+	}
+	defer s.invalidate()
+	root, _, err := writableRoot(mounts)
+	if err != nil {
+		removeQuietly(ctx, sn, key)
+		return ExtractedLayer{}, err
+	}
+	dirs := &impliedDirs{listed: map[string]bool{}, implied: map[string]bool{}}
+	opts := []archive.ApplyOpt{archive.WithConvertWhiteout(archive.OverlayConvertWhiteout)}
+	diffID, err := streamInto(ctx, root, opts, dirs, l, r)
+	if err != nil {
+		removeQuietly(ctx, sn, key)
+		return ExtractedLayer{}, err
+	}
+	return ExtractedLayer{Key: key, DiffID: diffID, ByWorker: true, Implied: dirs.list(), RootEntry: dirs.root}, nil
+}
+
+// labelUncompressed records the layer's diffID on its blob, as containerd's
+// unpack does; the blob may not be committed yet (it is read while it
+// arrives), then this is skipped.
+func (s *ContainerdStore) labelUncompressed(ctx context.Context, l LayerSpec, diffID string) {
+	_, _ = s.client.ContentStore().Update(ctx, content.Info{Digest: digest.Digest(l.Digest),
+		Labels: map[string]string{uncompressedLabel: diffID}}, "labels."+uncompressedLabel)
+}
+
+// streamInto unpacks l's blob, read from r as it arrives, into root, and
+// checks it: the bytes read must be the blob's size, and the unpacked tar
+// must hash to the diffID l's chainID names onto its parent. The blob's
+// own digest isn't computed here: containerd checks it when it commits the
+// blob, and a diffID that matches already proves the content is the
+// layer's. dirs, if set, notes the directories the layer only implies.
+func streamInto(ctx context.Context, root string, opts []archive.ApplyOpt, dirs *impliedDirs, l LayerSpec, r io.Reader) (string, error) {
 	// Stages on goroutines of their own, so decompressing (most of the
-	// CPU) overlaps the rest: one reads the blob as it arrives and hashes
-	// it, one decompresses it, and the archive code hashes the tar and
-	// writes the files. Bounded pipes between them hold 1.25 MiB in all.
-	// The tar's trailing bytes are part of the diffID and the blob's of its
-	// digest, as in containerd's applier.
-	blobHash, diffHash := digest.Canonical.Digester(), digest.Canonical.Digester()
-	counted := &countingReader{r: io.TeeReader(sourceReader{r}, blobHash.Hash())}
+	// CPU) overlaps the rest: one reads the blob as it arrives, one
+	// decompresses it, and the archive code hashes the tar and writes the
+	// files. Bounded pipes between them hold 1.25 MiB in all. The tar's
+	// trailing bytes are part of the diffID, as in containerd's applier.
+	diffHash := digest.Canonical.Digester()
+	counted := &countingReader{r: sourceReader{r}}
 	blob := newChunkPipe(streamUnpackChunks, streamUnpackBlobChunk)
 	pipe := newChunkPipe(streamUnpackChunks, streamUnpackChunk)
 	read, produced := make(chan error, 1), make(chan error, 1)
@@ -240,14 +318,14 @@ func (s *ContainerdStore) ApplyLayerStream(ctx context.Context, lease string, l 
 	}()
 	tarStream := io.TeeReader(pipe, diffHash.Hash())
 	pages := &pageDropper{root: root}
-	opts := []archive.ApplyOpt{archive.WithFilter(pages.next)}
-	if len(mounts) == 1 && mounts[0].Type == "overlay" {
-		opts = append(opts, archive.WithConvertWhiteout(archive.OverlayConvertWhiteout))
-		if len(parents) > 0 {
-			opts = append(opts, archive.WithParents(parents))
+	filter := pages.next
+	if dirs != nil {
+		filter = func(h *tar.Header) (bool, error) {
+			dirs.note(h)
+			return pages.next(h)
 		}
 	}
-	_, err = archive.Apply(ctx, root, tarStream, opts...)
+	_, err := archive.Apply(ctx, root, tarStream, append([]archive.ApplyOpt{archive.WithFilter(filter)}, opts...)...)
 	pages.done()
 	if err == nil {
 		_, err = io.Copy(io.Discard, tarStream) // the tar's trailing bytes
@@ -262,28 +340,65 @@ func (s *ContainerdStore) ApplyLayerStream(ctx context.Context, lease string, l 
 	}
 	// Otherwise the reader may still wait on r: the caller closes r.
 	if err != nil {
-		return false, fmt.Errorf("unpacking %s: %w", l.Digest, err)
+		return "", fmt.Errorf("unpacking %s: %w", l.Digest, err)
 	}
-	if got := blobHash.Digest().String(); got != l.Digest || counted.n != l.Size {
-		return false, fmt.Errorf("the bytes read (%d, %s) aren't blob %s (%d)", counted.n, got, l.Digest, l.Size)
+	if counted.n != l.Size {
+		return "", fmt.Errorf("read %d bytes of blob %s, it has %d", counted.n, l.Digest, l.Size)
 	}
 	diffID := diffHash.Digest().String()
 	if got := chainOf(l.Parent, diffID); got != l.ChainID {
-		return false, fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, got, l.ChainID)
+		return "", fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, got, l.ChainID)
 	}
-	if err := sn.Commit(ctx, l.ChainID, key); err != nil {
-		if errdefs.IsAlreadyExists(err) {
-			return false, nil // unpacked meanwhile: theirs is as good
+	return diffID, nil
+}
+
+// impliedDirs notes, as a layer's tar entries go by, the directories it
+// lists and the ones it only implies (some entry is inside them, none is
+// for them): those are the ones containerd's unpack creates on the way,
+// taking owner, mode and xattrs from the layers below. Their number is
+// small; the listed set lives only while the layer unpacks.
+type impliedDirs struct {
+	listed  map[string]bool
+	implied map[string]bool
+	root    bool // the tar has an entry for its root directory
+}
+
+// note sees one entry; its name is already clean (archive.Apply cleans it
+// before the filter).
+func (d *impliedDirs) note(h *tar.Header) {
+	name := strings.TrimPrefix(filepath.Clean("/"+h.Name), "/")
+	if name == "" {
+		d.root = true
+		return
+	}
+	if h.Typeflag == tar.TypeDir {
+		d.listed[name] = true
+		delete(d.implied, name)
+	}
+	for dir := filepath.Dir(name); dir != "." && dir != "/"; dir = filepath.Dir(dir) {
+		if d.listed[dir] {
+			break // listed, and so were (or will be judged) its own parents
 		}
-		return false, fmt.Errorf("committing %s: %w", l.ChainID, err)
+		d.implied[dir] = true
 	}
-	committed = true
-	// What containerd's unpack records too; the blob may not be committed
-	// yet (it is read while it arrives), then this is skipped.
-	desc := ocispec.Descriptor{MediaType: l.MediaType, Digest: digest.Digest(l.Digest), Size: l.Size}
-	_, _ = s.client.ContentStore().Update(ctx, content.Info{Digest: desc.Digest,
-		Labels: map[string]string{uncompressedLabel: diffID}}, "labels."+uncompressedLabel)
-	return true, nil
+}
+
+// list returns the implied directories, parents before children.
+func (d *impliedDirs) list() []string {
+	out := make([]string, 0, len(d.implied))
+	for dir := range d.implied {
+		if !d.listed[dir] {
+			out = append(out, dir)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool {
+		da, db := strings.Count(out[a], "/"), strings.Count(out[b], "/")
+		if da != db {
+			return da < db
+		}
+		return out[a] < out[b]
+	})
+	return out
 }
 
 // The bounded pipes between the stages of a stream unpack: the blob in
@@ -409,40 +524,73 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // pageDropper keeps the files a layer writes from piling up in page cache
 // charged to the worker (containerd's own unpack charges them to
-// containerd). The archive code writes one file per tar entry; when it
-// moves on to the next entry, the file before is complete: its writeback is
-// started, and the file before that, whose writeback had a whole file's
-// time to run, has its cached pages dropped. Small files are left to the
-// kernel.
+// containerd). Left alone, they stay charged to the worker's container
+// until the node runs short of memory or the image is removed: a layer of
+// many small files (a vendor/ or node_modules/ tree) is tens of MiB of
+// "worker memory" per node, for as long as the image stays.
+//
+// The archive code writes one file per tar entry; when it moves on to the
+// next entry, the file before is complete. Each complete regular file is
+// opened and its writeback started (sync_file_range, no waiting); a few
+// files later, once its writeback had time to run, its cached pages are
+// dropped (fadvise DONTNEED) and it is closed. What is in flight is bounded
+// in files and bytes; the last files of a layer get a short grace period on
+// a timer, so finishing a layer never waits on the disk.
 type pageDropper struct {
 	root     string
-	rootFD   int      // root, opened on first use; -1 when it can't be
-	pending  string   // complete, writeback not started yet
-	flushing *os.File // writeback started
+	rootFD   int    // root, opened on first use; -1 when it can't be
+	pending  string // complete, writeback not started yet
+	pendSize int64
+	flushing []flushingFile // writeback started, oldest first
+	inFlight int64          // bytes in flushing
 }
 
-const pageDropMin = 1 << 20
+type flushingFile struct {
+	f    *os.File
+	size int64
+}
+
+const (
+	// pageDropFiles and pageDropBytes bound the files whose writeback was
+	// started and whose pages aren't dropped yet: the oldest is dropped
+	// once either is passed.
+	pageDropFiles = 64
+	pageDropBytes = 8 << 20
+	// pageDropGrace is how long a layer's last files get for their
+	// writeback before their pages are dropped.
+	pageDropGrace = 2 * time.Second
+)
 
 // next is the archive filter: it sees each entry before it is written.
 func (p *pageDropper) next(h *tar.Header) (bool, error) {
 	p.rotate()
-	if h.Typeflag == tar.TypeReg && h.Size >= pageDropMin {
-		p.pending = h.Name
+	if h.Typeflag == tar.TypeReg && h.Size > 0 {
+		p.pending, p.pendSize = h.Name, h.Size
 	}
 	return true, nil
 }
 
+// rotate starts the writeback of the file just completed, and drops the
+// pages of the oldest files in flight once there are too many.
 func (p *pageDropper) rotate() {
-	if p.flushing != nil {
-		_ = unix.Fadvise(int(p.flushing.Fd()), 0, 0, unix.FADV_DONTNEED)
-		p.flushing.Close()
-		p.flushing = nil
+	if p.pending != "" {
+		if f := p.open(p.pending); f != nil {
+			_ = unix.SyncFileRange(int(f.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WRITE)
+			p.flushing = append(p.flushing, flushingFile{f, p.pendSize})
+			p.inFlight += p.pendSize
+		}
+		p.pending, p.pendSize = "", 0
 	}
-	if p.pending == "" {
-		return
+	for len(p.flushing) > 0 && (len(p.flushing) > pageDropFiles || p.inFlight > pageDropBytes) {
+		dropPages(p.flushing[0].f)
+		p.inFlight -= p.flushing[0].size
+		p.flushing[0] = flushingFile{}
+		p.flushing = p.flushing[1:]
 	}
-	name := p.pending
-	p.pending = ""
+}
+
+// open opens name, as the archive wrote it, resolved inside root.
+func (p *pageDropper) open(name string) *os.File {
 	if p.rootFD == 0 {
 		p.rootFD = -1
 		if fd, err := unix.Open(p.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0); err == nil {
@@ -450,25 +598,37 @@ func (p *pageDropper) rotate() {
 		}
 	}
 	if p.rootFD < 0 {
-		return
+		return nil
 	}
-	// The name as the archive wrote it, resolved inside root.
 	fd, err := unix.Openat2(p.rootFD, name, &unix.OpenHow{
 		Flags:   unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS,
 	})
 	if err != nil {
-		return
+		return nil
 	}
-	f := os.NewFile(uintptr(fd), name)
-	_ = unix.SyncFileRange(fd, 0, 0, unix.SYNC_FILE_RANGE_WRITE)
-	p.flushing = f
+	return os.NewFile(uintptr(fd), name)
 }
 
-// done handles the last files and lets go of root.
+// dropPages drops f's cached pages and closes it.
+func dropPages(f *os.File) {
+	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
+	f.Close()
+}
+
+// done starts the last file's writeback, hands the files still in flight
+// to a timer that drops their pages after pageDropGrace, and lets go of
+// root.
 func (p *pageDropper) done() {
 	p.rotate()
-	p.rotate()
+	if rest := p.flushing; len(rest) > 0 {
+		time.AfterFunc(pageDropGrace, func() {
+			for _, ff := range rest {
+				dropPages(ff.f)
+			}
+		})
+	}
+	p.flushing, p.inFlight = nil, 0
 	if p.rootFD > 0 {
 		unix.Close(p.rootFD)
 		p.rootFD = -1

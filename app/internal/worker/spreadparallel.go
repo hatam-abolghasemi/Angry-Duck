@@ -19,7 +19,8 @@ type LayerExtractor interface {
 
 type extractedLayer struct {
 	LayerSpec
-	x ExtractedLayer
+	x      ExtractedLayer
+	result string // counted once committed: "applied" (default) or "streamed"
 }
 
 // EnableParallelUnpack unpacks landed layers side by side, at most max at
@@ -43,6 +44,10 @@ func (s *Spread) EnableParallelUnpack(x LayerExtractor, max int) bool {
 // errParentMissing, having read nothing, if it isn't. Then it waits for the
 // layer below to be unpacked here, as the sequential path does.
 func (s *Spread) parallelKickLocked(job string, j *unpackJob) {
+	if s.streamExtractor != nil {
+		s.wholeKickLocked(job, j)
+		return
+	}
 	if j.stopped {
 		return
 	}
@@ -111,6 +116,7 @@ func (s *Spread) workerDoneLocked(j *unpackJob) {
 
 // extractWorker has containerd unpack one landed layer on its own.
 func (s *Spread) extractWorker(job string, j *unpackJob, l LayerSpec) {
+	defer s.afterUnpack()
 	start := time.Now()
 	var x ExtractedLayer
 	lease, err := s.lease(j.ctx, job)
@@ -147,6 +153,7 @@ func (s *Spread) extractWorker(job string, j *unpackJob, l LayerSpec) {
 
 // streamWorker unpacks the lowest layer still arriving onto the one below.
 func (s *Spread) streamWorker(job string, j *unpackJob, l LayerSpec) {
+	defer s.afterUnpack()
 	start := time.Now()
 	lease, err := s.lease(j.ctx, job)
 	applied := false
@@ -190,6 +197,7 @@ func (s *Spread) streamWorker(job string, j *unpackJob, l LayerSpec) {
 // up, for as long as one can be: one whose layer below was unpacked here,
 // or (tried once) one whose layer below was already on the node.
 func (s *Spread) commitWorker(job string, j *unpackJob) {
+	defer s.afterUnpack()
 	for {
 		s.mu.Lock()
 		var next *extractedLayer
@@ -215,7 +223,7 @@ func (s *Spread) commitWorker(job string, j *unpackJob) {
 		applied := false
 		if err == nil {
 			ctx, cancel := context.WithTimeout(j.ctx, time.Minute)
-			applied, err = s.extractor.CommitExtracted(ctx, lease, next.LayerSpec, next.x)
+			applied, err = s.committer(next.x).CommitExtracted(ctx, lease, next.LayerSpec, next.x)
 			cancel()
 		}
 		s.mu.Lock()
@@ -226,10 +234,13 @@ func (s *Spread) commitWorker(job string, j *unpackJob) {
 			delete(j.extracted, next.ChainID)
 			j.ready[next.ChainID] = true
 			clear(j.commitTried)
-			if applied {
-				spreadUnpacksTotal.Inc(s.nodeID, "applied")
-			} else {
+			switch {
+			case !applied:
 				spreadUnpacksTotal.Inc(s.nodeID, "present")
+			case next.result != "":
+				spreadUnpacksTotal.Inc(s.nodeID, next.result)
+			default:
+				spreadUnpacksTotal.Inc(s.nodeID, "applied")
 			}
 		default:
 			delete(j.extracted, next.ChainID)
@@ -242,7 +253,7 @@ func (s *Spread) commitWorker(job string, j *unpackJob) {
 		s.parallelKickLocked(job, j)
 		s.mu.Unlock()
 		if err != nil && !errors.Is(err, errParentMissing) {
-			s.extractor.DiscardExtracted(context.Background(), lease, next.x)
+			s.committer(next.x).DiscardExtracted(context.Background(), lease, next.x)
 		}
 	}
 }
@@ -250,7 +261,7 @@ func (s *Spread) commitWorker(job string, j *unpackJob) {
 // discardExtracted removes what was unpacked but never committed (the
 // layer below never arrived here): finalize's own unpack does those.
 func (s *Spread) discardExtracted(j *unpackJob) {
-	if s.extractor == nil {
+	if s.extractor == nil && s.streamExtractor == nil {
 		return
 	}
 	s.mu.Lock()
@@ -261,6 +272,6 @@ func (s *Spread) discardExtracted(j *unpackJob) {
 	}
 	s.mu.Unlock()
 	for _, x := range left {
-		s.extractor.DiscardExtracted(context.Background(), "", x)
+		s.committer(x).DiscardExtracted(context.Background(), "", x)
 	}
 }

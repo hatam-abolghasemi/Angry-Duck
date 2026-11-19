@@ -43,10 +43,10 @@ Connects to containerd, builds `ContainerdStore`, then starts what is on:
 
 | Part | File | What it does |
 |---|---|---|
-| reporter | `internal/worker/reporter.go` | Disk use (from node-exporter), image list and layer inventory deltas to the controller, every `REPORT_INTERVAL_S` and on every containerd event. |
+| reporter | `internal/worker/reporter.go` | Disk use (statfs on containerd's content store), image list and layer inventory deltas to the controller, every `REPORT_INTERVAL_S` and on every containerd event. |
 | inventory watch | `internal/worker/ctdevents.go` | Follows containerd's events; falls back to periodic scans if the stream breaks. |
 | puller | `internal/worker/puller.go` | Seed pulls ordered by the controller (`/pull`, `/pull/cancel`), through CRI, as kubelet would pull. |
-| spread | `internal/worker/spread.go` and `spread*.go` | Receives blobs from the registry or a peer, serves them to peers, finalizes images. `spreadstream.go` serves blobs still arriving; `spreadguard.go` decides on restarts from a faster source; `spreadunpack.go`, `spreadparallel.go` unpack layers as they land, one at a time or side by side; `streamunpack.go` unpacks while the blob still arrives. |
+| spread | `internal/worker/spread.go` and `spread*.go` | Receives blobs from the registry or a peer, serves them to peers, finalizes images. `spreadstream.go` serves blobs still arriving; `spreadguard.go` decides on restarts from a faster source; `spreadunpack.go`, `spreadparallel.go` unpack layers as they land, one at a time or side by side; `streamunpack.go` unpacks while the blob still arrives; `spreadwhole.go` has every layer of an image do so at once, and `attach.go` attaches a layer unpacked on its own onto the layer below. |
 | mirror | `internal/worker/mirror.go` | The registry mirror containerd asks first (`MIRROR_LISTEN_ADDR`): serves local blobs, then peers' (holders from the controller), resolves tags, writes `hosts.toml`. |
 | rescue | `internal/worker/rescue.go` | Copies an image from a peer: missing blobs, or snapshots as a last resort. |
 | repair | `internal/worker/imagerepair.go` | Fixes broken images in place, piece by piece, peers first. |
@@ -81,7 +81,7 @@ Underneath:
 | `features` | The switch tree. |
 | `config` | `.env` loading and typed getters; values that can't be used fall back to the default with a warning. |
 | `metrics` | A small Prometheus registry: counters, gauges, "recent" gauges for events, process memory. |
-| `memlimit` | GOMEMLIMIT from the cgroup, GOGC 50, freed heap handed back after bursts. |
+| `memlimit` | GOMEMLIMIT from the cgroup, GOGC 50, freed heap handed back after bursts, the cgroup's page cache and file records handed back after stream unpacks (`reclaim.go`, `memory.reclaim`). |
 | `sharedtoken` | The bearer token between controller and workers. |
 | `kube` | The smallest Kubernetes client: pod list and watch, the worker's DaemonSet. |
 

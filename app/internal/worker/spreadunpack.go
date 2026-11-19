@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
 )
@@ -101,7 +102,24 @@ func (s *Spread) EnableStreamUnpack(a LayerStreamApplier) bool {
 		spreadUnpacksTotal.Add(0, s.nodeID, r)
 	}
 	s.streamApplier = a
+	if x, ok := a.(LayerStreamExtractor); ok {
+		s.streamExtractor = x
+		if s.extractMax < 1 {
+			s.extractMax = 2
+		}
+	}
 	return true
+}
+
+// SetUnpackSlots sets how many layers this node unpacks at once across all
+// spreads (SPREAD_UNPACK_PARALLEL_MAX), for parallel unpacking and for
+// unpacking every layer while blobs arrive.
+func (s *Spread) SetUnpackSlots(max int) {
+	if max > 0 {
+		s.mu.Lock()
+		s.extractMax = max
+		s.mu.Unlock()
+	}
 }
 
 // layerOf is the layer a fetch order places, if it says.
@@ -178,7 +196,7 @@ func (s *Spread) queueUnpack(job string, l LayerSpec, arriving bool) {
 		j.seq[l.ChainID] = j.nextSeq
 		j.nextSeq++
 	}
-	if s.extractor != nil {
+	if s.extractor != nil || s.streamExtractor != nil {
 		s.parallelKickLocked(job, j)
 		s.mu.Unlock()
 		return
@@ -198,8 +216,18 @@ func (s *Spread) queueUnpack(job string, l LayerSpec, arriving bool) {
 	go s.unpackRun(job, j)
 }
 
+// afterUnpack ends every unpack goroutine: with stream unpack on, the worker
+// wrote the layer's files itself, and their page cache and inode records
+// are charged to it until handed back (memlimit.ReclaimSoon).
+func (s *Spread) afterUnpack() {
+	if s.streamApplier != nil {
+		memlimit.ReclaimSoon()
+	}
+}
+
 // unpackRun unpacks what can be unpacked, until nothing more can.
 func (s *Spread) unpackRun(job string, j *unpackJob) {
+	defer s.afterUnpack()
 	defer s.wg.Done()
 	for {
 		s.unpackPass(job, j)
@@ -304,7 +332,18 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 // unpackStreaming unpacks l from its blob as it arrives: the bytes come
 // from whatever transfer of it runs here, then the committed blob, as a
 // peer streaming from this node gets them (see stream).
-func (s *Spread) unpackStreaming(jctx context.Context, lease string, l LayerSpec) (bool, error) {
+func (s *Spread) unpackStreaming(jctx context.Context, lease string, l LayerSpec) (applied bool, err error) {
+	err = s.withBlobStream(jctx, l, func(ctx context.Context, r io.Reader) error {
+		var aerr error
+		applied, aerr = s.streamApplier.ApplyLayerStream(ctx, lease, l, r)
+		return aerr
+	})
+	return applied, err
+}
+
+// withBlobStream runs fn on l's blob as it arrives here, then the committed
+// blob, as a peer streaming from this node gets them (see stream).
+func (s *Spread) withBlobStream(jctx context.Context, l LayerSpec, fn func(context.Context, io.Reader) error) error {
 	ctx, cancel := context.WithTimeout(jctx, s.timeout+unpackTimeout)
 	defer cancel()
 	pr, pw := io.Pipe()
@@ -314,11 +353,11 @@ func (s *Spread) unpackStreaming(jctx context.Context, lease string, l LayerSpec
 		_, err := s.stream(ctx, pw, l.Digest, l.Size)
 		pw.CloseWithError(err) // nil: the whole blob, then EOF
 	}()
-	applied, err := s.streamApplier.ApplyLayerStream(ctx, lease, l, pr)
+	err := fn(ctx, pr)
 	pr.CloseWithError(errStreamUnpackDone)
 	cancel()
 	<-done
-	return applied, err
+	return err
 }
 
 // unpackStop ends a job's early unpacking. Finalize waits for a layer

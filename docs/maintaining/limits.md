@@ -33,16 +33,27 @@ would bound how far a saved time may be trusted.
 
 ## Page cache charged to the worker
 
-Before 1.14, workers' container memory sometimes stayed tens of MiB up for
-hours with file cache, until a restart; 1.14 shows it released, without a
-change aimed at it, and the cause isn't confirmed. The Runtime tab's Page
-cache row (1.14.2) shows whether it comes back, and whether the worker's
-page cache tracker holds those pages. See
+Workers' container memory staying tens of MiB up for an hour or more was
+traced in 1.14.3 to unpacking while blobs arrive: the page cache of the
+small files it wrote (fixed: every file's pages are dropped once written)
+and the kernel's records of those files (`slab_reclaimable`), which
+stayed charged to the worker until the image was removed or the container
+neared its limit (fixed: handed back through `memory.reclaim` after each
+unpack, where AppArmor allows the worker to mount its cgroup). With that feature off, the bench shows workers flat at about
+10–15 MiB through spreads. The Runtime tab's Page cache row and
+`slab_reclaimable` show it if it comes back. See
 [Debugging](debugging.md#a-workers-memory-stays-up).
 
 ## Unpacking while blobs arrive
 
-Opt-in, and needs privileges ([stream-unpack](../stream-unpack.md)). zstd
+Opt-in, and needs privileges ([stream-unpack](../stream-unpack.md)). Before
+1.14.3, only files of 1 MiB or more had their page cache dropped: a layer of
+small files (a `vendor/` tree) left tens of MiB per worker charged to its pod
+until the image was removed. The kernel's records of the files written
+(`slab_reclaimable`) are handed back through `memory.reclaim` a few seconds
+after the last unpack; where the worker can't mount its cgroup (AppArmor,
+Kubernetes before 1.30, cgroup v1) they stay until the image is removed or
+memory runs short. zstd
 layers are unpacked once they land: their decoder holds a large window in
 memory. Before 1.14.2, with parallel unpacking on, it never ran (a layer
 waited for the layer below to be unpacked by the same spread); watch

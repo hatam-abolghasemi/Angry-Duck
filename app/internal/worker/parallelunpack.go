@@ -50,10 +50,17 @@ var errRebaseIgnored = errors.New("containerd ignored the parent of a commit: pa
 
 // ExtractedLayer is a layer unpacked into a snapshot with no parent, not
 // committed yet. Present: the layer was already unpacked, nothing was.
+// ByWorker: the worker unpacked it while its blob arrived
+// (ExtractLayerStream); it is attached by moving its files into a snapshot
+// prepared on the layer below, which works on any containerd, and Implied
+// and RootEntry say what that attach must fix.
 type ExtractedLayer struct {
-	Key     string
-	DiffID  string
-	Present bool
+	Key       string
+	DiffID    string
+	Present   bool
+	ByWorker  bool
+	Implied   []string // directories the layer only implies, parents first
+	RootEntry bool     // the layer's tar has an entry for its root directory
 }
 
 // EnableParallelUnpack checks that containerd can commit a snapshot onto a
@@ -169,6 +176,9 @@ func (s *ContainerdStore) ExtractLayer(ctx context.Context, lease string, l Laye
 // yet; applied false when the layer was unpacked meanwhile (the extracted
 // snapshot is then removed).
 func (s *ContainerdStore) CommitExtracted(ctx context.Context, lease string, l LayerSpec, x ExtractedLayer) (applied bool, err error) {
+	if x.ByWorker {
+		return s.attachExtracted(ctx, lease, l, x)
+	}
 	ctx = leases.WithLease(s.ns(ctx), lease)
 	sn := s.snapshotterSvc()
 	defer s.invalidate()

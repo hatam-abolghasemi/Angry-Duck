@@ -155,6 +155,9 @@ type Spread struct {
 	extractor  LayerExtractor
 	extractMax int
 	extracting int
+	// Every layer unpacking at once while blobs arrive (see
+	// spreadwhole.go): nil when stream unpacking is off or can't extract.
+	streamExtractor LayerStreamExtractor
 }
 
 type spreadJob struct {

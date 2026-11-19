@@ -27,21 +27,38 @@ containerd can only unpack a committed blob. So the worker unpacks the layer
 itself, with the same code containerd's own unpack runs for overlayfs
 (containerd's `archive` package, the version the worker links):
 
-1. When a transfer of a layer starts, the node queues the layer.
-2. Once the layer below is unpacked (bottom up, as containerd unpacks), the
-   worker asks containerd to prepare a snapshot on it, under the job's
-   lease.
+1. When a transfer of a layer starts, the layer starts unpacking, whatever
+   the layers below are doing: **every layer of an image unpacks at the same
+   time as it arrives**, up to `SPREAD_UNPACK_PARALLEL_MAX` layers at once
+   on the node.
+2. If the layer below is already unpacked, the worker asks containerd to
+   prepare a snapshot on it, under the job's lease. If it isn't yet, the
+   layer goes into a snapshot of its own, with nothing below, so it doesn't
+   wait.
 3. The worker reads the blob as it arrives, from the same ingest file peers
    stream from (whatever transfer of it runs on the node, then the committed
    blob), decompresses it, and writes the layer's files straight into the
    snapshot's upper directory: owners, modes, setuid bits, file
-   capabilities, hardlinks, whiteouts and opaque directories, and a
-   directory the layer only implies takes its owner and mode from the
-   layers below, as with containerd.
-4. **Nothing is trusted until it is checked.** The snapshot is committed
-   under its chainID, through containerd, only when the bytes read hash to
-   the blob's digest and size *and* the unpacked tar hashes to the diffID the
-   chainID names. Otherwise it is removed.
+   capabilities, hardlinks, whiteouts and opaque directories.
+4. A layer unpacked on its own is **attached** once the layer below is
+   committed, bottom up: a snapshot is prepared on the layer below, the
+   files are moved into it (renames on the same disk: instant, whatever
+   their size), and the directories the layer only implies (an entry inside
+   them, none for themselves, noted as the archive went by) take the owner,
+   mode and xattrs of the same path in the layers below, symlinks followed,
+   exactly as containerd's unpack onto them would have. Then it is
+   committed under its chainID and the temporary snapshot removed.
+5. **Nothing is trusted until it is checked.** A snapshot is committed only
+   when the bytes read are the blob's size *and* the unpacked tar hashes to
+   the diffID the chainID names, which proves the content is the layer's.
+   The blob's own digest is checked by containerd when it commits the blob;
+   the worker doesn't hash it a second time. Otherwise the snapshot is
+   removed.
+
+An integration test unpacks a 3-layer image whose layers arrive top first,
+with every kind of implied directory (owned with xattrs, missing below,
+deleted below, a symlink below, opaque), and compares every file with
+containerd's own unpack of the same image.
 
 Reading, decompressing and writing run on three goroutines with bounded
 pipes between them (1.25 MiB in all), so decompressing, most of the CPU,
@@ -50,8 +67,10 @@ Go's, which containerd uses.
 
 When it can't help, nothing changes from unpacking on arrival:
 
-- A layer whose blob has already landed when its turn comes is unpacked
-  through containerd, as before.
+- A layer whose blob has already landed is unpacked through containerd when
+  the layer below is there (its files are then charged to containerd, not
+  the worker). Only if the layer below isn't there yet does the worker
+  unpack it on its own from the landed blob, rather than leave it waiting.
 - If unpacking while arriving fails for any reason (the transfer is cut, a
   check fails, a write is refused), the layer is unpacked through containerd
   once its blob lands (`stream_failed`).
@@ -89,8 +108,20 @@ What stays true:
   above.
 - **Memory.** About 3 MiB more for the worker while a layer unpacks (gzip),
   nothing when idle. The files written are page cache: the worker starts
-  writeback for each large file once it is complete and drops it from cache
-  once written, so it doesn't pile up charged to the worker's pod.
+  writeback for each file once it is complete and drops it from cache a few
+  files later (at most 64 files or 8 MiB in flight; a layer's last files 2s
+  after it ends), so it doesn't pile up charged to the worker's pod. The
+  kernel's records of those files (inodes, directory entries,
+  `slab_reclaimable`) would stay charged to the worker until the image is
+  removed or the node needs memory, so a few seconds after the last unpack
+  ends the worker writes to its cgroup's `memory.reclaim` and the kernel
+  takes them back (with any page cache left): on stg, `slab_reclaimable`
+  40.9 to 2.2 MB after a 20,000-file layer. For that it mounts its own
+  cgroup at `/run/angryduck/cgroup` (a private cgroup namespace shows only
+  its own), which needs `CAP_SYS_ADMIN` (already given) and an AppArmor
+  profile that allows mount: the chart sets `appArmorProfile: Unconfined`
+  with stream unpack on (Kubernetes 1.30+). Without it the worker logs a
+  warning and the records stay as before.
 - **CPU.** The same work containerd would do (decompressing, hashing,
   writing), done by the worker instead, a bit sooner and a bit faster.
 
@@ -127,6 +158,20 @@ When on: `spread enabled: ... unpack_while_arriving=true`.
 
 ## How much faster
 
+Since 1.14.3, on a 2-vCPU VM with containerd 1.7.27, the 3-layer image
+below (469 MiB gzip), spread to a node, two runs each, unpacking while
+arriving:
+
+| Link per blob | | 1.14.2 | 1.14.3 |
+|---|---|---|---|
+| 100 MiB/s | first order to image registered | 7.75–8.13 s | 6.39–6.97 s |
+| | after the last byte landed | 4.69–5.05 s | 1.32–1.56 s |
+| 400 MiB/s | first order to image registered | 7.62–7.68 s | 6.45–6.55 s |
+| | after the last byte landed | 5.12–5.37 s | 0.97–1.45 s |
+
+The earlier numbers below are from before 1.14.3, when only one layer at a
+time could unpack while it arrived.
+
 Measured on a 2-vCPU VM with containerd 1.7.27 (integration benchmarks in
 `app/internal/worker/containerd_streamunpack_integration_test.go`, run with
 `ANGRYDUCK_BENCH=1`). A 600 MiB layer already landed, unpacked:
@@ -151,6 +196,37 @@ takes longer than receiving it, and layers unpack one after another (each
 onto the one below). The gain grows with faster links, faster CPUs and
 larger top layers, and shrinks for images of many small layers. Measure on
 your own nodes (`bench/`) before relying on it.
+
+### On a cluster, before 1.14.3
+
+The bench (`bench/`) on a 21-node cluster with containerd 1.7, the rollout
+started together with the preheat (`PREHEAT_LEAD=0`), workers only:
+
+| Image | | Off | On |
+|---|---|---|---|
+| 1 layer, 20,000 files of 8 KiB (166 MB) | rollout to all pods Ready | 34 s (3 runs) | 30 s (3 runs) |
+| | worker working set after each run | 10.0, 10.6, 10.8 MiB | 46.9, 68.5, 95.2 MiB |
+| 8 layers of 256 MiB (2 GB) | rollout to all pods Ready | 105 s | 111 s |
+| | worker CPU, all workers | 657 s | 1046 s |
+
+Two things showed up:
+
+- **Kernel memory per file.** Each file the worker creates leaves the
+  kernel's record of it (`slab_reclaimable`) charged to the worker, about
+  1.6 KiB per file, until the image is removed or the container nears its
+  limit. With unpacking left to containerd, the same memory is charged to
+  containerd instead. 1.14.3 hands it back after each unpack
+  (`memory.reclaim`). Page cache from the files written was also kept for
+  small files; 1.14.3 drops it for every file.
+- **Multi-layer images barely streamed.** Before 1.14.3 a layer could only
+  stream once the layer below was unpacked, one after another, so on the
+  8-layer image only 10 of 144 layer unpacks happened while their blobs
+  arrived. 1.14.3 streams every layer as it arrives (see [How it
+  works](#how-it-works)).
+
+The CPU column counts only the workers: with the feature off, containerd
+does the decompressing and writing, out of sight. The bench now samples
+containerd too (`RES_CONTAINERD`), and 1.14.3's numbers replace these.
 
 **The biggest single gain is outside Angry Duck: push zstd layers**
 (BuildKit `--output type=image,compression=zstd,force-compression=true`).

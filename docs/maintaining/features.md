@@ -21,7 +21,8 @@ The main path: a pushed image reaches every eligible node blob by blob.
   here, or that it is already coming), writes it into containerd
   (`directwrite.go`), serves it to peers while it still arrives
   (`spreadstream.go`), and unpacks layers as they land
-  (`spreadunpack.go`, `spreadparallel.go`, `streamunpack.go`).
+  (`spreadunpack.go`, `spreadparallel.go`, `streamunpack.go`,
+  `spreadwhole.go`, `attach.go`).
 - **State:** the controller holds each running spread in memory; a spread
   that runs past its time expires. A worker holds a job's blobs under a
   containerd lease until finalize, or until the lease expires.
