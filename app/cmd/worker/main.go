@@ -320,6 +320,11 @@ func main() {
 		if feat.GCRetention && tokenErr != nil {
 			log.Printf("angryduck-worker[%s]: WARNING: image retention off: no usable token for the controller's orders", nodeID)
 		}
+		gcHigh, gcLow := config.Fraction("GC_HIGH_UTILIZATION", 0.70), config.Fraction("GC_LOW_UTILIZATION", 0.40)
+		if gcLow >= gcHigh {
+			log.Printf("angryduck-worker[%s]: WARNING: GC_LOW_UTILIZATION=%.2f is not below GC_HIGH_UTILIZATION=%.2f: cleanup would never know when it's done; using the defaults 0.70 and 0.40", nodeID, gcLow, gcHigh)
+			gcHigh, gcLow = 0.70, 0.40
+		}
 		gc := worker.NewImageGC(store,
 			rt.ListInUseImages,
 			func() (float64, error) {
@@ -330,8 +335,8 @@ func main() {
 			nodeID,
 			worker.GCConfig{
 				Interval:          config.Duration("GC_INTERVAL_S", 60),
-				High:              config.Float("GC_HIGH_UTILIZATION", 0.70),
-				Low:               config.Float("GC_LOW_UTILIZATION", 0.40),
+				High:              gcHigh,
+				Low:               gcLow,
 				UnusedFor:         config.Duration("GC_UNUSED_FOR_S", 3600),
 				Retention:         retention,
 				Batch:             config.Int("GC_BATCH", 5),
@@ -395,6 +400,9 @@ func main() {
 		if mirrorOn {
 			m := worker.NewMirror(store, nodeID, token, controllerURL)
 			m.RequireClientToken(hosts.Token)
+			m.SetControllerTimeouts(time.Duration(config.Int("MIRROR_CONTROLLER_TIMEOUT_MS", 1000))*time.Millisecond,
+				time.Duration(config.Int("MIRROR_CONTROLLER_BACKOFF_MIN_MS", 1000))*time.Millisecond,
+				time.Duration(config.Int("MIRROR_CONTROLLER_BACKOFF_MAX_MS", 10000))*time.Millisecond)
 			if feat.MirrorResolve {
 				timeout := time.Duration(config.Int("MIRROR_RESOLVE_TIMEOUT_MS", 1000)) * time.Millisecond
 				m.EnableResolve(registryclient.New(creds, timeout, 0), timeout, config.Duration("MIRROR_RESOLVE_UNREACHABLE_TTL_S", 30),

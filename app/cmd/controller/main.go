@@ -68,6 +68,7 @@ func main() {
 
 	registry := controller.NewRegistry(staleAfter, targetTTL)
 	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality, labelRegistry)
+	ranker.SetMaxUtilization(config.Fraction("PROPAGATE_MAX_UTILIZATION", 0.70))
 	server := controller.NewServer(registry, ranker)
 	authMode, err := sharedtoken.ParseMode(config.String("AUTH_MODE", ""))
 	if err != nil {
@@ -265,7 +266,7 @@ func newPropagator(registry *controller.Registry, token string, rankExclude []st
 		Window:         config.Duration("PROPAGATE_WINDOW_S", 0),
 		MaxConcurrent:  config.Int("PROPAGATE_MAX_CONCURRENT", 8),
 		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 3),
-		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
+		MaxUtilization: config.Fraction("PROPAGATE_MAX_UTILIZATION", 0.70),
 		// Same nodes preheat leaves alone (masters, typically), unless
 		// set separately.
 		ExcludeNodeSubstrings: config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),
@@ -298,7 +299,7 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		MaxRegistry:    config.Int("SPREAD_MAX_REGISTRY_PULLS", topN),
 		RacePerBlob:    config.Int("SPREAD_RACE_PER_BLOB", 2),
 		PerSource:      config.Int("PROPAGATE_PER_SOURCE", 3),
-		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
+		MaxUtilization: config.Fraction("PROPAGATE_MAX_UTILIZATION", 0.70),
 		Exclude:        config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),
 		RetryAfter:     config.Duration("SPREAD_RETRY_AFTER_S", 15),
 		BackoffMax:     config.Duration("SPREAD_BACKOFF_MAX_S", 600),
@@ -344,7 +345,7 @@ func newCompanions(registry *controller.Registry, staleAfter time.Duration, rank
 		MaxBytes:       int64(config.Int("COMPANION_MAX_MB", 300)) << 20,
 		Interval:       config.Duration("COMPANION_INTERVAL_S", 30),
 		Warmup:         staleAfter,
-		MaxUtilization: config.Float("PROPAGATE_MAX_UTILIZATION", 0.70),
+		MaxUtilization: config.Fraction("PROPAGATE_MAX_UTILIZATION", 0.70),
 		Exclude:        config.StringSlice("PROPAGATE_EXCLUDE_NODE_SUBSTRINGS", rankExclude),
 	})
 }
@@ -359,7 +360,7 @@ func newRetainer(registry *controller.Registry, token, platform string, feat fea
 	cfg := controller.RetainerConfig{
 		TTL: config.Duration("GC_RETENTION_TTL_S", 86400),
 		// The workers' disk-pressure mark, unless set on its own.
-		MaxUtilization: config.Float("GC_RETENTION_MAX_UTILIZATION", config.Float("GC_HIGH_UTILIZATION", 0.70)),
+		MaxUtilization: config.Fraction("GC_RETENTION_MAX_UTILIZATION", config.Fraction("GC_HIGH_UTILIZATION", 0.70)),
 		Interval:       config.Duration("GC_RETENTION_INTERVAL_S", 30),
 		CopyTimeout:    config.Duration("RESCUE_TIMEOUT_S", 600),
 		// Copying to a node that doesn't hold the image goes through the

@@ -8,8 +8,10 @@ Locally they can come from a `.env` file (path set by `ENV_FILE`, default
 default.
 
 - Durations are integers in seconds. Utilizations are fractions between 0
-  and 1.
-- An empty or unparsable value means the default.
+  and 1: `0.70`, not `70`.
+- An empty value means the default. An unparsable value, or a utilization
+  outside 0–1, means the default too, with a warning in the log naming the
+  setting.
 - Each binary ignores the settings it doesn't use, so both share one
   ConfigMap.
 
@@ -75,7 +77,7 @@ holds it.
 |---|---|---|
 | `CONTROLLER_LISTEN_ADDR` | `:8080` | Listen address. |
 | `WAKE_COALESCE_MS` | `50` | How long spread, propagation and rescue wait after something they were waiting for happens (a transfer ended, a pod got stuck) before they look again, so events arriving together share one look. Every millisecond here is a freed link sitting idle; each look costs a fraction of a millisecond of CPU per running spread. |
-| `WORKER_STALE_AFTER_S` | `30` | A worker silent for this long is ignored until it reports again. |
+| `WORKER_STALE_AFTER_S` | `30` | A worker silent for this long is ignored until it reports again. Measured on the controller's clock, from when its last report arrived: node clocks don't matter. |
 
 ## Preheat
 
@@ -143,7 +145,7 @@ The whole-image fallback, and the limits spread shares.
 | `PROPAGATE_WINDOW_S` | `0` | How long to keep spreading a push. `0` means until done or superseded. |
 | `PROPAGATE_MAX_CONCURRENT` | `8` | Whole-image transfers in flight cluster-wide. Spread has no cluster-wide cap. |
 | `PROPAGATE_PER_SOURCE` | `3` | Concurrent sends per source node, spread included. For spread it is the only limit on peer transfers: a receiver takes any number of different blobs at once. One send rarely fills a source's link (the receiver's writes into containerd are usually the limit); three keep a 10G link busy while serving from page cache costs little CPU. Raise it on faster links. |
-| `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this receive nothing new until cleanup makes room. A spread counts as complete without them and stays open for them. Keep it at or below `GC_HIGH_UTILIZATION`. |
+| `PROPAGATE_MAX_UTILIZATION` | `0.70` | Nodes fuller than this receive nothing new until cleanup makes room, and are never picked as seeds. A spread counts as complete without them and stays open for them. Keep it at or below `GC_HIGH_UTILIZATION`. |
 | `PROPAGATE_SEED_TIMEOUT_MIN_S` | `120` | A seed still pulling after `max(MIN, FACTOR × the first seed's pull time)` is cancelled, and peers serve it instead. |
 | `PROPAGATE_SEED_TIMEOUT_MAX_S` | `600` | The timeout while no seed has finished yet. |
 | `PROPAGATE_SEED_TIMEOUT_FACTOR` | `3` | See `PROPAGATE_SEED_TIMEOUT_MIN_S`. |
@@ -203,6 +205,9 @@ The whole-image fallback, and the limits spread shares.
 | `MIRROR_ADVERTISE_ADDR` | the listen address with `HOST_NETWORK=true`, else `$POD_IP:<port>` | The address written into `hosts.toml`. |
 | `MIRROR_CONTAINERD_CONFIG_DIR` | `/etc/containerd/certs.d` | Where `hosts.toml` files are written. containerd's CRI registry `config_path` must point here. |
 | `MIRROR_REGISTRIES` | *(empty)* | Registries to mirror even before the node uses them. |
+| `MIRROR_CONTROLLER_TIMEOUT_MS` | `1000` | How long the mirror waits for the controller to say which nodes hold a blob. |
+| `MIRROR_CONTROLLER_BACKOFF_MIN_MS` | `1000` | After the controller didn't answer in time, how long this node's mirror leaves it alone at first: content the node doesn't hold goes straight to the registry. Then one request asks again. Each timeout in a row doubles the wait; any answer starts over. A refused connection (no controller pod) doesn't count. |
+| `MIRROR_CONTROLLER_BACKOFF_MAX_MS` | `10000` | The longest that wait gets. `0` asks every time. |
 | `MIRROR_RESOLVE_ENABLED` | `true` | Resolve tags too: the registry's answer when it gives one, else the newest copy a node holds (see [Mirror](mirror.md#tags)). |
 | `MIRROR_RESOLVE_TIMEOUT_MS` | `1000` | How long the mirror waits for the registry to say what a tag points at, token request included. |
 | `MIRROR_RESOLVE_UNREACHABLE_TTL_S` | `30` | After a registry gave no answer, how long this node's mirror goes straight to the newest node copy for its tags. `0` asks every time. |
@@ -224,7 +229,7 @@ the cluster anymore, one node keeps it as the retention copy for
 | `GC_INTERVAL_S` | `60` | How often usage is sampled and the disk checked. |
 | `GC_UNUSED_FOR_S` | `3600` | Remove images unused this long, whatever the disk usage. |
 | `GC_HIGH_UTILIZATION` | `0.70` | Above this, remove unused images oldest first... Keep it below kubelet's `imageGCHighThresholdPercent`. |
-| `GC_LOW_UTILIZATION` | `0.40` | ...until the disk is back down to this. |
+| `GC_LOW_UTILIZATION` | `0.40` | ...until the disk is back down to this. Must be below `GC_HIGH_UTILIZATION`, else both defaults are used, with a warning. |
 | `GC_RETENTION_ENABLED` | `true` | Keep one copy of every image that went unused in the cluster. Read by both binaries; off when `GC_ENABLED=false`. |
 | `GC_RETENTION_TTL_S` | `86400` | How long the copy is kept, counted from when the image went unused. Removed right after. `0` turns retention off. |
 | `GC_RETENTION_MAX_UTILIZATION` | `GC_HIGH_UTILIZATION` | Controller only. Never keep a copy on a node whose disk is at or above this. While every node is, copies wait. |
