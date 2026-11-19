@@ -5,7 +5,20 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-[ -f "$HERE/bench.env" ] && . "$HERE/bench.env"
+
+# bench.env, without overriding what the command line set:
+# `PREHEAT_LEAD=0 bench/duckbench.sh ...` wins over bench.env's PREHEAT_LEAD.
+load_env() {
+  local f="$HERE/bench.env" n saved=()
+  [ -f "$f" ] || return 0
+  for n in $(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$f" | tr -d =); do
+    [ -n "${!n+x}" ] && saved+=("$n=$(printf %q "${!n}")")
+  done
+  # shellcheck disable=SC1090
+  . "$f"
+  for n in "${saved[@]}"; do eval "$n"; done
+}
+load_env
 
 : "${KUBECTL:=sudo kubectl}"
 : "${BENCH_HOST:=}"                 # registry host the nodes pull from, behind your ingress
@@ -28,10 +41,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${SHAPE:=ds}"                     # ds: every node at once (worst case for peers); rolling: a Deployment updated in waves
 : "${ROLL_UNAVAILABLE:=25%}"        # rolling: maxUnavailable, i.e. the wave size (Kubernetes' default)
 : "${NODE:=}"                       # node for single-node scenarios; empty: picked automatically
-: "${PULL_SECRET_FROM:=}"           # <namespace>/<secret> with credentials for the bench's own images (Nexus); copied into BENCH_NS
+: "${PULL_SECRET_FROM:=}"           # <namespace>/<secret> with credentials for the bench's own images (a proxy registry); copied into BENCH_NS
 : "${SSH_USER:=root}"
-: "${SSH_OPTS:=-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new}"
+: "${SSH_OPTS:=-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPath=/tmp/duckbench-ssh-%C -o ControlPersist=120}"
+: "${RES_CONTAINERD:=1}"            # also sample containerd's own cgroup on each node over SSH (1) or not (0)
 : "${FILL_PATH:=/var/lib/angryduck-bench-fill}"
+: "${RES_INTERVAL:=15}"             # seconds between resource samples (Angry Duck refreshes its memory metrics every 15s)
+: "${RES_AFTER:=300}"               # seconds to keep sampling after a run, for memory that isn't given back; 0: don't
+: "${RES_PARALLEL:=8}"              # pods sampled at once
+: "${STREAM_UNPACK:=}"              # on | off: unpacking while blobs arrive, for this run; empty: as deployed
+: "${FILES_COUNT:=20000}"           # files size: how many files in its one layer
+: "${FILE_KB:=8}"                   # files size: KB per file
 
 STATE="$HERE/.state"
 RESULTS="$HERE/results"
@@ -58,7 +78,8 @@ size_spec() {
     medium) echo "5 100" ;;
     large)  echo "8 256" ;;
     layers) echo "30 10" ;;
-    *) die "unknown size '$1' (tiny, small, medium, large, layers)" ;;
+    files)  echo "1 $(( FILES_COUNT * FILE_KB / 1024 ))" ;;
+    *) die "unknown size '$1' (tiny, small, medium, large, layers, files)" ;;
   esac
 }
 
@@ -67,6 +88,7 @@ push_image() {
   local size=$1 run=$2 n mb
   read -r n mb < <(size_spec "$size")
   local push="$PUSH_HOST/bench/$size:$run"
+  if [ "$size" = files ]; then push_files_image "$push"; echo "$BENCH_HOST/bench/$size:$run"; return; fi
   log "building $size image: $n layer(s) x ${mb}MB random, tag $run"
   K -n "$BENCH_NS" exec toolbox -- sh -ec "
     rm -rf /work/* && mkdir -p /work/d
@@ -79,6 +101,29 @@ push_image() {
       base='$push'; i=\$((i+1))
     done" || die "pushing the $size image failed"
   echo "$BENCH_HOST/bench/$size:$run"
+}
+
+# push_files_image <push ref>: one layer of FILES_COUNT random files of
+# FILE_KB each, in 20 directories: what a vendor/ or node_modules/ tree is to
+# the node writing it out (a file per tar entry), where the other sizes are
+# one big file per layer.
+push_files_image() {
+  local push=$1 per=$(( FILES_COUNT / 20 )) kb
+  kb=$(( per * FILE_KB ))
+  log "building files image: 1 layer of $(( per * 20 )) files x ${FILE_KB}KB random"
+  K -n "$BENCH_NS" exec toolbox -- sh -ec "
+    command -v split >/dev/null || { echo 'the toolbox has no split'; exit 1; }
+    rm -rf /work/* && mkdir -p /work/d
+    i=1
+    while [ \$i -le 20 ]; do
+      mkdir /work/d/dir\$i
+      dd if=/dev/urandom bs=1024 count=$kb 2>/dev/null | (cd /work/d/dir\$i && split -b ${FILE_KB}k -a 4 - f)
+      i=\$((i+1))
+    done
+    tar -C /work/d -cf /work/layer.tar .
+    rm -rf /work/d
+    crane append --insecure --platform linux/amd64 -b '$BASE_IMAGE' -f /work/layer.tar -t '$push' >/dev/null 2>>/work/crane.log || { cat /work/crane.log >&2; exit 1; }
+    rm -f /work/layer.tar" || die "pushing the files image failed"
 }
 
 # The image a rolling Deployment starts from: BASE_IMAGE, copied once into the
@@ -162,6 +207,211 @@ controller_metric() { # <regex>
   ad_get /metrics | awk -v re="$1" '$0 !~ /^#/ && $1 ~ re {s+=$2} END{printf "%.0f", s+0}'
 }
 
+# ---------------------------------------------------------------- resources
+
+# What Angry Duck costs during a run, sampled from every one of its pods:
+# from the pod's own /metrics, angryduck_process_memory_bytes (rss_anon,
+# heap_live, page_cache, slab_reclaimable) and containerd calls; from the
+# node's kubelet (/metrics/resource), the container's CPU seconds and working
+# set, what kubectl top shows. One line per value:
+#   <unix time> <phase> <node> <component> <metric> <value>
+
+ad_pods() { # "pod node component", running Angry Duck pods
+  K -n "$AD_NS" get pods -o json | jq -r '.items[] | select(.status.phase == "Running")
+    | [.metadata.name, .spec.nodeName, (.metadata.labels["app.kubernetes.io/component"] // "")] | @tsv'
+}
+
+res_one() { # <phase> <pod> <node> <component>
+  local phase=$1 pod=$2 node=$3 comp=$4 t own
+  t=$(date +%s.%N | cut -c1-14)
+  if [ "$comp" = controller ]; then own=$(ad_get /metrics 2>/dev/null || true)
+  else own=$(K get --raw "/api/v1/namespaces/$AD_NS/pods/$pod:18081/proxy/metrics" 2>/dev/null || true); fi
+  {
+    printf '%s\n' "$own" | awk '
+      /^angryduck_process_memory_bytes[{]/ && match($0, /kind="[^"]*"/) {
+        k = substr($0, RSTART + 6, RLENGTH - 7)
+        if (k ~ /^(rss_anon|heap_live|heap_retained|stacks|page_cache|slab_reclaimable)$/) print k, $NF + 0 }
+      /^angryduck_worker_containerd_calls_total[{ ]/ { c += $NF; seen = 1 }
+      END { if (seen) print "ccalls", c + 0 }'
+    K get --raw "/api/v1/nodes/$node/proxy/metrics/resource" 2>/dev/null | awk -v pod="$pod" -v ns="$AD_NS" '
+      index($0, "pod=\"" pod "\"") && index($0, "namespace=\"" ns "\"") {
+        if ($1 ~ /^container_cpu_usage_seconds_total[{]/) print "cpu", $2 + 0
+        else if ($1 ~ /^container_memory_working_set_bytes[{]/) print "ws", $2 + 0 }'
+  } | awk -v t="$t" -v p="$phase" -v n="$node" -v c="$comp" '{ printf ($1 == "cpu" ? "%s %s %s %s %s %.3f\n" : "%s %s %s %s %s %.0f\n"), t, p, n, c, $1, $2 }'
+}
+
+# res_ctd <phase> <node> <ip>: containerd's own cgroup on the node, over
+# SSH (cgroup v2): with unpacking left to containerd, the decompressing,
+# hashing and file writing happen there, out of sight of Angry Duck's pods.
+# Without it a comparison counts only who did the work, not how much.
+res_ctd() {
+  local phase=$1 node=$2 ip=$3 t
+  t=$(date +%s.%N | cut -c1-14)
+  # shellcheck disable=SC2086
+  ssh $SSH_OPTS "$SSH_USER@$ip" 'd=/sys/fs/cgroup/system.slice/containerd.service
+    [ -r $d/memory.current ] || exit 0
+    echo cpu_usec $(awk "\$1==\"usage_usec\"{print \$2}" $d/cpu.stat)
+    echo current $(cat $d/memory.current)
+    awk "\$1~/^(anon|file|inactive_file|slab_reclaimable)\$/{print}" $d/memory.stat' 2>/dev/null | awk -v t="$t" -v p="$phase" -v n="$node" '
+      { v[$1] = $2 }
+      END {
+        if (!("current" in v)) exit
+        printf "%s %s %s containerd cpu %.3f\n", t, p, n, v["cpu_usec"] / 1e6
+        printf "%s %s %s containerd ws %.0f\n", t, p, n, v["current"] - v["inactive_file"]
+        printf "%s %s %s containerd rss_anon %.0f\n", t, p, n, v["anon"]
+        printf "%s %s %s containerd page_cache %.0f\n", t, p, n, v["file"]
+        printf "%s %s %s containerd slab_reclaimable %.0f\n", t, p, n, v["slab_reclaimable"] }'
+}
+
+# res_round <phase>: one sample of every Angry Duck pod (and, with
+# RES_CONTAINERD=1, of containerd on each of their nodes), appended to RES_FILE.
+res_round() {
+  local phase=$1 tmp i=0 pod node comp ip
+  tmp=$(mktemp -d)
+  while IFS=$'\t' read -r pod node comp; do
+    res_one "$phase" "$pod" "$node" "$comp" >"$tmp/$i" &
+    i=$((i + 1))
+    [ $((i % RES_PARALLEL)) = 0 ] && wait
+    if [ "$RES_CONTAINERD" = 1 ] && [ "$comp" = worker ] && ip=$(awk -v n="$node" '$1 == n { print $2 }' "$STATE/node-ips" 2>/dev/null) && [ -n "$ip" ]; then
+      res_ctd "$phase" "$node" "$ip" >"$tmp/$i" &
+      i=$((i + 1))
+      [ $((i % RES_PARALLEL)) = 0 ] && wait
+    fi
+  done < <(ad_pods)
+  wait
+  cat "$tmp"/* >>"$RES_FILE" 2>/dev/null || true
+  rm -rf "$tmp"
+}
+
+RES_FILE="" RES_BG=""
+res_node_ips() { # node name and InternalIP, for res_ctd
+  K get nodes -o json | jq -r '.items[] | [.metadata.name, ([.status.addresses[] | select(.type == "InternalIP") | .address][0] // "")] | @tsv' >"$STATE/node-ips"
+}
+
+res_begin() { # <run>: a new samples file, and two idle samples RES_INTERVAL apart
+  [ "$RES_CONTAINERD" = 1 ] && res_node_ips
+  mkdir -p "$RESULTS/samples"
+  RES_FILE="$RESULTS/samples/$1.txt"; : >"$RES_FILE"
+  res_round idle; sleep "$RES_INTERVAL"; res_round idle
+}
+res_bg_start() { # <phase>: sample every RES_INTERVAL until res_bg_stop
+  ( trap 'exit 0' TERM; while :; do res_round "$1"; sleep "$RES_INTERVAL"; done ) &
+  RES_BG=$!
+}
+res_bg_stop() {
+  [ -n "$RES_BG" ] || return 0
+  kill "$RES_BG" 2>/dev/null || true; wait "$RES_BG" 2>/dev/null || true; RES_BG=""
+}
+# res_after: keep sampling RES_AFTER seconds after a run: after_1m for the
+# first minute, after_5m (or however long) for the rest.
+res_after() {
+  [ "$RES_AFTER" -gt 0 ] || return 0
+  local t0 e
+  t0=$(now)
+  log "sampling resources for ${RES_AFTER}s after the run"
+  while :; do
+    e=$(( $(now) - t0 ))
+    [ "$e" -gt "$RES_AFTER" ] && break
+    if [ "$e" -le 60 ]; then res_round after_1m; else res_round "after_$(( (RES_AFTER + 59) / 60 ))m"; fi
+    sleep "$RES_INTERVAL"
+  done
+}
+
+# res_summarize <run> <scenario> <size>: one resources.csv row per phase and
+# component. Memory per pod is its peak during "run" (and "busy"), its last
+# value in the other phases; then averaged over pods, and the largest pod.
+# CPU and containerd calls: what the pods used within the phase, in all, and
+# the busiest pod's peak (cores, between two samples).
+res_summarize() {
+  local csv="$RESULTS/resources.csv"
+  local header="run,scenario,size,component,phase,pods,ws_avg_mb,ws_max_mb,rss_anon_avg_mb,heap_live_avg_mb,page_cache_avg_mb,page_cache_max_mb,slab_avg_mb,cpu_s,cpu_peak_cores,containerd_calls,heap_retained_avg_mb,stacks_avg_mb"
+  if [ ! -f "$csv" ]; then echo "$header" >"$csv"
+  elif [ "$(head -1 "$csv")" != "$header" ]; then sed -i "1s/.*/$header/" "$csv"; fi # older rows lack the new columns at the end
+  sort -n -k1,1 "$RES_FILE" | awk -v run="$1" -v sc="$2" -v sz="$3" '
+    function mb(x) { return sprintf("%.1f", x / 1048576) }
+    {
+      t = $1; ph = $2; nd = $3; c = $4; m = $5; v = $6
+      g = ph SUBSEP c; k = g SUBSEP nd
+      if (!(g in seen)) { seen[g] = 1; order[++ng] = g }
+      if (!((k) in pods)) { pods[k] = 1; npods[g]++; podlist[g, npods[g]] = nd }
+      if (m == "cpu" || m == "ccalls") {
+        # Counted from the last sample of the pod, whatever its phase, so
+        # nothing used between two phases is lost; a counter that went down
+        # is a restarted container, counting from 0 again.
+        p = nd SUBSEP c SUBSEP m
+        if (p in prev) {
+          d = v - prev[p]; if (d < 0) d = v
+          tot[k, m] += d
+          if (m == "cpu" && t > prevt[p]) { r = d / (t - prevt[p]); if (r > peak[g]) peak[g] = r }
+        } else tot[k, m] += 0
+        prev[p] = v; prevt[p] = t; has[g, m] = 1
+      } else {
+        if (ph == "run" || ph == "busy") { if (!((k, m) in val) || v > val[k, m]) val[k, m] = v }
+        else val[k, m] = v
+        has[g, m] = 1
+      }
+    }
+    END {
+      for (i = 1; i <= ng; i++) {
+        g = order[i]; split(g, a, SUBSEP); n = npods[g]
+        delete sum; delete mx; cpu = 0; calls = 0
+        for (j = 1; j <= n; j++) {
+          k = g SUBSEP podlist[g, j]
+          for (mi = 1; mi <= 7; mi++) { m = (mi == 1 ? "ws" : mi == 2 ? "rss_anon" : mi == 3 ? "heap_live" : mi == 4 ? "page_cache" : mi == 5 ? "slab_reclaimable" : mi == 6 ? "heap_retained" : "stacks")
+            if ((k, m) in val) { sum[m] += val[k, m]; if (val[k, m] > mx[m]) mx[m] = val[k, m] } }
+          cpu += tot[k, "cpu"]; calls += tot[k, "ccalls"]
+        }
+        printf "%s,%s,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", run, sc, sz, a[2], a[1], n,
+          (has[g, "ws"] ? mb(sum["ws"] / n) : "NA"), (has[g, "ws"] ? mb(mx["ws"]) : "NA"),
+          (has[g, "rss_anon"] ? mb(sum["rss_anon"] / n) : "NA"), (has[g, "heap_live"] ? mb(sum["heap_live"] / n) : "NA"),
+          (has[g, "page_cache"] ? mb(sum["page_cache"] / n) : "NA"), (has[g, "page_cache"] ? mb(mx["page_cache"]) : "NA"),
+          (has[g, "slab_reclaimable"] ? mb(sum["slab_reclaimable"] / n) : "NA"),
+          (has[g, "cpu"] ? sprintf("%.1f", cpu) : "NA"), (has[g, "cpu"] ? sprintf("%.3f", peak[g]) : "NA"),
+          (has[g, "ccalls"] ? calls : "NA"),
+          (has[g, "heap_retained"] ? mb(sum["heap_retained"] / n) : "NA"), (has[g, "stacks"] ? mb(sum["stacks"] / n) : "NA")
+      }
+    }' >>"$csv"
+  log "resources: $(awk -F, -v r="$1" '$1 == r && $4 == "worker" { printf "%s ws %s/%s MB, page cache %s MB; ", $5, $7, $8, $11 }' "$csv")"
+  log "containerd: $(awk -F, -v r="$1" '$1 == r && $4 == "containerd" { printf "%s ws %s MB, cpu %s s; ", $5, $7, $14 }' "$csv")"
+}
+
+# ---------------------------------------------------------------- unpacking while blobs arrive
+
+# The worker DaemonSet sets SPREAD_UNPACK_STREAM_ENABLED itself (Helm's
+# worker.streamUnpack.enabled, which also grants the privileges it needs),
+# so it is switched on the DaemonSet, not the ConfigMap. The original is
+# saved once and put back by teardown.
+stream_env() {
+  K -n "$AD_NS" get ds angryduck-worker -o json | jq -r '[.spec.template.spec.containers[] | select(.name == "worker")
+    | (.env // [])[] | select(.name == "SPREAD_UNPACK_STREAM_ENABLED") | .value][0] // "absent"'
+}
+
+set_stream() { # <on|off|"">
+  [ -n "$1" ] || return 0
+  local want cur
+  case "$1" in on) want=true ;; off) want=false ;; *) die "STREAM_UNPACK must be on or off" ;; esac
+  [ -f "$STATE/stream-orig" ] || stream_env >"$STATE/stream-orig"
+  [ "$want" = true ] && [ "$(cat "$STATE/stream-orig")" = absent ] \
+    && die "this worker has no privileges for unpacking while blobs arrive: deploy it with Helm's worker.streamUnpack.enabled first"
+  cur=$(stream_env)
+  [ "$cur" = "$want" ] && return 0
+  log "unpacking while blobs arrive -> $1"
+  K -n "$AD_NS" set env ds/angryduck-worker -c worker "SPREAD_UNPACK_STREAM_ENABLED=$want" >/dev/null
+  wait_ad_ready
+}
+
+restore_stream() {
+  [ -f "$STATE/stream-orig" ] || return 0
+  local orig; orig=$(cat "$STATE/stream-orig")
+  if [ "$(stream_env)" != "$orig" ]; then
+    log "restoring the worker's SPREAD_UNPACK_STREAM_ENABLED"
+    if [ "$orig" = absent ]; then K -n "$AD_NS" set env ds/angryduck-worker -c worker SPREAD_UNPACK_STREAM_ENABLED- >/dev/null
+    else K -n "$AD_NS" set env ds/angryduck-worker -c worker "SPREAD_UNPACK_STREAM_ENABLED=$orig" >/dev/null; fi
+    wait_ad_ready
+  fi
+  rm -f "$STATE/stream-orig"
+}
+
 # ---------------------------------------------------------------- modes
 
 # Modes switch Angry Duck's features through its ConfigMap; setup saved the
@@ -191,6 +441,10 @@ apply_cm_data() { # <json data>
 restart_ad() {
   log "restarting Angry Duck"
   K -n "$AD_NS" rollout restart deploy/angryduck-controller ds/angryduck-worker >/dev/null
+  wait_ad_ready
+}
+
+wait_ad_ready() {
   K -n "$AD_NS" rollout status deploy/angryduck-controller --timeout=10m >/dev/null
   K -n "$AD_NS" rollout status ds/angryduck-worker --timeout=20m >/dev/null
   local want deadline=$(( $(now) + 180 )) fresh
@@ -469,7 +723,7 @@ EOF
   K -n "$BENCH_NS" wait --for=condition=Ready pod/toolbox --timeout=5m >/dev/null
   log "bench registry and toolbox are up"
   K -n "$BENCH_NS" exec toolbox -- crane digest --platform linux/amd64 "$BASE_IMAGE" >/dev/null 2>&1 \
-    || die "the toolbox can't fetch BASE_IMAGE ($BASE_IMAGE) from inside the cluster; point it at a registry pods can reach (e.g. your Nexus) in bench.env"
+    || die "the toolbox can't fetch BASE_IMAGE ($BASE_IMAGE) from inside the cluster; point it at a registry pods can reach (e.g. your proxy registry) in bench.env"
   log "toolbox can fetch $BASE_IMAGE"
 
   set_mode on
@@ -500,6 +754,8 @@ cmd_bench() {
   label=$scenario
   [ "$scenario" = preheat ] && label="preheat@${PREHEAT_LEAD}s" # the lead time changes everything: keep runs apart
   case "$shape" in ds) ;; rolling) label="$label+rolling" ;; *) die "unknown shape $shape (ds, rolling)" ;; esac
+  set_stream "$STREAM_UNPACK"
+  [ -n "$STREAM_UNPACK" ] && label="$label+stream-$STREAM_UNPACK"
   if [ "$shape" = rolling ]; then
     base=$(base_ref); replicas=$(untainted_nodes | wc -l)
   fi
@@ -515,6 +771,7 @@ cmd_bench() {
       K -n "$BENCH_NS" rollout status "deploy/$name" --timeout="${READY_TIMEOUT}s" >/dev/null || die "the base Deployment didn't become ready"
     fi
     img=$(push_image "$size" "$run"); bytes=$(image_bytes "$size" "$run")
+    res_begin "$run"; res_bg_start run
     since=$(rfc3339)
     if [ "$scenario" = preheat ]; then
       log "preheat: $(preheat "$img" | tr -d '\n')"
@@ -530,6 +787,8 @@ cmd_bench() {
       wait_ds_ready "$name" "$READY_TIMEOUT" || log "WARN: not every pod was Ready within ${READY_TIMEOUT}s"
     fi
     sleep 3
+    [ "$scenario" = kubelet ] || wait_settled "$img" "$SPREAD_TIMEOUT" || log "WARN: spread/propagation still running at timeout"
+    res_bg_stop
     m=$(measure "$name-" "$t0" "$img")
     rb=$(registry_blob_bytes "$since")
     local line
@@ -538,8 +797,42 @@ cmd_bench() {
       printf "%s,%s,%s,%s,%.0f,%s,%s,%s,%s,%s,%.0f,%.2f\n", r, s, z, x[1], b/1048576, x[2], x[3], x[4], x[5], x[6], rb/1048576, rb/b }')
     echo "$line" >>"$csv"
     log "result: $line"
+    res_after
+    res_summarize "$run" "$label" "$size"
     cleanup_workloads
   done
+}
+
+# burst <size> <count>: count images pushed, then preheated at once, as CI
+# pushing several services together; no rollout. What the controller and
+# workers cost while they spread all of them, and what stays after.
+cmd_burst() {
+  local size=${1:?size} count=${2:-5} run label imgs=() i t0
+  set_mode on; set_stream "$STREAM_UNPACK"
+  label="burst-$count"; [ -n "$STREAM_UNPACK" ] && label="$label+stream-$STREAM_UNPACK"
+  run=$(runid)
+  for i in $(seq 1 "$count"); do imgs+=("$(push_image "$size" "$run-$i")"); done
+  res_begin "$run"; res_bg_start run
+  t0=$(now)
+  for i in "${imgs[@]}"; do log "preheat: $(preheat "$i" | tr -d '\n')"; done
+  for i in "${imgs[@]}"; do wait_settled "$i" "$SPREAD_TIMEOUT" || log "WARN: $i still spreading at timeout"; done
+  res_bg_stop
+  log "burst of $count $size images settled in $(( $(now) - t0 ))s"
+  res_after
+  res_summarize "$run" "$label" "$size"
+}
+
+# idle <minutes>: nothing to do for that long; does memory or CPU creep?
+# Rows: start (the first sample) and end (the last, with the CPU used in
+# between).
+cmd_idle() {
+  local min=${1:-60} run t0
+  run=$(runid)
+  mkdir -p "$RESULTS/samples"; RES_FILE="$RESULTS/samples/$run.txt"; : >"$RES_FILE"
+  log "sampling idle Angry Duck for ${min}m, once a minute"
+  res_round start; t0=$(now)
+  while [ $(( $(now) - t0 )) -lt $(( min * 60 )) ]; do sleep 60; res_round end; done
+  res_summarize "$run" "idle-${min}m" -
 }
 
 cmd_bench_all() {
@@ -745,6 +1038,18 @@ cmd_report() {
     awk -F, 'NR > 1 { k = $3 "," $2; n[k]++; w[k] += $6; p[k] += $8; m[k] += $9; rc[k] += $12; ap[k] += $10/$4 }
       END { for (k in n) { split(k, a, ","); printf "%-8s %-19s %4d %8.1f %10.1f %10.1f %9.2f %8.0f%%\n", a[1], a[2], n[k], w[k]/n[k], p[k]/n[k], m[k]/n[k], rc[k]/n[k], 100*ap[k]/n[k] } }' "$f" | sort
   fi
+  f="$RESULTS/resources.csv"
+  if [ -f "$f" ]; then
+    echo; echo "== resources (means per scenario, size, component and phase; MB, CPU seconds)"
+    printf "%-8s %-26s %-10s %-9s %4s %7s %7s %8s %8s %8s %7s %6s %7s %9s\n" size scenario component phase runs ws_avg ws_max rss_anon heap_live pcache slab cpu_s peak_c ctrd_calls
+    awk -F, 'NR > 1 { k = $3 "," $2 "," $4 "," $5; n[k]++
+        for (i = 7; i <= 16; i++) if ($i != "NA") { s[k, i] += $i; c[k, i]++ } }
+      function m(k, i) { return (k, i) in c ? sprintf("%.1f", s[k, i] / c[k, i]) : "NA" }
+      function rank(p) { return p ~ /^(idle|start)$/ ? 1 : p ~ /^(run|busy)$/ ? 2 : p == "after_1m" ? 3 : 4 }
+      END { for (k in n) { split(k, a, ","); printf "%s %s %s %d|%-8s %-26s %-10s %-9s %4d %7s %7s %8s %8s %8s %7s %6s %7s %9s\n",
+        a[1], a[2], a[3], rank(a[4]), a[1], a[2], a[3], a[4], n[k], m(k, 7), m(k, 8), m(k, 9), m(k, 10), m(k, 11), m(k, 13), m(k, 14), m(k, 15), m(k, 16) } }' "$f" \
+      | sort | cut -d'|' -f2-
+  fi
   f="$RESULTS/chaos.csv"
   if [ -f "$f" ]; then echo; echo "== chaos"; column -s, -t <"$f"; fi
 }
@@ -757,6 +1062,7 @@ cmd_reset_registry() {
 
 cmd_teardown() {
   registry_up
+  restore_stream
   if [ -f "$STATE/cm-backup.json" ]; then
     log "restoring Angry Duck's original ConfigMap"
     apply_cm_data "$(jq -c '.data' "$STATE/cm-backup.json")"
@@ -773,22 +1079,29 @@ usage: $0 <command>
   setup                              registry, toolbox, ConfigMap backup, smoke test
   bench <kubelet|no-webhook|preheat> <size> [repeat] [ds|rolling]
   bench-all [repeat] ["sizes"] ["shapes"]  every scenario x shape x size, then report
+  burst <size> [count]               count images preheated at once, no rollout (resources only)
+  idle [minutes]                     no work for that long: does memory or CPU creep?
   chaos <scenario> [size]            outage-always | outage-one-holder | outage-rescue |
                                      worker-kill | controller-kill | disk-pressure
   mode <on|kubelet|mirror-only|rescue-only>
   report                             summarize results/
   reset-registry                     wipe the bench registry's storage
   teardown                           restore Angry Duck's ConfigMap, delete the bench namespace
-sizes: tiny small medium large layers
+sizes: tiny small medium large layers files
+Every bench, burst and idle run also writes results/resources.csv.
+STREAM_UNPACK=on|off switches unpacking while blobs arrive for the runs.
 EOF
 }
 
+trap res_bg_stop EXIT
 need jq
 need ssh
 case "${1:-}" in
   setup) cmd_setup ;;
   bench) shift; cmd_bench "$@" ;;
   bench-all) shift; cmd_bench_all "$@" ;;
+  burst) shift; cmd_burst "$@" ;;
+  idle) shift; cmd_idle "$@" ;;
   chaos) shift; cmd_chaos "$@" ;;
   mode) shift; cmd_mode "$@" ;;
   report) cmd_report ;;

@@ -71,7 +71,9 @@ layers from the seeds still pulling them (1.13.0), instead of each pulling its
 own copy from the registry.
 
 Sizes: `small` (1 × 50 MB), `medium` (5 × 100 MB), `large` (8 × 256 MB),
-`layers` (30 × 10 MB).
+`layers` (30 × 10 MB), `files` (one layer of `FILES_COUNT` files of
+`FILE_KB` each, 20,000 × 8 KB by default: a `vendor/` or `node_modules/`
+tree, where every other size is one big file per layer).
 
 Run one combination:
 
@@ -93,6 +95,70 @@ bench/duckbench.sh bench-all 3
 
 Switching scenarios restarts Angry Duck, so `bench-all` groups runs by
 scenario.
+
+`STREAM_UNPACK=on` or `off` switches unpacking while blobs arrive for the
+runs, on the worker DaemonSet (the variable is set there, not in the
+ConfigMap); rows get `+stream-on` or `+stream-off`. `on` needs a worker
+deployed with Helm's `worker.streamUnpack.enabled`, for its privileges.
+`teardown` puts the original back.
+
+```bash
+STREAM_UNPACK=off bench/duckbench.sh bench preheat files 3
+```
+
+## Resources
+
+Every `bench` run also records what Angry Duck cost, in
+`results/resources.csv`: every Angry Duck pod is sampled every
+`RES_INTERVAL` (15s), from its own metrics (`angryduck_process_memory_bytes`,
+containerd calls) and from its node's kubelet (`/metrics/resource`: CPU
+seconds and working set, what `kubectl top` shows). One row per component
+(worker, controller) and phase:
+
+| Phase | When | Memory columns |
+|---|---|---|
+| `idle` | Two samples before the run starts | Last value |
+| `run` | From the webhook or rollout until pods are Ready and the spread has settled | Each pod's peak |
+| `after_1m` | The first minute after | Last value |
+| `after_5m` | Up to `RES_AFTER` (300s) after: memory that isn't given back shows here | Last value |
+
+| Column | Meaning |
+|---|---|
+| `ws_avg_mb`, `ws_max_mb` | Container working set: the average pod, and the largest |
+| `rss_anon_avg_mb` | What the process really holds |
+| `heap_live_avg_mb` | What the Go heap needs |
+| `page_cache_avg_mb`, `page_cache_max_mb` | File cache charged to the container |
+| `slab_avg_mb` | The kernel's records of the files the container wrote or opened (1.14.3 and later, cgroup v2; `NA` before) |
+| `cpu_s` | CPU seconds all pods used in the phase |
+| `cpu_peak_cores` | The busiest pod's highest rate between two samples |
+| `containerd_calls` | Calls to containerd all workers made in the phase |
+| `heap_retained_avg_mb`, `stacks_avg_mb` | Freed Go heap not yet returned to the OS, and goroutine stacks |
+
+With `RES_CONTAINERD=1` (the default) the bench also samples containerd's own
+cgroup on every node over SSH (cgroup v2), as component `containerd`. With
+unpacking while blobs arrive off, containerd decompresses and writes the
+files, out of sight of Angry Duck's pods: compare the two components
+together, or a comparison only shows who did the work, not how much.
+
+`RES_AFTER=0` skips the after phases: a full `bench-all` is about 90 runs,
+and five minutes each adds over seven hours. Raw samples stay in
+`results/samples/<run>.txt`.
+
+Two more commands measure resources only, with no rollout:
+
+```bash
+bench/duckbench.sh burst medium 5
+```
+
+`burst <size> [count]` pushes `count` images and preheats them all at once,
+as CI pushing several services together, until every spread settles.
+
+```bash
+bench/duckbench.sh idle 60
+```
+
+`idle [minutes]` samples once a minute while nothing happens; rows `start`
+and `end` show whether memory or CPU creeps.
 
 ## Chaos
 
@@ -148,7 +214,8 @@ would anyway.
 bench/duckbench.sh report
 ```
 
-Raw rows are in `bench/results/bench.csv` and `bench/results/chaos.csv`.
+Raw rows are in `bench/results/bench.csv`, `bench/results/resources.csv` and
+`bench/results/chaos.csv`.
 Keep the Grafana dashboard open during runs: the spread, mirror, rescue and
 cleanup panels show what the numbers can't.
 
