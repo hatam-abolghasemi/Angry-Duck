@@ -7,6 +7,10 @@ metadata:
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: worker
 spec:
+  {{- with .Values.worker.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: angryduck
@@ -99,6 +103,11 @@ spec:
             # containerd (docs/stream-unpack.md).
             - name: containerd-snapshots
               mountPath: /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
+            # Where the worker mounts its own cgroup to hand back the page
+            # cache and inode records its unpacked files leave behind
+            # (memory.reclaim; docs/stream-unpack.md).
+            - name: cgroup-reclaim
+              mountPath: /run/angryduck/cgroup
             {{- end }}
           readinessProbe:
             httpGet:
@@ -129,6 +138,15 @@ spec:
               # (trusted.* xattrs). Power over every image on the node.
               add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "MKNOD", "SETFCAP", "SYS_ADMIN"]
               {{- end }}
+            {{- if .Values.worker.streamUnpack.enabled }}
+            # The runtime's default AppArmor profile denies mount, which the
+            # worker needs once, to mount its own cgroup (private cgroup
+            # namespace: only its own) and write memory.reclaim. Kubernetes
+            # 1.30+; older clusters ignore it and the worker logs that
+            # reclaim is off.
+            appArmorProfile:
+              type: Unconfined
+            {{- end }}
       volumes:
         - name: registry-creds
           secret:
@@ -171,6 +189,10 @@ spec:
             # OrCreate: on a node with another snapshotter the worker still
             # starts, and its probe leaves the feature off with a warning.
             type: DirectoryOrCreate
+        - name: cgroup-reclaim
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
         {{- end }}
       {{- with .Values.worker.tolerations }}
       tolerations:

@@ -46,7 +46,7 @@ utilization math.
 | Webhook returns `503` | No fresh workers. Check worker logs, `SELF_ADDRESS`, `NODE_EXPORTER_URL` and that the controller can reach port `18081`. |
 | `angryduck_controller_seed_rankings_total` shows `repo` or `utilization` | The controller can't read the manifest. Add the registry to the `REGISTRY_CREDENTIALS_PATH` file. |
 | Rescue or propagation never starts | The shared token is missing or shorter than 32 characters, or the controller can't list pods. The controller logs a warning at startup. |
-| Workers report no disk usage | node-exporter isn't reachable at the node IP from pods. Check `NODE_EXPORTER_URL` in the DaemonSet. |
+| Workers report no disk usage | The worker log says where it reads it from at startup (`disk usage from statfs on ...`). Without containerd's content store mounted it falls back to node-exporter: check the mount (`CONTAINERD_ROOT`), or `NODE_EXPORTER_URL`. |
 | Mirror never used, containerd logs `401` | A stale `hosts.toml` from a worker that died without SIGTERM; the next worker rewrites it within seconds. |
 | Worker exits with `connecting to containerd` | The socket isn't mounted at `CONTAINER_RUNTIME_ENDPOINT`. Check the `containerd-sock` hostPath. |
 | Worker exits with `containerd's socket ... was replaced` | containerd restarted (a package upgrade, needrestart, a config push) and this container still held its old socket. Expected: kubelet restarts the worker on the new socket within seconds. |
@@ -154,10 +154,23 @@ On a node holding 304 images, 614 snapshots and 918 blobs, with containerd 2.2:
 1. Read the [changelog](../CHANGELOG.md) for setting and metric changes.
 2. If any node can't reach the registry, [bootstrap the new worker image
    there by hand](#bootstrapping-a-node-by-hand) first.
-3. Bump the image tags (or `helm upgrade`) and apply. The controller and
-   workers are independent: the controller rebuilds its state from worker
-   reports within seconds, and workers keep serving peers during a controller
-   restart.
+3. Optionally, let the running Angry Duck deliver the new worker image to
+   every node first, so no worker waits on a pull when they all restart:
+
+   ```bash
+   curl -X POST https://<webhook host>/webhook/preheat \
+     -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" -H 'Content-Type: application/json' \
+     -d '{"image":"ghcr.io/hatam-abolghasemi/angry-duck-worker:<new version>"}'
+   ```
+
+   and upgrade once the Spread tab shows it on every node.
+4. Bump the image tags (or `helm upgrade`) and apply. Every worker is
+   replaced at once (`worker.updateStrategy`): they don't depend on each
+   other, and nothing on a node waits for its worker. While a worker is
+   away its mirror is too, and containerd pulls from the registry as it
+   would without Angry Duck. The controller and workers are independent:
+   the controller rebuilds its state from worker reports within seconds,
+   and workers keep serving peers during a controller restart.
 
 The controller's Deployment uses the `Recreate` strategy: its state lives in
 memory, so two controllers side by side during an update would both give
@@ -194,18 +207,18 @@ network); find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.2
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.3
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 
 # What the image consists of, and what this node already has
-curl -sSf -H "Authorization: Bearer $TOKEN" \
+curl -sSf -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -d "{\"image\":\"$IMG\",\"platform\":\"linux/amd64\"}" http://$SRC/blobs/plan > /tmp/plan.json
 sudo ctr -n k8s.io content ls -q > /tmp/have.txt
 MISSING=$(jq -c --rawfile have /tmp/have.txt '[.blobs[].digest] - ($have | split("\n"))' /tmp/plan.json)
 
 # Fetch only the missing blobs and import them
-curl -sSf -H "Authorization: Bearer $TOKEN" \
+curl -sSf -H "Authorization: Bearer ${ANGRYDUCK_WEBHOOK_TOKEN}" \
   -d "{\"image\":\"$IMG\",\"platform\":\"linux/amd64\",\"digests\":$MISSING}" http://$SRC/blobs/export \
   | sudo ctr -n k8s.io images import --platform linux/amd64 /dev/stdin
 ```

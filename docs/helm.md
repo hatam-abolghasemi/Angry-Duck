@@ -13,7 +13,7 @@ references `registry-pull`, `angryduck-rescue-token` and
 `angryduck-webhook-token` but doesn't create them.
 
 ```bash
-helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.14.2 \
+helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.14.3 \
   --namespace angryduck --create-namespace \
   -f my-values.yaml
 ```
@@ -70,6 +70,7 @@ Install into `angryduck`, as the manifests do. In another namespace, set
 | `worker.image.tag` | the chart's `appVersion` | |
 | `worker.resources` | as in `k8s/` | See [Sizing](operations.md#sizing). |
 | `worker.tolerations` | `[{operator: Exists}]` | Every node, tainted ones included. |
+| `worker.updateStrategy` | `RollingUpdate`, `maxUnavailable: 100%` | Every worker is replaced at once on an upgrade: workers don't depend on each other, and nothing on a node waits for its worker. A broken new version takes them all down at once (nodes go on pulling from the registry); `maxUnavailable: 1` replaces them one by one. |
 | `worker.streamUnpack.enabled` | `false` | Unpack layers while their blobs arrive. Adds seven capabilities, `CAP_SYS_ADMIN` among them, and mounts containerd's overlayfs snapshots writable: read [Unpacking while blobs arrive](stream-unpack.md) first. |
 | `registryCredentials.secretName` | `registry-pull` | dockerconfigjson Secret for seed pulls and manifest reads. |
 | `registryCredentials.optional` | `true` | Start without the Secret. Set `false` to make a missing Secret block the pods. |
@@ -91,7 +92,13 @@ Set `serviceMonitor.enabled: false` without the Prometheus Operator.
 helm upgrade angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version <new version> -n angryduck -f my-values.yaml
 ```
 
-Read the [changelog](../CHANGELOG.md) first. Like `kubectl apply`, a change to
+Read the [changelog](../CHANGELOG.md) first. Optionally, have the new worker
+image on every node before the upgrade, delivered by the Angry Duck you are
+replacing: preheat it through the webhook (see
+[Upgrading](operations.md#upgrading)), then upgrade once it has spread. Every
+worker then restarts at once without waiting on a pull.
+
+Like `kubectl apply`, a change to
 `config` alone doesn't restart anything: run
 `kubectl -n angryduck rollout restart deploy/angryduck-controller ds/angryduck-worker`.
 The controller and workers are independent: the controller rebuilds its state

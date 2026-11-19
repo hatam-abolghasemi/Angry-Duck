@@ -25,6 +25,16 @@ worker:
       memory: 192Mi
   tolerations:
     - operator: Exists
+  # Every worker is replaced at once on an upgrade. Workers don't depend on
+  # each other and nothing on a node waits for its worker (containerd falls
+  # back to the registry while the mirror is away), so replacing them one by
+  # one only stretches the time two versions run side by side. A broken new
+  # version takes every worker down at once instead of stopping after one:
+  # set maxUnavailable to 1 for the one-by-one rollout.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
   # Share the node's network: transfers skip the pod network (veth,
   # iptables, any tunnel). The worker API then listens on the node's own
   # address only (18081) and the mirror on the node's loopback (18082).
