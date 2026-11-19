@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,4 +106,49 @@ func TestPageCacheOff(t *testing.T) {
 	var pc *pageCache
 	pc.open(nil, "", 10)() // no tracker: nothing to do
 	newPageCache(0, "n").open(nil, "", 10)()
+}
+
+// The tracked gauges follow a file from reading to idle to handed back,
+// and fall back to zero: a level that holds is a reader that never let go.
+func TestPageCacheTrackedGauges(t *testing.T) {
+	const size = 256 << 10
+	f, path := coldFile(t, size)
+	pc := newPageCache(50*time.Millisecond, "gauges")
+	state := func() (reading, idle int64, files int) {
+		pc.mu.Lock()
+		defer pc.mu.Unlock()
+		return pc.bytes[pcReading], pc.bytes[pcIdle], pc.count[pcReading] + pc.count[pcIdle]
+	}
+	r1 := pc.open(f, path, size)
+	r2 := pc.open(f, path, size)
+	if reading, idle, files := state(); reading != size || idle != 0 || files != 1 {
+		t.Fatalf("while read: reading %d idle %d files %d, want %d 0 1", reading, idle, files, size)
+	}
+	r1()
+	if reading, _, _ := state(); reading != size {
+		t.Fatalf("one reader left: reading %d, want %d", reading, size)
+	}
+	r2()
+	if reading, idle, _ := state(); reading != 0 || idle != size {
+		t.Fatalf("all done: reading %d idle %d, want 0 %d", reading, idle, size)
+	}
+	r3 := pc.open(f, path, size) // read again before the drop: back to reading
+	if reading, idle, files := state(); reading != size || idle != 0 || files != 1 {
+		t.Fatalf("read again: reading %d idle %d files %d", reading, idle, files)
+	}
+	r3()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reading, idle, files := state()
+		if reading == 0 && idle == 0 && files == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the drop: reading %d idle %d files %d, want all 0", reading, idle, files)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(scrapeMetrics(t), `angryduck_worker_page_cache_tracked_bytes{node="gauges",state="idle"} 0`) {
+		t.Fatal("gauge not exported at 0")
+	}
 }

@@ -18,6 +18,22 @@ var pageCacheReleasedBytes = metrics.NewCounterVec(
 	"Page cache this worker handed back after serving blob files: pages its own reads brought in, dropped once the file was idle. Without this they stay charged to the worker's pod as file cache, and count in its container memory.",
 	"node")
 
+var (
+	pageCacheTrackedBytes = metrics.NewGaugeVec(
+		"angryduck_worker_page_cache_tracked_bytes",
+		"Page cache this worker's reads of blob files may have brought in (pages that weren't cached before), by state: reading (a reader still has the file open) or idle (handed back once PAGE_CACHE_RELEASE_AFTER_S passes). Should fall back to 0 between transfers: a level that holds for hours is a reader that never let go.",
+		"node", "state")
+	pageCacheTrackedFiles = metrics.NewGaugeVec(
+		"angryduck_worker_page_cache_tracked_files",
+		"Blob files whose page cache this worker tracks, by state (see angryduck_worker_page_cache_tracked_bytes).",
+		"node", "state")
+)
+
+const (
+	pcReading = "reading"
+	pcIdle    = "idle"
+)
+
 // pageCache gives back the page cache that reading blob files brings in.
 //
 // The kernel charges a file page to the cgroup that first reads it. A
@@ -39,6 +55,8 @@ type pageCache struct {
 
 	mu    sync.Mutex
 	files map[fileID]*cachedFile
+	bytes map[string]int64 // by state: what tracked files may have brought in
+	count map[string]int   // by state: tracked files
 }
 
 type fileID struct{ dev, ino uint64 }
@@ -47,6 +65,7 @@ type cachedFile struct {
 	path   string
 	size   int64    // bytes covered by before
 	before []uint64 // bitset: page i was cached before the first read
+	ours   int64    // bytes of pages that weren't cached before
 	refs   int
 	timer  *time.Timer
 }
@@ -54,7 +73,43 @@ type cachedFile struct {
 // newPageCache returns a tracker dropping a file's pages after it has been
 // idle for after; 0 turns it off.
 func newPageCache(after time.Duration, nodeID string) *pageCache {
-	return &pageCache{after: after, nodeID: nodeID, files: map[fileID]*cachedFile{}}
+	for _, st := range []string{pcReading, pcIdle} {
+		pageCacheTrackedBytes.Set(0, nodeID, st)
+		pageCacheTrackedFiles.Set(0, nodeID, st)
+	}
+	return &pageCache{after: after, nodeID: nodeID, files: map[fileID]*cachedFile{},
+		bytes: map[string]int64{}, count: map[string]int{}}
+}
+
+// move accounts e under state to (from "" for a new file, to "" once it
+// is gone). Called with mu held.
+func (pc *pageCache) move(e *cachedFile, from, to string) {
+	for _, m := range []struct {
+		st string
+		d  int64
+	}{{from, -1}, {to, 1}} {
+		if m.st == "" {
+			continue
+		}
+		pc.bytes[m.st] += m.d * e.ours
+		pc.count[m.st] += int(m.d)
+		pageCacheTrackedBytes.Set(float64(pc.bytes[m.st]), pc.nodeID, m.st)
+		pageCacheTrackedFiles.Set(float64(pc.count[m.st]), pc.nodeID, m.st)
+	}
+}
+
+// notCached returns how many bytes of a size-byte file's pages before
+// doesn't mark as cached.
+func notCached(before []uint64, size int64) int64 {
+	page := int64(os.Getpagesize())
+	pages := (size + page - 1) / page
+	var n int64
+	for i := int64(0); i < pages; i++ {
+		if !bitSet(before, i) {
+			n++
+		}
+	}
+	return min(n*page, size)
 }
 
 func noRelease() {}
@@ -83,11 +138,15 @@ func (pc *pageCache) open(f *os.File, path string, size int64) func() {
 			pc.mu.Unlock()
 			return noRelease
 		}
-		e = &cachedFile{path: path, size: size, before: before}
+		e = &cachedFile{path: path, size: size, before: before, ours: notCached(before, size)}
 		pc.files[id] = e
-	} else if e.timer != nil {
-		e.timer.Stop()
-		e.timer = nil
+		pc.move(e, "", pcReading)
+	} else if e.refs == 0 {
+		if e.timer != nil {
+			e.timer.Stop()
+			e.timer = nil
+		}
+		pc.move(e, pcIdle, pcReading)
 	}
 	e.refs++
 	pc.mu.Unlock()
@@ -101,6 +160,7 @@ func (pc *pageCache) release(id fileID, e *cachedFile) {
 	if e.refs--; e.refs > 0 || pc.files[id] != e {
 		return
 	}
+	pc.move(e, pcReading, pcIdle)
 	e.timer = time.AfterFunc(pc.after, func() { pc.drop(id, e) })
 }
 
@@ -115,6 +175,7 @@ func (pc *pageCache) drop(id fileID, e *cachedFile) {
 		return
 	}
 	delete(pc.files, id)
+	pc.move(e, pcIdle, "")
 
 	f, err := os.Open(e.path)
 	if err != nil {

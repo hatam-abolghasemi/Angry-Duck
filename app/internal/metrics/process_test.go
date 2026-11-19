@@ -15,3 +15,23 @@ func TestParseCgroups(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMemStat(t *testing.T) {
+	v2 := "anon 9437184\nfile 104857600\nkernel 1048576\nshmem 4096\nfile_dirty 8192\nactive_file 73400320\ninactive_file 31457280\n"
+	m := parseMemStat(v2, memStatV2)
+	m.usage = 115343360
+	if m.file != 104857600 || m.activeFile != 73400320 || m.inactiveFile != 31457280 || m.dirty != 8192 || m.shmem != 4096 {
+		t.Fatalf("v2: %+v", m)
+	}
+	if ws := m.workingSet(); ws != 115343360-31457280 {
+		t.Fatalf("working set %v", ws)
+	}
+	v1 := "cache 1\nrss 2\ntotal_cache 300\ntotal_rss 200\ntotal_active_file 120\ntotal_inactive_file 180\ntotal_dirty 4\ntotal_shmem 5\n"
+	if m := parseMemStat(v1, memStatV1); m.file != 300 || m.activeFile != 120 || m.inactiveFile != 180 || m.dirty != 4 || m.shmem != 5 {
+		t.Fatalf("v1: %+v", m)
+	}
+	// More inactive than usage (stats read a moment apart) never goes negative.
+	if ws := (cgroupMem{usage: 10, inactiveFile: 20}).workingSet(); ws != 0 {
+		t.Fatalf("working set %v, want 0", ws)
+	}
+}

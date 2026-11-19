@@ -18,7 +18,10 @@ var processMemory = NewGaugeVec(
 		"already returned. From its container's cgroup: working_set is what "+
 		"kubectl top and container_memory_working_set_bytes show, page_cache "+
 		"the file cache charged to the container (files it read, its own "+
-		"binary).",
+		"binary), split into page_cache_active (counted in working_set) and "+
+		"page_cache_inactive (not counted, first to go); page_cache_dirty is "+
+		"written but not yet on disk, shmem is tmpfs and shared memory (kept "+
+		"until freed, never dropped like file cache).",
 	"component", "kind")
 
 // TrackProcessMemory publishes angryduck_process_memory_bytes until ctx
@@ -43,9 +46,13 @@ func TrackProcessMemory(ctx context.Context, component string) {
 			processMemory.Set(anon, component, "rss_anon")
 			processMemory.Set(file, component, "rss_file")
 		}
-		if ws, cache, ok := cgroupMemory(); ok {
-			processMemory.Set(ws, component, "working_set")
-			processMemory.Set(cache, component, "page_cache")
+		if m, ok := cgroupMemory(); ok {
+			processMemory.Set(m.workingSet(), component, "working_set")
+			processMemory.Set(m.file, component, "page_cache")
+			processMemory.Set(m.activeFile, component, "page_cache_active")
+			processMemory.Set(m.inactiveFile, component, "page_cache_inactive")
+			processMemory.Set(m.dirty, component, "page_cache_dirty")
+			processMemory.Set(m.shmem, component, "shmem")
 		}
 	}
 	update()
@@ -86,19 +93,68 @@ func rss() (anon, file float64, ok bool) {
 	return anon, file, ok
 }
 
-// cgroupMemory reads this container's memory from its cgroup, the way
-// cAdvisor does: the working set is usage minus inactive file pages, and
-// page cache is every file page charged to it.
-func cgroupMemory() (workingSet, pageCache float64, ok bool) {
+// cgroupMem is a container's memory, from its cgroup.
+type cgroupMem struct {
+	usage, file, activeFile, inactiveFile, dirty, shmem float64
+}
+
+// workingSet is usage minus inactive file pages, the way cAdvisor (and so
+// kubectl top and the OOM killer's view) counts it.
+func (m cgroupMem) workingSet() float64 {
+	return m.usage - min(m.inactiveFile, m.usage)
+}
+
+// memStatKeys names memory.stat's fields: cgroup v2's, and cgroup v1's
+// hierarchical ones.
+type memStatKeys struct{ file, active, inactive, dirty, shmem string }
+
+var (
+	memStatV2 = memStatKeys{"file", "active_file", "inactive_file", "file_dirty", "shmem"}
+	memStatV1 = memStatKeys{"total_cache", "total_active_file", "total_inactive_file", "total_dirty", "total_shmem"}
+)
+
+// parseMemStat reads the fields of a memory.stat file.
+func parseMemStat(s string, k memStatKeys) cgroupMem {
+	var m cgroupMem
+	for _, line := range strings.Split(s, "\n") {
+		key, v, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			continue
+		}
+		switch key {
+		case k.file:
+			m.file = f
+		case k.active:
+			m.activeFile = f
+		case k.inactive:
+			m.inactiveFile = f
+		case k.dirty:
+			m.dirty = f
+		case k.shmem:
+			m.shmem = f
+		}
+	}
+	return m
+}
+
+// cgroupMemory reads this container's memory from its cgroup.
+func cgroupMemory() (cgroupMem, bool) {
 	v2, v1 := ownCgroups()
 	// cgroup v2, then v1; this process's own cgroup where it is visible
 	// (no cgroup namespace), else the mount's root, which a container
 	// sees as its own.
-	for _, c := range []struct{ dir, usage, stat, inactive, file string }{
-		{"/sys/fs/cgroup" + v2, "memory.current", "memory.stat", "inactive_file", "file"},
-		{"/sys/fs/cgroup", "memory.current", "memory.stat", "inactive_file", "file"},
-		{"/sys/fs/cgroup/memory" + v1, "memory.usage_in_bytes", "memory.stat", "total_inactive_file", "total_cache"},
-		{"/sys/fs/cgroup/memory", "memory.usage_in_bytes", "memory.stat", "total_inactive_file", "total_cache"},
+	for _, c := range []struct {
+		dir, usage string
+		keys       memStatKeys
+	}{
+		{"/sys/fs/cgroup" + v2, "memory.current", memStatV2},
+		{"/sys/fs/cgroup", "memory.current", memStatV2},
+		{"/sys/fs/cgroup/memory" + v1, "memory.usage_in_bytes", memStatV1},
+		{"/sys/fs/cgroup/memory", "memory.usage_in_bytes", memStatV1},
 	} {
 		u, err := os.ReadFile(c.dir + "/" + c.usage)
 		if err != nil {
@@ -108,29 +164,15 @@ func cgroupMemory() (workingSet, pageCache float64, ok bool) {
 		if err != nil {
 			continue
 		}
-		st, err := os.ReadFile(c.dir + "/" + c.stat)
+		st, err := os.ReadFile(c.dir + "/memory.stat")
 		if err != nil {
 			continue
 		}
-		var inactive, file float64
-		for _, line := range strings.Split(string(st), "\n") {
-			k, v, found := strings.Cut(line, " ")
-			if !found {
-				continue
-			}
-			switch k {
-			case c.inactive:
-				inactive, _ = strconv.ParseFloat(v, 64)
-			case c.file:
-				file, _ = strconv.ParseFloat(v, 64)
-			}
-		}
-		if inactive > usage {
-			inactive = usage
-		}
-		return usage - inactive, file, true
+		m := parseMemStat(string(st), c.keys)
+		m.usage = usage
+		return m, true
 	}
-	return 0, 0, false
+	return cgroupMem{}, false
 }
 
 // ownCgroups returns this process's cgroup v2 path and cgroup v1 memory
