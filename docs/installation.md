@@ -5,11 +5,12 @@
 - **Kubernetes 1.30+**.
 - **containerd 1.6+** on every node with the default `overlayfs` snapshotter
   and the CRI plugin (as kubelet uses it). No node tools are needed.
-- **node-exporter** on every node with host networking, on port `9100`.
-  Workers read disk usage from it at the node's IP.
+- **node-exporter is not needed.** Workers read disk usage with `statfs` on
+  containerd's content store, which the manifests mount. Only a worker
+  without that mount falls back to node-exporter at the node's IP.
 - **Network**: workers reachable from each other and from the controller on
   port `18081` of their pod IPs (the node IPs, as the worker shares the
-  node's network by default), and node-exporter reachable at the node IP.
+  node's network by default).
   Ports `18081` and `18082` must be free on every node.
 - **Registry credentials**: a dockerconfigjson covering every private registry
   you push to.
@@ -35,11 +36,11 @@ and adapt them to your cluster.
 ### 1. Get the images
 
 Every release publishes both images to GitHub Container Registry, tagged with
-the version (`1.14.2`) and `latest`:
+the version (`1.14.3`) and `latest`:
 
 ```text
-ghcr.io/hatam-abolghasemi/angry-duck-controller:1.14.2
-ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.2
+ghcr.io/hatam-abolghasemi/angry-duck-controller:1.14.3
+ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.3
 ```
 
 They are public, so kubelet needs no `imagePullSecrets` for them. If you
@@ -51,10 +52,10 @@ To build and push your own instead:
 ```bash
 cd app
 REGISTRY=registry.example.com/angryduck
-docker build -t $REGISTRY/angry-duck-controller:1.14.2 -f Dockerfile.controller .
-docker build -t $REGISTRY/angry-duck-worker:1.14.2 -f Dockerfile.worker .
-docker push $REGISTRY/angry-duck-controller:1.14.2
-docker push $REGISTRY/angry-duck-worker:1.14.2
+docker build -t $REGISTRY/angry-duck-controller:1.14.3 -f Dockerfile.controller .
+docker build -t $REGISTRY/angry-duck-worker:1.14.3 -f Dockerfile.worker .
+docker push $REGISTRY/angry-duck-controller:1.14.3
+docker push $REGISTRY/angry-duck-worker:1.14.3
 ```
 
 Set the `image:` fields in `deployment-controller.yaml` and
@@ -93,7 +94,7 @@ Edit `k8s/configmap-env.yaml`. The values most worth checking:
 |---|---|
 | `RANK_EXCLUDE_NODE_SUBSTRINGS` | Keep control-plane nodes from being chosen as seeds. |
 | `CONTAINERD_ROOT` | Only if containerd's root isn't `/var/lib/containerd`; change the DaemonSet's content-store mount to match. |
-| `NODE_EXPORTER_URL` | Set in the DaemonSet to the node IP; change the port there if yours differs. |
+| `NODE_EXPORTER_URL` | Only a fallback: disk usage comes from `statfs` on containerd's content store, which the manifests mount. Set in the DaemonSet to the node IP. |
 | `PROPAGATE_MAX_UTILIZATION`, `GC_*` | Keep below kubelet's `imageGCHighThresholdPercent`; keep kubelet's `imageMaximumGCAge` unset or above `GC_RETENTION_TTL_S` (see [Node settings](node-settings.md)). |
 | `MIRROR_ENABLED` | On by default; it takes effect once containerd's `config_path` is set (see [Mirror](mirror.md#requirements)). |
 

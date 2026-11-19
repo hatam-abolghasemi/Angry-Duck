@@ -7,6 +7,12 @@ metadata:
     app.kubernetes.io/name: angryduck
     app.kubernetes.io/component: worker
 spec:
+  # Every worker is replaced at once (see helm/angryduck/values.yaml,
+  # worker.updateStrategy).
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
   selector:
     matchLabels:
       app.kubernetes.io/name: angryduck
@@ -26,7 +32,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: worker
-          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.2
+          image: ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.3
           env:
             - name: NODE_ID
               valueFrom:
