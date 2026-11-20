@@ -121,7 +121,11 @@ What stays true:
   request, transfer or unpack is moving data, the worker writes to its
   cgroup's `memory.reclaim` and the kernel
   takes them back (with any page cache left): on stg, `slab_reclaimable`
-  40.9 to 2.2 MB after a 20,000-file layer. For that it mounts its own
+  40.9 to 2.2 MB after a 20,000-file layer. The records of the last files
+  can't be taken back until the kernel has written their metadata out
+  (`dirty_expire_centisecs` + `dirty_writeback_centisecs`, 35 s by
+  default), so when a hand-back frees less than half, it runs once more
+  after that window. Each logs `memlimit: reclaimed …` with what it freed. For that it mounts its own
   cgroup at `/run/angryduck/cgroup` (a private cgroup namespace shows only
   its own), which needs `CAP_SYS_ADMIN` (already given) and an AppArmor
   profile that allows mount: the chart sets `appArmorProfile: Unconfined`

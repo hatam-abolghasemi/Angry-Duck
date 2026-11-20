@@ -19,7 +19,7 @@ on a 21-node cluster, unless noted.
 | HTTP/2 header decoding table | ~0.5 MiB | Needed while talking gRPC to containerd; built once |
 | Image list between reports | ~0.5 MiB | Compared against the next listing so unchanged inventory isn't sent |
 | Page cache | 0 when idle | Pages the worker's reads bring in are dropped once a file is idle for `PAGE_CACHE_RELEASE_AFTER_S`; blobs it writes, and files unpacked while blobs arrive, are dropped as they are written |
-| Kernel records of files it created (`slab_reclaimable`) | 0 with unpacking while blobs arrive off | With it on, about 1.6 KiB per file while a layer unpacks; handed back a few seconds after the last unpack ends (30 s at most, and never while a request, transfer or unpack is in flight: then at its end) through the cgroup's `memory.reclaim`, logged at info level (the worker mounts its own cgroup; needs AppArmor allowing mount). Without that access, held until the image is removed or the container nears its limit |
+| Kernel records of files it created (`slab_reclaimable`) | 0 with unpacking while blobs arrive off | With it on, about 1.6 KiB per file while a layer unpacks; handed back a few seconds after the last unpack ends (30 s at most, and never while a request, transfer or unpack is in flight: then at its end) through the cgroup's `memory.reclaim`, logged at info level; once more after the kernel's metadata writeback window (35 s by default) when it freed less than half, since a file's record can't be freed before that (the worker mounts its own cgroup; needs AppArmor allowing mount). Without that access, held until the image is removed or the container nears its limit |
 
 ## What an idle worker does on its own
 
