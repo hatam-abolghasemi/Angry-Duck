@@ -310,6 +310,7 @@ func main() {
 				unpackStream = true
 				// The files it writes leave page cache and inode records
 				// charged to the worker: hand them back after each unpack.
+				memlimit.SetReclaimDeadline(config.Duration("RECLAIM_DEADLINE_S", 30))
 				if err := memlimit.EnableReclaim(config.String("RECLAIM_CGROUP_DIR", "/run/angryduck/cgroup")); err != nil {
 					log.Printf("angryduck-worker[%s]: WARNING: memory left by unpacked files is not handed back, so it shows as the worker's until the kernel needs it: %v (see docs/stream-unpack.md)", nodeID, err)
 				}
