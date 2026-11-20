@@ -136,7 +136,7 @@ func TestReclaimWaitsForWorkInFlight(t *testing.T) {
 }
 
 // Records of files whose metadata isn't written out yet can't be freed:
-// a hand-back that frees less than half tries once more after the
+// a hand-back that leaves 1 MiB or more tries once more after the
 // kernel's writeback window, and only once per burst.
 func TestReclaimRetriesOnceAfterWriteback(t *testing.T) {
 	dir := t.TempDir()

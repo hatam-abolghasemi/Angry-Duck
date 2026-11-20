@@ -47,7 +47,7 @@ var reclaimDue atomic.Bool
 // dirty_expire_centisecs after the write, checked every
 // dirty_writeback_centisecs (30 s + 5 s by default). A hand-back a few
 // seconds after an unpack frees the records of earlier files but not of
-// the last ones; when it frees less than half, it runs once more after
+// the last ones; when 1 MiB or more is left, it runs once more after
 // that window (retryAfter, read from the kernel at EnableReclaim; only
 // when the kernel's settings can't be read, RECLAIM_DEADLINE_S instead).
 var retryAfter atomic.Int64 // time.Duration; 0: no retry
@@ -224,7 +224,7 @@ func reclaim() {
 		before["file"]/1024, after["file"]/1024, before["slab_reclaimable"]/1024, after["slab_reclaimable"]/1024)
 	left := after["file"] + after["slab_reclaimable"]
 	wait := time.Duration(retryAfter.Load())
-	if wait > 0 && left >= 1<<20 && left*2 > want && retryUsed.CompareAndSwap(false, true) {
+	if wait > 0 && left >= 1<<20 && retryUsed.CompareAndSwap(false, true) {
 		logging.Debugf("memlimit: %d KiB still being written out; trying once more in %s", left/1024, wait)
 		time.AfterFunc(wait, func() {
 			reclaimDue.Store(true)
