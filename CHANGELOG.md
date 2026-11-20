@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.14.7
+
+### Fixed
+
+- **The hand-back after unpacking left the last unpack's file records.**
+  The kernel can't free a file's record (inode) until it has written the
+  file's metadata out, which it does `dirty_expire_centisecs` after the
+  write (30 s by default). The hand-back runs a few seconds after the
+  unpack, so on stg each one freed the earlier unpack's records and kept
+  the latest (`slab_reclaimable` 50.6 -> ~25 MB after each 20,000-file
+  layer, ~25 MB held until the next unpack). When a hand-back frees less
+  than half of what's there, it now runs once more after the kernel's
+  writeback window (`dirty_expire_centisecs` + `dirty_writeback_centisecs`,
+  read from `/proc/sys/vm`; 35 s by default). One retry per burst, and
+  like the first, never while data is moving.
+
 ## 1.14.6
 
 ### Fixed
