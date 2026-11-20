@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.14.8
+
+### Changed
+
+- **No hard-coded writeback window.** The second hand-back's delay is the
+  kernel's own `dirty_expire_centisecs` + `dirty_writeback_centisecs`,
+  read from `/proc/sys/vm`. Only when those can't be read (1.14.7 fell
+  back to a built-in 35 s there), the worker logs a warning at startup and
+  waits `RECLAIM_DEADLINE_S` (a setting, 30 s by default) instead.
+
 ## 1.14.7
 
 ### Fixed

@@ -13,7 +13,7 @@ references `registry-pull`, `angryduck-rescue-token` and
 `angryduck-webhook-token` but doesn't create them.
 
 ```bash
-helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.14.7 \
+helm upgrade --install angryduck oci://ghcr.io/hatam-abolghasemi/charts/angryduck --version 1.14.8 \
   --namespace angryduck --create-namespace \
   -f my-values.yaml
 ```
