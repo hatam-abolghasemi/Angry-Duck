@@ -124,7 +124,7 @@ What stays true:
   40.9 to 2.2 MB after a 20,000-file layer. The records of the last files
   can't be taken back until the kernel has written their metadata out
   (`dirty_expire_centisecs` + `dirty_writeback_centisecs`, read from
-  `/proc/sys/vm`), so when a hand-back frees less than half, it runs once
+  `/proc/sys/vm`), so when a hand-back leaves 1 MiB or more, it runs once
   more after that window; only if those can't be read, it logs that at
   startup and waits `RECLAIM_DEADLINE_S` instead. Each logs `memlimit: reclaimed …` with what it freed. For that it mounts its own
   cgroup at `/run/angryduck/cgroup` (a private cgroup namespace shows only
