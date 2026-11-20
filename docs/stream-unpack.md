@@ -117,7 +117,8 @@ What stays true:
   kernel's records of those files (inodes, directory entries,
   `slab_reclaimable`) would stay charged to the worker until the image is
   removed or the node needs memory, so a few seconds after the last unpack
-  ends (30 s at most, however busy the worker is) the worker writes to its
+  ends (or 30 s after it, if requests keep coming), and never while a
+  request, transfer or unpack is moving data, the worker writes to its
   cgroup's `memory.reclaim` and the kernel
   takes them back (with any page cache left): on stg, `slab_reclaimable`
   40.9 to 2.2 MB after a 20,000-file layer. For that it mounts its own
