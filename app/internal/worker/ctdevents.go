@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/events"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	"angryduck/internal/logging"
 	"angryduck/internal/metrics"
@@ -33,7 +34,58 @@ var inventoryTopics = []string{"/images/create", "/images/update", "/images/dele
 // containerTopics are the events that change which images containers use
 // (a sandbox becoming ready or not is its task starting or exiting). Only
 // followed when someone asks (OnContainers): image cleanup.
+//
+// /tasks/start is only sent for a container's own (init) process, but
+// /tasks/exit is sent for exec processes too: every exec probe (kubelet
+// running a command in a container) ends in one, many times a minute on a
+// node. Those exits change nothing about which images are used, so
+// followContainerEvent leaves them out.
 var containerTopics = []string{"/containers/create", "/containers/update", "/containers/delete", "/tasks/start", "/tasks/exit"}
+
+// followContainerEvent says whether a container event can change which
+// images containers use: all of them but the exit of an exec process. A
+// TaskExit's id is the container's own id for its init process and the
+// exec id for an exec; containerd's event filters can't compare two
+// fields, so the two string fields are read here, straight from the
+// event's protobuf bytes (container_id = 1, id = 2). Anything unreadable
+// is followed, as before.
+func followContainerEvent(env *events.Envelope) bool {
+	if env.Topic != "/tasks/exit" || env.Event == nil {
+		return true
+	}
+	containerID, id, ok := taskExitIDs(env.Event.GetValue())
+	return !ok || id == "" || id == containerID
+}
+
+// taskExitIDs reads fields 1 (container_id) and 2 (id) of a TaskExit.
+func taskExitIDs(b []byte) (containerID, id string, ok bool) {
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return "", "", false
+		}
+		b = b[n:]
+		if (num == 1 || num == 2) && typ == protowire.BytesType {
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return "", "", false
+			}
+			if num == 1 {
+				containerID = string(v)
+			} else {
+				id = string(v)
+			}
+			b = b[n:]
+			continue
+		}
+		n = protowire.ConsumeFieldValue(num, typ, b)
+		if n < 0 {
+			return "", "", false
+		}
+		b = b[n:]
+	}
+	return containerID, id, true
+}
 
 // deleteTopics are the inventory events after which containerd's own
 // garbage collection removes blobs a moment later, without an event.
@@ -149,7 +201,7 @@ func (w *InventoryWatch) follow(ctx context.Context, ch <-chan *events.Envelope,
 				return nil
 			}
 			if slices.Contains(containerTopics, env.Topic) {
-				if w.contChanged != nil {
+				if w.contChanged != nil && followContainerEvent(env) {
 					w.contChanged()
 				}
 				continue
