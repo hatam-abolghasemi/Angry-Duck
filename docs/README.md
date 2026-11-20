@@ -30,7 +30,8 @@
 **Maintaining it**
 
 - [Maintaining Angry Duck](maintaining/README.md): for whoever changes the
-  code: the [code map](maintaining/code-map.md), the [rules](maintaining/rules.md)
+  code: [the basics it builds on](maintaining/basics.md) (containerd,
+  images, CRI, container memory), the [code map](maintaining/code-map.md), the [rules](maintaining/rules.md)
   every change keeps, [features end to end](maintaining/features.md),
   [checklists](maintaining/changing.md), [debugging](maintaining/debugging.md)
   and [known limits](maintaining/limits.md).

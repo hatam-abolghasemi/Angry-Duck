@@ -14,6 +14,10 @@ change one, change the page in the same commit.
 
 ## Read in this order
 
+0. [The ground Angry Duck stands on](basics.md): containers, images, blobs
+   and layers, containerd (content store, snapshots, leases, events), kubelet
+   and CRI, and how container memory is counted. Start here if those words
+   aren't second nature yet.
 1. [Code map](code-map.md): the packages, what each file is for, what each
    binary starts, and which switch turns what off.
 2. [Rules](rules.md): what every change must keep: containerd and kubelet
