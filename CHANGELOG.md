@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.14.9
+
+### Fixed
+
+- **Some workers kept a run's file records after the first hand-back.**
+  The second hand-back ran only when the first freed less than half, so a
+  first one that freed a bit more (27 -> 13 MB on one stg worker) left the
+  rest until the next unpack. It now runs whenever 1 MiB or more is left,
+  the same threshold that decides whether a hand-back is worth making.
+
 ## 1.14.8
 
 ### Changed
