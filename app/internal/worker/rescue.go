@@ -166,7 +166,9 @@ func (rs *Rescue) HandleRescue(w http.ResponseWriter, r *http.Request) {
 	rs.mu.Unlock()
 
 	if !running {
+		working := memlimit.Working()
 		go func() {
+			defer working()
 			// Detached from this request: if the controller gives up, the
 			// transfer still finishes and the image still lands. It is
 			// bounded by the node's own semaphore and receiveTimeout.

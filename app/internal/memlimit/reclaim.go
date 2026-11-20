@@ -32,16 +32,47 @@ import (
 // It runs only after such work (ReclaimSoon), once things are quiet (the
 // same few seconds as Soon) or reclaimDeadline after the work ended,
 // whichever comes first, and only where EnableReclaim found a
-// memory.reclaim it can write. Nothing runs between bursts. Each run logs
-// what it handed back, at info level: one line per burst.
+// memory.reclaim it can write. Never while work is moving data (Working):
+// reclaim drops page cache, and a blob being served or a layer being
+// unpacked would have to be read from disk again. If either moment comes
+// while work is in flight, it runs the moment the last of it ends.
+// Nothing runs between bursts. Each run logs what it handed back, at info
+// level: one line per burst.
 
 var reclaimFile atomic.Pointer[string] // memory.reclaim to write; nil: off
 var reclaimDue atomic.Bool
 
-// reclaimDeadline bounds the wait for quiet: on a node whose mirror or
-// transfers never pause for a few seconds, Soon's wait could go on for
-// as long as the traffic does, and the memory with it.
+// reclaimDeadline bounds the wait for quiet: on a node whose mirror
+// requests never pause for a few seconds, Soon's wait could go on for as
+// long as the traffic does, and the memory with it. It doesn't hold the
+// memory that long: when things go quiet first (the usual case), the
+// reclaim runs then. RECLAIM_DEADLINE_S (SetReclaimDeadline).
 var reclaimDeadline = 30 * time.Second
+
+// SetReclaimDeadline sets reclaimDeadline; call before any work. d <= 0
+// keeps the default.
+func SetReclaimDeadline(d time.Duration) {
+	if d > 0 {
+		reclaimDeadline = d
+	}
+}
+
+// inFlight counts work moving data right now (Working); reclaimWaiting
+// says a reclaim is held until it reaches 0.
+var inFlight atomic.Int64
+var reclaimWaiting atomic.Bool
+
+// Working says work that moves data (a request served, a transfer, an
+// unpack, a rescue) started; call the returned func, once, when it ends.
+// Reclaim never runs while any is in flight. Two atomic operations each.
+func Working() (done func()) {
+	inFlight.Add(1)
+	return func() {
+		if inFlight.Add(-1) == 0 && reclaimWaiting.CompareAndSwap(true, false) {
+			go reclaim()
+		}
+	}
+}
 
 var deadline struct {
 	mu sync.Mutex
@@ -119,8 +150,18 @@ func ReclaimSoon() {
 
 func reclaim() {
 	f := reclaimFile.Load()
-	if f == nil || !reclaimDue.Swap(false) {
+	if f == nil || !reclaimDue.Load() {
 		return
+	}
+	if inFlight.Load() > 0 {
+		// Wait for the last work in flight: its done runs reclaim.
+		reclaimWaiting.Store(true)
+		if inFlight.Load() > 0 || !reclaimWaiting.CompareAndSwap(true, false) {
+			return // still busy, or the work that just ended took it over
+		}
+	}
+	if !reclaimDue.Swap(false) {
+		return // the other trigger ran it meanwhile
 	}
 	deadline.mu.Lock()
 	if deadline.t != nil {

@@ -364,7 +364,11 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 	s.arrives(o.Job, o)
 
 	s.wg.Add(1)
-	go s.run(ctx, x, o)
+	working := memlimit.Working()
+	go func() {
+		defer working()
+		s.run(ctx, x, o)
+	}()
 	writeJSON(w, http.StatusAccepted, model.SpreadFetchAck{Accepted: true})
 }
 

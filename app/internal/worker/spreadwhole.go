@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"angryduck/internal/logging"
+	"angryduck/internal/memlimit"
 )
 
 // Every layer at once (stream unpacking, on any containerd): a layer's
@@ -80,16 +81,24 @@ func (s *Spread) wholeKickLocked(job string, j *unpackJob) {
 		s.extracting++
 		j.busy[l.ChainID] = true
 		s.workerStartLocked(j)
-		if l.arriving {
-			go s.wholeStreamWorker(job, j, l.LayerSpec)
-		} else {
-			go s.wholeLandedWorker(job, j, l.LayerSpec)
-		}
+		working := memlimit.Working()
+		go func() {
+			defer working()
+			if l.arriving {
+				s.wholeStreamWorker(job, j, l.LayerSpec)
+			} else {
+				s.wholeLandedWorker(job, j, l.LayerSpec)
+			}
+		}()
 	}
 	if len(j.extracted) > 0 && !j.committing {
 		j.committing = true
 		s.workerStartLocked(j)
-		go s.commitWorker(job, j)
+		working := memlimit.Working()
+		go func() {
+			defer working()
+			s.commitWorker(job, j)
+		}()
 	}
 }
 

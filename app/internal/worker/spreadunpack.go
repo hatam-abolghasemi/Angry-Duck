@@ -213,7 +213,11 @@ func (s *Spread) queueUnpack(job string, l LayerSpec, arriving bool) {
 	j.running, j.idle = true, make(chan struct{})
 	s.mu.Unlock()
 	s.wg.Add(1)
-	go s.unpackRun(job, j)
+	working := memlimit.Working()
+	go func() {
+		defer working()
+		s.unpackRun(job, j)
+	}()
 }
 
 // afterUnpack ends every unpack goroutine: with stream unpack on, the worker

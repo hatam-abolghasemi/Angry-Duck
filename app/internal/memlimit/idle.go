@@ -72,13 +72,18 @@ func Soon() {
 	soon.t.Reset(quietAfter)
 }
 
-// AfterEach wraps h so every request it handles ends with Soon, except
-// health checks and metrics scrapes (see notWork).
+// AfterEach wraps h so every request it handles counts as work in flight
+// (Working) and ends with Soon, except health checks and metrics scrapes
+// (see notWork).
 func AfterEach(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !notWork(r.URL.Path) {
-			defer Soon()
+		if notWork(r.URL.Path) {
+			h.ServeHTTP(w, r)
+			return
 		}
+		done := Working()
+		defer Soon()
+		defer done()
 		h.ServeHTTP(w, r)
 	})
 }
