@@ -72,10 +72,23 @@ func Soon() {
 	soon.t.Reset(quietAfter)
 }
 
-// AfterEach wraps h so every request it handles ends with Soon.
+// AfterEach wraps h so every request it handles ends with Soon, except
+// health checks and metrics scrapes (see notWork).
 func AfterEach(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer Soon()
+		if !notWork(r.URL.Path) {
+			defer Soon()
+		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// notWork is the requests that arrive on a schedule whether or not there
+// is work: kubelet's probes (/healthz, every 5 and 10 s) and Prometheus'
+// scrape (/metrics, every 15 s). Counted as work, they keep restarting
+// Soon's quiet wait, and on a node where they land close enough together
+// the wait never ends: freed heap and page cache stay until the next
+// interval.
+func notWork(path string) bool {
+	return path == "/healthz" || path == "/metrics"
 }

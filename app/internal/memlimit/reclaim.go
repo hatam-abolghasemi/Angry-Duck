@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -29,11 +30,23 @@ import (
 // 110 MB -> 0 MB, in one write.
 //
 // It runs only after such work (ReclaimSoon), once things are quiet (the
-// same few seconds as Soon), and only where EnableReclaim found a
-// memory.reclaim it can write. Nothing runs between bursts.
+// same few seconds as Soon) or reclaimDeadline after the work ended,
+// whichever comes first, and only where EnableReclaim found a
+// memory.reclaim it can write. Nothing runs between bursts. Each run logs
+// what it handed back, at info level: one line per burst.
 
 var reclaimFile atomic.Pointer[string] // memory.reclaim to write; nil: off
 var reclaimDue atomic.Bool
+
+// reclaimDeadline bounds the wait for quiet: on a node whose mirror or
+// transfers never pause for a few seconds, Soon's wait could go on for
+// as long as the traffic does, and the memory with it.
+var reclaimDeadline = 30 * time.Second
+
+var deadline struct {
+	mu sync.Mutex
+	t  *time.Timer // armed while a reclaim is due; nil otherwise
+}
 
 // EnableReclaim finds the worker's own cgroup's memory.reclaim and turns
 // reclaim-after-work on. /sys/fs/cgroup is read-only in a container, so
@@ -92,6 +105,16 @@ func ReclaimSoon() {
 	}
 	reclaimDue.Store(true)
 	Soon()
+	deadline.mu.Lock()
+	if deadline.t == nil {
+		deadline.t = time.AfterFunc(reclaimDeadline, func() {
+			deadline.mu.Lock()
+			deadline.t = nil
+			deadline.mu.Unlock()
+			reclaim()
+		})
+	}
+	deadline.mu.Unlock()
 }
 
 func reclaim() {
@@ -99,6 +122,12 @@ func reclaim() {
 	if f == nil || !reclaimDue.Swap(false) {
 		return
 	}
+	deadline.mu.Lock()
+	if deadline.t != nil {
+		deadline.t.Stop() // quiet came first
+		deadline.t = nil
+	}
+	deadline.mu.Unlock()
 	dir := filepath.Dir(*f)
 	before := statOf(dir)
 	want := before["file"] + before["slab_reclaimable"]
@@ -109,11 +138,11 @@ func reclaim() {
 	// EAGAIN: the kernel freed less than asked, which is expected (some
 	// of it is in use): not an error.
 	if err != nil && !errors.Is(err, unix.EAGAIN) {
-		logging.Debugf("memlimit: memory.reclaim: %v", err)
+		logging.Warnf("memlimit: memory.reclaim: %v", err)
 		return
 	}
 	after := statOf(dir)
-	logging.Debugf("memlimit: reclaimed page cache %d -> %d KiB, slab_reclaimable %d -> %d KiB",
+	logging.Infof("memlimit: reclaimed page cache %d -> %d KiB, slab_reclaimable %d -> %d KiB",
 		before["file"]/1024, after["file"]/1024, before["slab_reclaimable"]/1024, after["slab_reclaimable"]/1024)
 }
 

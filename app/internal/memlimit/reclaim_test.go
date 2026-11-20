@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // A fake cgroup directory: reclaim writes file + slab_reclaimable to
@@ -43,5 +44,47 @@ func TestReclaimSoonOff(t *testing.T) {
 	ReclaimSoon()
 	if reclaimDue.Load() {
 		t.Fatal("ReclaimSoon armed reclaim while it is off")
+	}
+}
+
+// Traffic that never pauses long enough for Soon must not hold the memory:
+// the deadline reclaims anyway, once.
+func TestReclaimDeadlineUnderSteadyTraffic(t *testing.T) {
+	dir := t.TempDir()
+	stat := "file 3145728\nslab_reclaimable 2097152\n"
+	if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(stat), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "memory.reclaim")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldQ, oldD := quietAfter, reclaimDeadline
+	quietAfter, reclaimDeadline = 100*time.Millisecond, 150*time.Millisecond
+	t.Cleanup(func() {
+		quietAfter, reclaimDeadline = oldQ, oldD
+		reclaimFile.Store(nil)
+		reclaimDue.Store(false)
+	})
+	reclaimFile.Store(&f)
+
+	ReclaimSoon()
+	stop := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(stop) { // a request every 20ms: never quiet
+		Soon()
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(f)
+	if string(b) != "5242880" {
+		t.Fatalf("memory.reclaim = %q under steady traffic, want the deadline to have written 5242880", b)
+	}
+	if reclaimDue.Load() {
+		t.Fatal("reclaim still due after the deadline")
+	}
+	deadline.mu.Lock()
+	armed := deadline.t != nil
+	deadline.mu.Unlock()
+	if armed {
+		t.Fatal("deadline left armed after reclaiming")
 	}
 }

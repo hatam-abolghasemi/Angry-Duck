@@ -2,6 +2,8 @@ package memlimit
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"runtime/metrics"
 	"testing"
@@ -54,5 +56,33 @@ func TestSoonReleasesAfterQuiet(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if r := retained(); r > 8<<20 {
 		t.Fatalf("still retaining %d MiB of freed heap", r>>20)
+	}
+}
+
+// Probes and scrapes arrive on a schedule, work or not: they must not
+// restart the quiet wait, or a node whose probes land close enough
+// together never gets to quiet.
+func TestAfterEachIgnoresProbesAndScrapes(t *testing.T) {
+	soon.mu.Lock()
+	if soon.t != nil {
+		soon.t.Stop()
+	}
+	soon.t = nil
+	soon.mu.Unlock()
+	armed := func() bool {
+		soon.mu.Lock()
+		defer soon.mu.Unlock()
+		return soon.t != nil
+	}
+	h := AfterEach(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	for _, path := range []string{"/healthz", "/metrics"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		if armed() {
+			t.Fatalf("%s started the quiet wait", path)
+		}
+	}
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v2/library/app/blobs/sha256:00", nil))
+	if !armed() {
+		t.Fatal("a real request didn't start the quiet wait")
 	}
 }
