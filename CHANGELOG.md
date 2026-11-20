@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.14.6
+
+### Fixed
+
+- **The hand-back after unpacking hung, and never logged.** When the kernel
+  frees less than asked, writing to `memory.reclaim` returns `EAGAIN`. Go
+  opens cgroup files as pollable and took that as "not writable yet",
+  waiting on the file forever: each hand-back did part of its work, then
+  its goroutine stayed stuck (one more per unpack burst, seen in a stg
+  goroutine dump: four, the oldest 57 minutes) and the
+  `memlimit: reclaimed` line never came. The file records left by
+  unpacking (`slab_reclaimable`, ~20-30 MB after 20,000 small files) stayed
+  charged to the worker until the kernel needed the memory. The write is
+  now a plain system call: `EAGAIN` returns at once, the hand-back finishes
+  and logs what it freed.
+
 ## 1.14.5
 
 ### Fixed
