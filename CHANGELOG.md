@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.14.4
+
+Two leftovers from 1.14.3's resource work, found on stg: idle workers
+called containerd more than 1.14.2 did, and on some workers the page cache
+from unpacking while blobs arrive came back late.
+
+### Fixed
+
+- **Exec probes woke image cleanup.** Since 1.14.3 image cleanup lists
+  images and containers again when a container starts or exits. containerd
+  sends `/tasks/exit` for exec processes too, so every exec probe (kubelet
+  running a command in a container) asked for a fresh listing: on a stg
+  worker, 3 listings a minute while idle, about 2.3 times 1.14.2's
+  containerd calls across the cluster. The exit of an exec process changes
+  nothing about which images are used and is now ignored; a container's
+  own start and exit still wake image cleanup.
+- **Probes and scrapes put off handing memory back.** Freed heap, and the
+  page cache and file records left by unpacking while blobs arrive, are
+  handed back a few seconds after the last request or loop. kubelet's
+  probes (`/healthz`, every 5 and 10 s) and Prometheus' scrape (`/metrics`,
+  every 15 s) counted as work and kept restarting that wait; on workers
+  where they landed close together it took many minutes. They no longer
+  count, on worker and controller.
+- **Unpacking while blobs arrive left part of every layer in page cache.**
+  A file's pages were dropped a few files after its writeback started,
+  without waiting for it: the kernel skips pages still being written, so
+  those stayed charged to the worker until `memory.reclaim` ran. Files are
+  now handed to a goroutine that waits for their writeback, then drops
+  them; it exists only while a layer unpacks and drains. The unpack never
+  waits on the disk: if that goroutine falls behind, a file is dropped at
+  once, as before. The 2 s grace timer for a layer's last files is gone.
+- **The hand-back after unpacking had no upper bound.** It waited for a few
+  quiet seconds, which a worker under steady mirror or transfer traffic may
+  never get. It now runs 30 s after the last unpack at the latest, and logs
+  what it handed back at info level (`memlimit: reclaimed page cache … ,
+  slab_reclaimable …`); it used to log only at debug level, so a reclaim
+  that never ran left no trace.
+
+### Docs
+
+- **[The ground Angry Duck stands on](docs/maintaining/basics.md)**: a primer
+  for maintainers new to this layer: containers as processes, images as
+  blobs and layers, containerd's content store, snapshots, leases, garbage
+  collection, tasks, execs and events, `hosts.toml` mirrors, kubelet and
+  CRI, and how container memory is counted (page cache, slab, working set,
+  `memory.reclaim`), with where each touches the code.
+
 ## 1.14.3
 
 Resource use, measured: the bench now reports what Angry Duck costs, and
