@@ -527,15 +527,20 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // containerd). Left alone, they stay charged to the worker's container
 // until the node runs short of memory or the image is removed: a layer of
 // many small files (a vendor/ or node_modules/ tree) is tens of MiB of
-// "worker memory" per node, for as long as the image stays.
+// "worker memory" per node, for as long as the image stays. Page cache
+// can't be handed to another cgroup afterwards (cgroup v2 has no way to
+// move it), so it is dropped instead.
 //
 // The archive code writes one file per tar entry; when it moves on to the
 // next entry, the file before is complete. Each complete regular file is
-// opened and its writeback started (sync_file_range, no waiting); a few
-// files later, once its writeback had time to run, its cached pages are
-// dropped (fadvise DONTNEED) and it is closed. What is in flight is bounded
-// in files and bytes; the last files of a layer get a short grace period on
-// a timer, so finishing a layer never waits on the disk.
+// opened and its writeback started (sync_file_range, no waiting). A few
+// files later it is handed to a drainer goroutine, which waits for that
+// writeback to finish and only then drops the file's cached pages (fadvise
+// DONTNEED) and closes it: the kernel skips pages still dirty or being
+// written, so dropping without waiting left part of every layer cached.
+// The unpack itself never waits on the disk: the hand-off doesn't block,
+// and when the drainer is behind, the file is dropped at once, as before.
+// The drainer lives only while a layer unpacks and drains.
 type pageDropper struct {
 	root     string
 	rootFD   int    // root, opened on first use; -1 when it can't be
@@ -543,6 +548,7 @@ type pageDropper struct {
 	pendSize int64
 	flushing []flushingFile // writeback started, oldest first
 	inFlight int64          // bytes in flushing
+	drain    chan *os.File  // to the drainer; nil until the first hand-off
 }
 
 type flushingFile struct {
@@ -552,13 +558,11 @@ type flushingFile struct {
 
 const (
 	// pageDropFiles and pageDropBytes bound the files whose writeback was
-	// started and whose pages aren't dropped yet: the oldest is dropped
-	// once either is passed.
+	// started and that aren't handed to the drainer yet: the oldest is
+	// handed over once either is passed. pageDropFiles is also how many
+	// files may wait for the drainer.
 	pageDropFiles = 64
 	pageDropBytes = 8 << 20
-	// pageDropGrace is how long a layer's last files get for their
-	// writeback before their pages are dropped.
-	pageDropGrace = 2 * time.Second
 )
 
 // next is the archive filter: it sees each entry before it is written.
@@ -570,8 +574,8 @@ func (p *pageDropper) next(h *tar.Header) (bool, error) {
 	return true, nil
 }
 
-// rotate starts the writeback of the file just completed, and drops the
-// pages of the oldest files in flight once there are too many.
+// rotate starts the writeback of the file just completed, and hands the
+// oldest files in flight to the drainer once there are too many.
 func (p *pageDropper) rotate() {
 	if p.pending != "" {
 		if f := p.open(p.pending); f != nil {
@@ -582,10 +586,33 @@ func (p *pageDropper) rotate() {
 		p.pending, p.pendSize = "", 0
 	}
 	for len(p.flushing) > 0 && (len(p.flushing) > pageDropFiles || p.inFlight > pageDropBytes) {
-		dropPages(p.flushing[0].f)
+		p.handOff(p.flushing[0].f)
 		p.inFlight -= p.flushing[0].size
 		p.flushing[0] = flushingFile{}
 		p.flushing = p.flushing[1:]
+	}
+}
+
+// handOff gives f to the drainer, starting it on first use; never blocks.
+func (p *pageDropper) handOff(f *os.File) {
+	if p.drain == nil {
+		p.drain = make(chan *os.File, pageDropFiles)
+		go drainPages(p.drain)
+	}
+	select {
+	case p.drain <- f:
+	default: // the drainer is behind (a slow disk): don't make the unpack wait
+		dropPages(f)
+	}
+}
+
+// drainPages drops each file's pages once its writeback is done, until ch
+// is closed.
+func drainPages(ch <-chan *os.File) {
+	for f := range ch {
+		_ = unix.SyncFileRange(int(f.Fd()), 0, 0,
+			unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER)
+		dropPages(f)
 	}
 }
 
@@ -616,19 +643,19 @@ func dropPages(f *os.File) {
 	f.Close()
 }
 
-// done starts the last file's writeback, hands the files still in flight
-// to a timer that drops their pages after pageDropGrace, and lets go of
-// root.
+// done starts the last file's writeback, hands every file still in flight
+// to the drainer (which ends once it has dropped them), and lets go of
+// root. It never waits on the disk.
 func (p *pageDropper) done() {
 	p.rotate()
-	if rest := p.flushing; len(rest) > 0 {
-		time.AfterFunc(pageDropGrace, func() {
-			for _, ff := range rest {
-				dropPages(ff.f)
-			}
-		})
+	for _, ff := range p.flushing {
+		p.handOff(ff.f)
 	}
 	p.flushing, p.inFlight = nil, 0
+	if p.drain != nil {
+		close(p.drain)
+		p.drain = nil
+	}
 	if p.rootFD > 0 {
 		unix.Close(p.rootFD)
 		p.rootFD = -1

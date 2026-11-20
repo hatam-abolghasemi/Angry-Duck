@@ -1,12 +1,16 @@
 package worker
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -352,5 +356,48 @@ func TestSpreadParallelStreamWaitsForTheLayerBelow(t *testing.T) {
 	sp.wg.Wait()
 	if strings.Join(ap.streamed, ",") != cl+","+ch {
 		t.Fatalf("streamed %v, want both, bottom first", ap.streamed)
+	}
+}
+
+// openFDs counts this process's open file descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("no /proc/self/fd: %v", err)
+	}
+	return len(ents)
+}
+
+// pageDropper opens every file a layer writes; the drainer must close all
+// of them once their pages are dropped, and done must not wait for it.
+func TestPageDropperClosesEveryFile(t *testing.T) {
+	root := t.TempDir()
+	before := openFDs(t)
+	p := &pageDropper{root: root}
+	const files = 3*pageDropFiles + 7
+	for i := 0; i < files; i++ {
+		name := fmt.Sprintf("f%03d", i)
+		if _, err := p.next(&tar.Header{Name: name, Typeflag: tar.TypeReg, Size: 4096}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), make([]byte, 4096), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	p.done()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("done took %s: it must not wait on the disk", d)
+	}
+	if p.drain != nil || p.flushing != nil {
+		t.Fatal("done left files in flight")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for openFDs(t) > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d files still open after the drainer should have finished", openFDs(t)-before)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
