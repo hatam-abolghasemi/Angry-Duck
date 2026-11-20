@@ -175,7 +175,7 @@ func reclaim() {
 	if want < 1<<20 {
 		return // under 1 MiB: not worth the call
 	}
-	err := os.WriteFile(*f, []byte(strconv.FormatUint(want, 10)), 0)
+	err := writeReclaim(*f, want)
 	// EAGAIN: the kernel freed less than asked, which is expected (some
 	// of it is in use): not an error.
 	if err != nil && !errors.Is(err, unix.EAGAIN) {
@@ -204,4 +204,20 @@ func statOf(dir string) map[string]uint64 {
 		}
 	}
 	return m
+}
+
+// writeReclaim asks the kernel to reclaim n bytes from the cgroup, with
+// plain system calls. Not os.WriteFile: Go opens a cgroup file as pollable,
+// and when the kernel frees less than asked, memory.reclaim's write returns
+// EAGAIN, which Go's poller takes as "not writable yet" and waits on
+// forever: the reclaim itself ran, but the goroutine never came back (one
+// stuck per burst, and no log line). Here EAGAIN is returned at once.
+func writeReclaim(f string, n uint64) error {
+	fd, err := unix.Open(f, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	_, err = unix.Write(fd, []byte(strconv.FormatUint(n, 10)))
+	return err
 }
