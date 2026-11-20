@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.14.5
+
+### Fixed
+
+- **The hand-back after unpacking could run in the middle of a transfer.**
+  It waits for a few seconds without a new request (or, since 1.14.4, 30 s
+  at most), but a long blob transfer being served is one request that is
+  still running: the hand-back could drop the page cache of the very blob
+  being sent, and the rest was read from disk again. It now never runs
+  while a request, a spread transfer, an unpack or a rescue is in flight;
+  when its moment comes during one, it runs the moment the last of them
+  ends. Keeping count costs two atomic operations per piece of work.
+
+### Added
+
+- **`RECLAIM_DEADLINE_S`** (default `30`): the most the hand-back waits for
+  a quiet moment after the last unpack, on a worker whose requests never
+  pause. It was a fixed 30 s in 1.14.4. Nothing is held for that long when
+  the worker goes quiet first, the usual case.
+
 ## 1.14.4
 
 Two leftovers from 1.14.3's resource work, found on stg: idle workers
