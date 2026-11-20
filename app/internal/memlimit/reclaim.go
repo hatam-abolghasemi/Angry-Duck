@@ -42,6 +42,16 @@ import (
 var reclaimFile atomic.Pointer[string] // memory.reclaim to write; nil: off
 var reclaimDue atomic.Bool
 
+// A file's record (inode) can't be freed while the file's metadata is
+// still waiting to be written to disk, which the kernel does
+// dirty_expire_centisecs after the write, checked every
+// dirty_writeback_centisecs (30 s + 5 s by default). A hand-back a few
+// seconds after an unpack frees the records of earlier files but not of
+// the last ones; when it frees less than half, it runs once more after
+// that window (retryAfter, read from the kernel at EnableReclaim).
+var retryAfter atomic.Int64 // time.Duration; 0: the kernel defaults (35 s)
+var retryUsed atomic.Bool   // this burst's one retry is scheduled
+
 // reclaimDeadline bounds the wait for quiet: on a node whose mirror
 // requests never pause for a few seconds, Soon's wait could go on for as
 // long as the traffic does, and the memory with it. It doesn't hold the
@@ -101,7 +111,27 @@ func EnableReclaim(mnt string) error {
 		}
 	}
 	reclaimFile.Store(&f)
+	retryAfter.Store(int64(writebackWindow()))
 	return nil
+}
+
+// writebackWindow is the most the kernel waits before writing a file's
+// dirty metadata: dirty_expire_centisecs + dirty_writeback_centisecs.
+// The kernel's defaults (30 s + 5 s) if they can't be read.
+func writebackWindow() time.Duration {
+	read := func(name string, def int) int {
+		b, err := os.ReadFile("/proc/sys/vm/" + name)
+		if err != nil {
+			return def
+		}
+		n, err := strconv.Atoi(string(bytes.TrimSpace(b)))
+		if err != nil || n <= 0 {
+			return def
+		}
+		return n
+	}
+	cs := read("dirty_expire_centisecs", 3000) + read("dirty_writeback_centisecs", 500)
+	return time.Duration(cs) * 10 * time.Millisecond
 }
 
 var mountOnce sync.Once
@@ -135,6 +165,7 @@ func ReclaimSoon() {
 		return
 	}
 	reclaimDue.Store(true)
+	retryUsed.Store(false)
 	Soon()
 	deadline.mu.Lock()
 	if deadline.t == nil {
@@ -185,6 +216,18 @@ func reclaim() {
 	after := statOf(dir)
 	logging.Infof("memlimit: reclaimed page cache %d -> %d KiB, slab_reclaimable %d -> %d KiB",
 		before["file"]/1024, after["file"]/1024, before["slab_reclaimable"]/1024, after["slab_reclaimable"]/1024)
+	left := after["file"] + after["slab_reclaimable"]
+	if left >= 1<<20 && left*2 > want && retryUsed.CompareAndSwap(false, true) {
+		wait := time.Duration(retryAfter.Load())
+		if wait <= 0 {
+			wait = 35 * time.Second
+		}
+		logging.Debugf("memlimit: %d KiB still being written out; trying once more in %s", left/1024, wait)
+		time.AfterFunc(wait, func() {
+			reclaimDue.Store(true)
+			reclaim()
+		})
+	}
 }
 
 func statOf(dir string) map[string]uint64 {

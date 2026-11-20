@@ -134,3 +134,57 @@ func TestReclaimWaitsForWorkInFlight(t *testing.T) {
 		t.Fatalf("left inFlight=%d waiting=%t", inFlight.Load(), reclaimWaiting.Load())
 	}
 }
+
+// Records of files whose metadata isn't written out yet can't be freed:
+// a hand-back that frees less than half tries once more after the
+// kernel's writeback window, and only once per burst.
+func TestReclaimRetriesOnceAfterWriteback(t *testing.T) {
+	dir := t.TempDir()
+	// memory.stat doesn't change here: the kernel "freed nothing".
+	if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte("file 0\nslab_reclaimable 26214400\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "memory.reclaim")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldQ, oldD, oldR := quietAfter, reclaimDeadline, retryAfter.Load()
+	quietAfter, reclaimDeadline = 10*time.Millisecond, time.Hour
+	retryAfter.Store(int64(60 * time.Millisecond))
+	t.Cleanup(func() {
+		quietAfter, reclaimDeadline = oldQ, oldD
+		retryAfter.Store(oldR)
+		reclaimFile.Store(nil)
+		reclaimDue.Store(false)
+	})
+	reclaimFile.Store(&f)
+	written := func() bool { b, _ := os.ReadFile(f); return len(b) > 0 }
+	wait := func(what string, cond func() bool) {
+		t.Helper()
+		for end := time.Now().Add(time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatal(what)
+			}
+		}
+	}
+
+	ReclaimSoon()
+	wait("no first hand-back", written)
+	os.Truncate(f, 0)
+	time.Sleep(30 * time.Millisecond)
+	if written() {
+		t.Fatal("retried before the writeback window")
+	}
+	wait("no retry after the writeback window", written)
+	os.Truncate(f, 0)
+	time.Sleep(200 * time.Millisecond)
+	if written() {
+		t.Fatal("retried more than once")
+	}
+}
+
+func TestWritebackWindowFromKernel(t *testing.T) {
+	if d := writebackWindow(); d <= 0 || d > time.Hour {
+		t.Fatalf("writeback window %s", d)
+	}
+}
