@@ -108,13 +108,17 @@ What stays true:
   above.
 - **Memory.** About 3 MiB more for the worker while a layer unpacks (gzip),
   nothing when idle. The files written are page cache: the worker starts
-  writeback for each file once it is complete and drops it from cache a few
-  files later (at most 64 files or 8 MiB in flight; a layer's last files 2s
-  after it ends), so it doesn't pile up charged to the worker's pod. The
+  writeback for each file once it is complete and, a few files later (at
+  most 64 files or 8 MiB in flight), hands it to a goroutine that waits for
+  that writeback to finish and then drops it from cache: the kernel won't
+  drop pages still being written. The unpack never waits on the disk; if
+  that goroutine is behind, the file is dropped at once instead. So the
+  page cache doesn't pile up charged to the worker's pod. The
   kernel's records of those files (inodes, directory entries,
   `slab_reclaimable`) would stay charged to the worker until the image is
   removed or the node needs memory, so a few seconds after the last unpack
-  ends the worker writes to its cgroup's `memory.reclaim` and the kernel
+  ends (30 s at most, however busy the worker is) the worker writes to its
+  cgroup's `memory.reclaim` and the kernel
   takes them back (with any page cache left): on stg, `slab_reclaimable`
   40.9 to 2.2 MB after a 20,000-file layer. For that it mounts its own
   cgroup at `/run/angryduck/cgroup` (a private cgroup namespace shows only
