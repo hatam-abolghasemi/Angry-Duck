@@ -48,8 +48,9 @@ var reclaimDue atomic.Bool
 // dirty_writeback_centisecs (30 s + 5 s by default). A hand-back a few
 // seconds after an unpack frees the records of earlier files but not of
 // the last ones; when it frees less than half, it runs once more after
-// that window (retryAfter, read from the kernel at EnableReclaim).
-var retryAfter atomic.Int64 // time.Duration; 0: the kernel defaults (35 s)
+// that window (retryAfter, read from the kernel at EnableReclaim; only
+// when the kernel's settings can't be read, RECLAIM_DEADLINE_S instead).
+var retryAfter atomic.Int64 // time.Duration; 0: no retry
 var retryUsed atomic.Bool   // this burst's one retry is scheduled
 
 // reclaimDeadline bounds the wait for quiet: on a node whose mirror
@@ -111,27 +112,32 @@ func EnableReclaim(mnt string) error {
 		}
 	}
 	reclaimFile.Store(&f)
-	retryAfter.Store(int64(writebackWindow()))
+	if d, err := writebackWindow(); err != nil {
+		retryAfter.Store(int64(reclaimDeadline))
+		logging.Warnf("memlimit: can't read the kernel's writeback settings (%v): the second hand-back waits RECLAIM_DEADLINE_S (%s) instead", err, reclaimDeadline)
+	} else {
+		retryAfter.Store(int64(d))
+	}
 	return nil
 }
 
 // writebackWindow is the most the kernel waits before writing a file's
-// dirty metadata: dirty_expire_centisecs + dirty_writeback_centisecs.
-// The kernel's defaults (30 s + 5 s) if they can't be read.
-func writebackWindow() time.Duration {
-	read := func(name string, def int) int {
+// dirty metadata: dirty_expire_centisecs + dirty_writeback_centisecs,
+// both read from /proc/sys/vm.
+func writebackWindow() (time.Duration, error) {
+	var cs int
+	for _, name := range []string{"dirty_expire_centisecs", "dirty_writeback_centisecs"} {
 		b, err := os.ReadFile("/proc/sys/vm/" + name)
 		if err != nil {
-			return def
+			return 0, err
 		}
 		n, err := strconv.Atoi(string(bytes.TrimSpace(b)))
 		if err != nil || n <= 0 {
-			return def
+			return 0, fmt.Errorf("/proc/sys/vm/%s: %q is not a positive number", name, bytes.TrimSpace(b))
 		}
-		return n
+		cs += n
 	}
-	cs := read("dirty_expire_centisecs", 3000) + read("dirty_writeback_centisecs", 500)
-	return time.Duration(cs) * 10 * time.Millisecond
+	return time.Duration(cs) * 10 * time.Millisecond, nil
 }
 
 var mountOnce sync.Once
@@ -217,11 +223,8 @@ func reclaim() {
 	logging.Infof("memlimit: reclaimed page cache %d -> %d KiB, slab_reclaimable %d -> %d KiB",
 		before["file"]/1024, after["file"]/1024, before["slab_reclaimable"]/1024, after["slab_reclaimable"]/1024)
 	left := after["file"] + after["slab_reclaimable"]
-	if left >= 1<<20 && left*2 > want && retryUsed.CompareAndSwap(false, true) {
-		wait := time.Duration(retryAfter.Load())
-		if wait <= 0 {
-			wait = 35 * time.Second
-		}
+	wait := time.Duration(retryAfter.Load())
+	if wait > 0 && left >= 1<<20 && left*2 > want && retryUsed.CompareAndSwap(false, true) {
 		logging.Debugf("memlimit: %d KiB still being written out; trying once more in %s", left/1024, wait)
 		time.AfterFunc(wait, func() {
 			reclaimDue.Store(true)

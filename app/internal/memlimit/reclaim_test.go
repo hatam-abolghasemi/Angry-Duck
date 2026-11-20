@@ -184,7 +184,45 @@ func TestReclaimRetriesOnceAfterWriteback(t *testing.T) {
 }
 
 func TestWritebackWindowFromKernel(t *testing.T) {
-	if d := writebackWindow(); d <= 0 || d > time.Hour {
+	d, err := writebackWindow()
+	if err != nil {
+		t.Skipf("no /proc/sys/vm here: %v", err)
+	}
+	if d <= 0 || d > time.Hour {
 		t.Fatalf("writeback window %s", d)
+	}
+}
+
+// Without the kernel's window there is no retry: nothing is guessed.
+func TestNoRetryWithoutTheKernelsWindow(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte("file 0\nslab_reclaimable 26214400\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "memory.reclaim")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldQ, oldD, oldR := quietAfter, reclaimDeadline, retryAfter.Load()
+	quietAfter, reclaimDeadline = 10*time.Millisecond, time.Hour
+	retryAfter.Store(0)
+	t.Cleanup(func() {
+		quietAfter, reclaimDeadline = oldQ, oldD
+		retryAfter.Store(oldR)
+		reclaimFile.Store(nil)
+		reclaimDue.Store(false)
+	})
+	reclaimFile.Store(&f)
+	ReclaimSoon()
+	for end := time.Now().Add(time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if b, _ := os.ReadFile(f); len(b) > 0 {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("no hand-back")
+		}
+	}
+	if retryUsed.Load() {
+		t.Fatal("a retry was scheduled without the kernel's writeback window")
 	}
 }
