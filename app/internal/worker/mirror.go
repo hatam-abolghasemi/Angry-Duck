@@ -68,6 +68,12 @@ type TagOrigin interface {
 	ManifestDigest(ctx context.Context, image string) (string, error)
 }
 
+// servableOrigin is a TagOrigin that can also tell whether it can serve an
+// image it named (registryclient.Client does).
+type servableOrigin interface {
+	Servable(ctx context.Context, image, platform string) error
+}
+
 // Mirror is a pull-only OCI registry mirror for this node's containerd.
 // containerd asks it first for every manifest and blob by digest, and,
 // with resolve on, for every tag. The mirror answers from this node's
@@ -93,6 +99,8 @@ type Mirror struct {
 	resolveTimeout time.Duration
 	downFor        time.Duration
 	askTimeout     time.Duration // for the controller's answers about tags
+	verifyPlatform string        // "" : the registry's answer is trusted as is (see EnableVerify)
+	verifyTimeout  time.Duration
 
 	ctrlTimeout    time.Duration // for the controller's answers about holders
 	ctrlBackoffMin time.Duration // first wait after the controller didn't answer in time...
@@ -100,10 +108,17 @@ type Mirror struct {
 
 	mu          sync.Mutex
 	holders     map[string]holderEntry
-	down        map[string]time.Time // registry host -> when to ask it again
-	ctrlDown    bool                 // the controller last didn't answer in time
-	ctrlUntil   time.Time            // until then, nobody asks it (see controllerSkip)
-	ctrlBackoff time.Duration        // the current wait; doubles per timeout in a row
+	tagNodes    map[string]holderEntry // repo -> nodes holding the tag served from node copies (see resolve)
+	servable    map[string]verdict     // digest -> whether the registry could serve it (see checkServable)
+	down        map[string]time.Time   // registry host -> when to ask it again
+	ctrlDown    bool                   // the controller last didn't answer in time
+	ctrlUntil   time.Time              // until then, nobody asks it (see controllerSkip)
+	ctrlBackoff time.Duration          // the current wait; doubles per timeout in a row
+}
+
+type verdict struct {
+	ok bool
+	at time.Time
 }
 
 type holderEntry struct {
@@ -141,6 +156,8 @@ func NewMirror(store MirrorStore, nodeID, token, controllerURL string) *Mirror {
 			ResponseHeaderTimeout: 30 * time.Second,
 		}},
 		holders:        map[string]holderEntry{},
+		tagNodes:       map[string]holderEntry{},
+		servable:       map[string]verdict{},
 		ctrlTimeout:    time.Second,
 		ctrlBackoffMin: time.Second,
 		ctrlBackoffMax: 10 * time.Second,
@@ -231,11 +248,23 @@ func isTimeout(err error) bool {
 // registry answer waits at most timeout; a registry that gave none is
 // left alone for downFor (0: asked every time). The controller's answers
 // about a tag wait at most askTimeout.
+// EnableVerify makes the mirror check, before trusting it, a registry
+// answer that points a tag at a digest no node holds while nodes hold the
+// tag at another one: the registry must serve that image's manifests,
+// config and layers for platform within timeout. If it can't (a proxy
+// answering tags while its upstream is down), the newest node copy is
+// served instead. Verdicts are reused for the unreachable TTL (downFor).
+func (m *Mirror) EnableVerify(platform string, timeout time.Duration) {
+	if _, ok := m.origin.(servableOrigin); ok {
+		m.verifyPlatform, m.verifyTimeout = platform, timeout
+	}
+}
+
 func (m *Mirror) EnableResolve(origin TagOrigin, timeout, downFor, askTimeout time.Duration) {
 	m.origin, m.resolveTimeout, m.downFor, m.askTimeout = origin, timeout, downFor, askTimeout
 	m.down = map[string]time.Time{}
 	mirrorResolvesTotal.Add(0, m.nodeID, "unchecked", "miss")
-	for _, o := range []string{"ok", "missing", "denied", "unreachable"} {
+	for _, o := range []string{"ok", "missing", "denied", "unreachable", "unservable"} {
 		for _, r := range []string{"local", "peer", "miss"} {
 			mirrorResolvesTotal.Add(0, m.nodeID, o, r)
 		}
@@ -258,14 +287,14 @@ func (m *Mirror) Handler() http.Handler {
 			_, _ = w.Write([]byte("{}"))
 			return
 		}
-		if kind, digest, ok := parseMirrorPath(r.URL.Path); ok {
-			m.serve(w, r, kind, digest)
-			return
-		}
 		// containerd names the registry in ns when it asks a mirror.
 		host := r.URL.Query().Get("ns")
+		if kind, digest, ok := parseMirrorPath(r.URL.Path); ok {
+			m.serve(w, r, kind, digest, m.nodesOfTag(host, repoOfPath(r.URL.Path)))
+			return
+		}
 		if repo, tag, ok := parseTagPath(r.URL.Path); ok && m.origin != nil && host != "" {
-			m.resolve(w, r, imageref.Normalize(host+"/"+repo+":"+tag), host)
+			m.resolve(w, r, imageref.Normalize(host+"/"+repo+":"+tag), host, repo)
 			return
 		}
 		http.NotFound(w, r) // everything else: the registry answers
@@ -311,6 +340,16 @@ func parseMirrorPath(p string) (kind, digest string, ok bool) {
 	return "", "", false
 }
 
+// repoOfPath reads <name> from /v2/<name>/{blobs,manifests}/<ref>.
+func repoOfPath(p string) string {
+	for _, k := range []string{"/blobs/", "/manifests/"} {
+		if i := strings.LastIndex(p, k); i > len("/v2/") && strings.HasPrefix(p, "/v2/") {
+			return p[len("/v2/"):i]
+		}
+	}
+	return ""
+}
+
 func validDigest(d string) bool {
 	h, ok := strings.CutPrefix(d, "sha256:")
 	if !ok || len(h) != 64 {
@@ -338,8 +377,10 @@ func (m *Mirror) hasLocal(ctx context.Context, digest string) bool {
 }
 
 // serve answers digest from this node or a peer, else 404, and returns
-// which: local, peer, miss or error.
-func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest string) string {
+// which: local, peer, miss or error. tagNodes, tried after the holders
+// the layer inventory names, are nodes holding the tag this content
+// belongs to (see resolve).
+func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest string, tagNodes []model.Holder) string {
 	kindLabel := strings.TrimSuffix(kind, "s")
 	if m.hasLocal(r.Context(), digest) {
 		n, err := m.serveLocal(w, r, kind, digest)
@@ -354,7 +395,19 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 		logging.Warnf("angryduck-worker[%s]: mirror: serving %s %s locally: %v", m.nodeID, kindLabel, digest, err)
 		clearBlobHeaders(w)
 	}
-	for _, h := range m.lookup(r.Context(), digest) {
+	holders := m.lookup(r.Context(), digest)
+	if len(tagNodes) > 0 {
+		tried := make(map[string]bool, len(holders))
+		for _, h := range holders {
+			tried[h.NodeID] = true
+		}
+		for _, h := range tagNodes {
+			if !tried[h.NodeID] && h.NodeID != m.nodeID {
+				holders = append(holders, h)
+			}
+		}
+	}
+	for _, h := range holders {
 		source := "peer"
 		if h.Arriving {
 			if kind != "blobs" {
@@ -390,19 +443,29 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request, kind, digest stri
 // never stops peers from sharing. A tag no node holds is a 404 without
 // asking the registry, so containerd goes there itself, as it would
 // without the mirror.
-func (m *Mirror) resolve(w http.ResponseWriter, r *http.Request, image, host string) {
+//
+// The nodes holding the tag are kept for repo (holderTTL), so the content
+// containerd asks next (the platform manifest, config and layers) is
+// found on them even when the layer inventory doesn't place it yet.
+func (m *Mirror) resolve(w http.ResponseWriter, r *http.Request, image, host, repo string) {
 	if m.askTag(r.Context(), image, false).Holders == 0 {
 		mirrorResolvesTotal.Inc(m.nodeID, "unchecked", "miss")
 		http.NotFound(w, r)
 		return
 	}
 	origin, digest := m.atOrigin(r.Context(), image, host)
+	if origin == "ok" && !m.checkServable(r.Context(), image, digest) {
+		origin = "unservable"
+	}
+	var nodes []model.Holder
 	if origin != "ok" {
-		digest = m.askTag(r.Context(), image, true).Digest
+		ans := m.askTag(r.Context(), image, true)
+		digest, nodes = ans.Digest, ans.Nodes
+		m.keepTagNodes(host, repo, nodes)
 	}
 	result := "miss"
 	if digest != "" {
-		result = m.serve(w, r, "manifests", digest)
+		result = m.serve(w, r, "manifests", digest, nodes)
 	} else {
 		http.NotFound(w, r)
 	}
@@ -410,6 +473,79 @@ func (m *Mirror) resolve(w http.ResponseWriter, r *http.Request, image, host str
 	if origin != "ok" {
 		logging.Infof("angryduck-worker[%s]: mirror: image=%s: registry answered %s; newest node copy %q: %s", m.nodeID, image, origin, digest, result)
 	}
+}
+
+// checkServable reports whether the registry's digest for image can be
+// trusted. It is checked only when no node holds that digest but some
+// node holds the tag at another one, so a healthy registry costs nothing
+// extra and a tag moved upstream costs one check per digest per TTL.
+func (m *Mirror) checkServable(ctx context.Context, image, digest string) bool {
+	so, ok := m.origin.(servableOrigin)
+	if !ok || m.verifyPlatform == "" || digest == "" || m.hasLocal(ctx, digest) {
+		return true
+	}
+	m.mu.Lock()
+	v, cached := m.servable[digest]
+	m.mu.Unlock()
+	if cached && time.Since(v.at) < m.downFor {
+		return v.ok
+	}
+	if len(m.lookup(ctx, digest)) > 0 {
+		return true
+	}
+	newest := m.askTag(ctx, image, true).Digest
+	if newest == "" || newest == digest {
+		return true
+	}
+	vctx, cancel := context.WithTimeout(ctx, m.verifyTimeout)
+	defer cancel()
+	err := so.Servable(vctx, imageref.Repo(image)+"@"+digest, m.verifyPlatform)
+	v = verdict{ok: err == nil, at: time.Now()}
+	m.mu.Lock()
+	for d, e := range m.servable {
+		if time.Since(e.at) >= m.downFor {
+			delete(m.servable, d)
+		}
+	}
+	if m.downFor > 0 {
+		m.servable[digest] = v
+	}
+	m.mu.Unlock()
+	if err != nil {
+		logging.Infof("angryduck-worker[%s]: mirror: image=%s: registry named %s, which no node holds, but can't serve it (%v); serving the newest node copy %s", m.nodeID, image, digest, err, newest)
+	}
+	return v.ok
+}
+
+// keepTagNodes remembers, for holderTTL, which nodes hold a tag of
+// host/repo that was served from node copies.
+func (m *Mirror) keepTagNodes(host, repo string, nodes []model.Holder) {
+	if len(nodes) == 0 || repo == "" {
+		return
+	}
+	key := host + "/" + repo
+	m.mu.Lock()
+	for k, e := range m.tagNodes {
+		if time.Since(e.at) >= holderTTL {
+			delete(m.tagNodes, k)
+		}
+	}
+	m.tagNodes[key] = holderEntry{list: nodes, at: time.Now()}
+	m.mu.Unlock()
+}
+
+// nodesOfTag returns the nodes keepTagNodes remembered for host/repo.
+func (m *Mirror) nodesOfTag(host, repo string) []model.Holder {
+	if repo == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.tagNodes[host+"/"+repo]
+	if !ok || time.Since(e.at) >= holderTTL {
+		return nil
+	}
+	return e.list
 }
 
 // atOrigin asks host what image's tag points at, unless host gave no

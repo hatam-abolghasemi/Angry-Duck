@@ -135,6 +135,9 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 	ans := model.TagHolders{Holders: len(holders)}
 	if len(holders) > 0 && r.URL.Query().Get("newest") == "1" {
 		ans.Digest = s.tags.newest(r.Context(), image, holders)
+		if ans.Digest != "" {
+			ans.Nodes = holders
+		}
 	}
 	writeJSON(w, http.StatusOK, ans)
 }

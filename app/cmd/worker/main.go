@@ -461,6 +461,8 @@ func main() {
 				timeout := time.Duration(config.Int("MIRROR_RESOLVE_TIMEOUT_MS", 1000)) * time.Millisecond
 				m.EnableResolve(registryclient.New(creds, timeout, 0), timeout, config.Duration("MIRROR_RESOLVE_UNREACHABLE_TTL_S", 30),
 					time.Duration(config.Int("MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS", 3000))*time.Millisecond)
+				m.EnableVerify(config.String("RESCUE_PLATFORM", "linux/"+runtime.GOARCH),
+					time.Duration(config.Int("MIRROR_RESOLVE_VERIFY_TIMEOUT_MS", 3000))*time.Millisecond)
 			}
 			extra = append(extra, m.RegisterPeer)
 			mirrorSrv = &http.Server{Addr: mirrorListen, Handler: memlimit.AfterEach(m.Handler()), ReadHeaderTimeout: 10 * time.Second}

@@ -18,9 +18,16 @@ import (
 
 // fakeOrigin answers ManifestDigest with digest or err, counting calls.
 type fakeOrigin struct {
-	digest string
-	err    error
-	calls  atomic.Int32
+	digest   string
+	err      error
+	calls    atomic.Int32
+	servErr  error // what Servable answers
+	servings atomic.Int32
+}
+
+func (o *fakeOrigin) Servable(context.Context, string, string) error {
+	o.servings.Add(1)
+	return o.servErr
 }
 
 func (o *fakeOrigin) ManifestDigest(context.Context, string) (string, error) {
@@ -36,6 +43,9 @@ type resolveRig struct {
 	origin  *fakeOrigin
 	image   blobship.TestImage
 	holders int
+	// noInventory: the controller's layer inventory places nothing (not
+	// reported yet, or it just restarted); only the tag's holders are known.
+	noInventory bool
 }
 
 func newResolveRig(t *testing.T, node string, downFor time.Duration) *resolveRig {
@@ -61,9 +71,14 @@ func newResolveRig(t *testing.T, node string, downFor time.Duration) *resolveRig
 			ans := model.TagHolders{Holders: rig.holders}
 			if r.URL.Query().Get("newest") == "1" {
 				ans.Digest = rig.image.Index
+				ans.Nodes = []model.Holder{holder}
 			}
 			_ = json.NewEncoder(w).Encode(ans)
 		case "/layers/holders":
+			if rig.noInventory {
+				_ = json.NewEncoder(w).Encode([]model.Holder{})
+				return
+			}
 			_ = json.NewEncoder(w).Encode([]model.Holder{holder})
 		}
 	}))
@@ -71,6 +86,7 @@ func newResolveRig(t *testing.T, node string, downFor time.Duration) *resolveRig
 
 	m := NewMirror(blobship.NewMemStore(), node, testToken, controller.URL)
 	m.EnableResolve(rig.origin, time.Second, downFor, time.Second)
+	m.EnableVerify("linux/amd64", time.Second)
 	rig.srv = httptest.NewServer(m.Handler())
 	t.Cleanup(rig.srv.Close)
 	return rig
@@ -147,6 +163,70 @@ func TestMirrorLeavesAnUnreachableRegistryAloneForAWhile(t *testing.T) {
 	}
 	if n := rig.origin.calls.Load(); n != 1 {
 		t.Fatalf("registry asked %d times, want once until it may have recovered", n)
+	}
+}
+
+// During an outage, a tag served from a node's copy brings the rest of the
+// image (platform manifest, config, layers) from the nodes holding that
+// tag, even when the layer inventory doesn't place that content yet.
+func TestMirrorFetchesATagsContentFromItsHoldersWithoutInventory(t *testing.T) {
+	rig := newResolveRig(t, "resolve-noinv", 0)
+	rig.noInventory = true
+	rig.origin.err = errors.New("dial tcp: i/o timeout")
+	if code, d := rig.resolve(http.MethodGet, "?ns=registry.example.com"); code != 200 || d != rig.image.Index {
+		t.Fatalf("tag: %d %s, want the holder's index", code, d)
+	}
+	for _, p := range []string{
+		"/v2/team/app/manifests/" + rig.image.AMD64Manifest,
+		"/v2/team/app/blobs/" + rig.image.Config,
+		"/v2/team/app/blobs/" + rig.image.Layers[0],
+	} {
+		resp, err := http.Get(rig.srv.URL + p + "?ns=registry.example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: %d, want it from the tag's holder", p, resp.StatusCode)
+		}
+	}
+	// Another repo's content isn't sent to this tag's holders.
+	resp, err := http.Get(rig.srv.URL + "/v2/team/other/blobs/" + rig.image.Config + "?ns=registry.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("other repo: %d, want 404", resp.StatusCode)
+	}
+}
+
+// A registry that names a digest no node holds, while nodes hold the tag
+// at another, is trusted only if it can serve that image; a proxy whose
+// upstream is down answers tags but fails on the rest.
+func TestMirrorServesTheNodeCopyWhenTheRegistryCantServeItsAnswer(t *testing.T) {
+	const node = "resolve-unservable"
+	rig := newResolveRig(t, node, time.Minute)
+	rig.noInventory = true // the rig's inventory would place any digest on the peer
+	rig.origin.digest = "sha256:" + strings.Repeat("2", 64)
+	rig.origin.servErr = &registryclient.StatusError{Code: http.StatusInternalServerError}
+	for range 2 {
+		if code, d := rig.resolve(http.MethodGet, "?ns=registry.example.com"); code != 200 || d != rig.image.Index {
+			t.Fatalf("%d %s, want the node copy", code, d)
+		}
+	}
+	if n := rig.origin.servings.Load(); n != 1 {
+		t.Fatalf("checked %d times, want once per digest per TTL", n)
+	}
+	want := `angryduck_worker_mirror_resolves_total{node="` + node + `",origin="unservable",result="peer"} 2`
+	waitFor(t, want, func() bool { return strings.Contains(scrapeMetrics(t), want) })
+
+	// The registry naming the digest the nodes hold is never checked.
+	rig.origin.digest = rig.image.Index
+	before := rig.origin.servings.Load()
+	rig.resolve(http.MethodHead, "?ns=registry.example.com")
+	if n := rig.origin.servings.Load(); n != before {
+		t.Fatalf("the nodes' own digest was checked: %d -> %d", before, n)
 	}
 }
 

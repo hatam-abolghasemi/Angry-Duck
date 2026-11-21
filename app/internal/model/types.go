@@ -350,6 +350,10 @@ type Holder struct {
 type TagHolders struct {
 	Holders int    `json:"holders"`
 	Digest  string `json:"digest,omitempty"`
+	// Nodes, with Digest, are the fresh nodes holding the tag: the mirror
+	// asks them directly for that image's content the layer inventory
+	// doesn't place (not reported yet, or after a controller restart).
+	Nodes []Holder `json:"nodes,omitempty"`
 }
 
 // TagTarget is what a tag points at on one node, and since when
