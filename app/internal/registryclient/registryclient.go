@@ -259,6 +259,39 @@ func (c *Client) resolve(ctx context.Context, image, platform string) (Resolved,
 	return res, nil
 }
 
+// Servable checks that the registry can serve image (normally pinned by
+// digest) for platform right now: its manifests and config are fetched
+// (metadata only, uncached) and every layer is asked for with a HEAD, all
+// layers at once. A registry that answers a tag but fails on what it
+// points at (a proxy whose upstream is down) is not servable.
+func (c *Client) Servable(ctx context.Context, image, platform string) error {
+	res, err := c.resolve(ctx, image, platform)
+	if err != nil {
+		return err
+	}
+	ref, err := ParseRef(image)
+	if err != nil {
+		return err
+	}
+	errs := make(chan error, len(res.Layers))
+	for _, l := range res.Layers {
+		go func() {
+			resp, err := c.do(ctx, c.http, http.MethodHead, ref, "blobs/"+l.Digest, "*/*")
+			if err == nil {
+				resp.Body.Close()
+			}
+			errs <- err
+		}()
+	}
+	var first error
+	for range res.Layers {
+		if err := <-errs; err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 func pick(entries []blobship.Descriptor, want blobship.Platform) (string, error) {
 	for _, e := range entries {
 		if e.Platform == nil || e.Annotations["vnd.docker.reference.type"] == "attestation-manifest" {

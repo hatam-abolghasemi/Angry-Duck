@@ -282,3 +282,17 @@ func TestCheckManifestClassifiesTheOrigin(t *testing.T) {
 		t.Fatalf("closed registry: %s", got)
 	}
 }
+
+// A registry that answers the tag but is missing a layer (a proxy whose
+// upstream is down) is not servable.
+func TestServableChecksManifestsConfigAndEveryLayer(t *testing.T) {
+	f := newFake(t, "bearer")
+	c, image := client(t, f)
+	if err := c.Servable(context.Background(), image, "linux/amd64"); err != nil {
+		t.Fatalf("whole image: %v", err)
+	}
+	delete(f.blobs, f.layers[1])
+	if err := c.Servable(context.Background(), image, "linux/amd64"); err == nil {
+		t.Fatal("a missing layer must make the image unservable")
+	}
+}
