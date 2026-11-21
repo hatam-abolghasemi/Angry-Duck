@@ -78,7 +78,7 @@ imageGCLowThresholdPercent: 80
 - **Use `imagePullPolicy: IfNotPresent`.** With `Always`, kubelet asks for
   the manifest before every container start. The mirror answers it during a
   registry outage only if some node holds the tag (with
-  `MIRROR_RESOLVE_ENABLED`), and rescue skips such pods. `latest` and untagged
+  `MIRROR_RESOLVE_ENABLED`). `latest` and untagged
   images default to `Always`.
 - **Keep `PROPAGATE_MAX_UTILIZATION` and `GC_*` consistent.** Propagation
   skips nodes above `PROPAGATE_MAX_UTILIZATION` until cleanup makes room.

@@ -143,8 +143,10 @@ already met.
   registry layer, with replication or a pull-through cache.
 - **It can't help with images the cluster has never pulled.** If the registry
   is down for a brand-new image, no peer has it.
-- **It skips `imagePullPolicy: Always`**, including `:latest` and untagged
-  images, because kubelet goes to the registry even when the image is local.
+- **It needs tag resolution for `imagePullPolicy: Always`**, including
+  `:latest` and untagged images: kubelet asks for the tag even when the image
+  is local, so those pods are helped only while the mirror resolves tags
+  (on by default).
 - **It doesn't lazy-load images.** Formats such as eStargz, Nydus and SOCI
   start containers before the image is fully downloaded. That is orthogonal and
   can be combined.

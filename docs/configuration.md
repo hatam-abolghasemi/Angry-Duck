@@ -212,6 +212,7 @@ The whole-image fallback, and the limits spread shares.
 | `MIRROR_CONTROLLER_BACKOFF_MAX_MS` | `10000` | The longest that wait gets. `0` asks every time. |
 | `MIRROR_RESOLVE_ENABLED` | `true` | Resolve tags too: the registry's answer when it gives one, else the newest copy a node holds (see [Mirror](mirror.md#tags)). |
 | `MIRROR_RESOLVE_TIMEOUT_MS` | `1000` | How long the mirror waits for the registry to say what a tag points at, token request included. |
+| `MIRROR_RESOLVE_VERIFY_TIMEOUT_MS` | `3000` | When the registry names a digest no node holds while nodes hold the tag at another, how long it gets to show it can serve that image (manifests, config, a `HEAD` per layer). Failing counts as `unservable`: the newest node copy is served. |
 | `MIRROR_RESOLVE_UNREACHABLE_TTL_S` | `30` | After a registry gave no answer, how long this node's mirror goes straight to the newest node copy for its tags. `0` asks every time. |
 | `MIRROR_RESOLVE_CONTROLLER_TIMEOUT_MS` | `3000` | How long the mirror waits for the controller's answers about a tag: whether a node holds it, and the newest copy's digest. |
 | `MIRROR_RESOLVE_NEWEST_CACHE_S` | `30` | Controller: how long the newest copy's digest found for a tag is reused for every mirror asking. |

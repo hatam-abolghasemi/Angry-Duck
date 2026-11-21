@@ -92,7 +92,13 @@ a tag points at too. The mirror:
    waiting at most `MIRROR_RESOLVE_TIMEOUT_MS`. Its answer wins: that digest
    is served from the node or a peer, or, when no node holds it (the tag moved
    to something the cluster doesn't have yet), `404`, and containerd pulls it
-   from the registry;
+   from the registry. One exception: when no node holds the registry's digest
+   but nodes hold the tag at another one, the mirror first checks that the
+   registry can serve that image (manifests, config, a `HEAD` per layer,
+   within `MIRROR_RESOLVE_VERIFY_TIMEOUT_MS`). A registry that answers tags but
+   fails on the rest, such as a proxy whose upstream is down, counts as
+   `unservable` and gets step 3. The verdict is reused for
+   `MIRROR_RESOLVE_UNREACHABLE_TTL_S`;
 3. when the registry gives no digest (down, too slow, refusing Angry Duck's
    credentials, or no longer knowing the tag), serves the newest copy a node
    holds. The controller asks the holders what the tag points at on each and
@@ -129,7 +135,10 @@ again the moment a new controller answers.
   registry says whenever it says it, so a moved tag such as `latest` is never
   served stale. When it can't, freshness never stops peers from sharing: the
   newest copy in the cluster is served, `imagePullPolicy: Always` pods
-  included. `angryduck_worker_mirror_resolves_total{origin}` shows how often
+  included. The rest of that image (platform manifest, config, layers) is
+  then also asked of the nodes holding the tag, for 30 s, in case the layer
+  inventory doesn't place it yet (a node that hasn't reported it, or a
+  controller that just restarted). `angryduck_worker_mirror_resolves_total{origin}` shows how often
   the registry was `missing`, `denied` or `unreachable` while a peer's copy was
   served.
 - **The mirror decides, containerd pulls.** The mirror sends the registry one
@@ -172,7 +181,7 @@ it.
 | `angryduck_worker_mirror_requests_total{kind, result}` | Requests served `local`, from a `peer`, as a `stream` from a peer still receiving it, a `miss` (registry), or `error`. |
 | `angryduck_worker_mirror_bytes_total{source}` | Bytes served (`local`, `peer`, `stream`), each one not downloaded from the registry. |
 | `angryduck_worker_mirror_peer_served_bytes_total` | Bytes this node served to other nodes' mirrors. |
-| `angryduck_worker_mirror_resolves_total{origin, result}` | Tags resolved, by the registry's answer (`ok`, `missing`, `denied`, `unreachable`, or `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). |
+| `angryduck_worker_mirror_resolves_total{origin, result}` | Tags resolved, by the registry's answer (`ok`, `missing`, `denied`, `unreachable`, `unservable`, or `unchecked` when no node holds the tag) and where the manifest came from (`local`, `peer`, `miss`). |
 | `angryduck_worker_mirror_controller_unreachable` | `1` while the mirror leaves a controller that didn't answer in time alone (see [When the controller doesn't answer](#when-the-controller-doesnt-answer)). |
 
 ## Settings

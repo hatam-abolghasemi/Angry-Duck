@@ -56,9 +56,10 @@ sequenceDiagram
 
 - **Pods aren't restarted.** The pod starts on kubelet's next backoff retry,
   at most 5 minutes later. Delete the pod to skip the wait.
-- **`imagePullPolicy: Always` is skipped.** kubelet goes to the registry for
-  those even when the image is local. This includes `:latest` and untagged
-  images, which default to `Always`.
+- **`imagePullPolicy: Always` needs tag resolution to start.** Those pods
+  are rescued like any other, but kubelet still asks for the tag with the
+  image local, and only the mirror's tag resolution (`MIRROR_RESOLVE_ENABLED`,
+  on by default) answers it while the registry can't.
 - **The worker can't rescue itself.** If the worker's own image is the one
   stuck, nothing on that node can receive it. See
   [Bootstrapping a node by hand](operations.md#bootstrapping-a-node-by-hand).
@@ -73,7 +74,7 @@ Each entry lists the node, image, pods, why the pull failed, last result or
 error, failures in a row and the next attempt. The key metrics are
 `angryduck_controller_rescue_stuck_images`,
 `angryduck_controller_rescues_total{result}` (`success`, `failure`,
-`no_source`, `no_target`, `pull_policy_always`),
+`no_source`, `no_target`),
 `angryduck_controller_rescues_by_cause_total{cause, result}` and
 `angryduck_controller_rescue_consecutive_failures`.
 
