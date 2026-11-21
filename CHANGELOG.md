@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.14.10
+
+### Fixed
+
+- **Rescue skipped `imagePullPolicy: Always` pods.** They are now rescued
+  like every other stuck pod; the mirror answers their tag from the local
+  copy when the registry can't. The `pull_policy_always` result is gone. On
+  mgmt, a keycloak pod waited 30 minutes through a registry outage while
+  two nodes held its image.
+- **A registry that answered tags but couldn't serve them beat the nodes'
+  copies.** An in-cluster Nexus going down answered some tag requests with
+  a digest no node held, then failed on its manifests and layers, so pulls
+  kept failing while nodes held the tag. When the registry names a digest
+  no node holds while nodes hold the tag at another, the mirror now checks
+  that the registry can serve that image (manifests, config, a `HEAD` per
+  layer, `MIRROR_RESOLVE_VERIFY_TIMEOUT_MS`, 3 s by default). If it can't,
+  the tag counts as `unservable` and the newest node copy is served. A
+  healthy registry, and a tag no node holds, cost nothing extra.
+- **During a registry outage, the mirror could miss content the nodes
+  holding the tag had.** It served the tag from the newest node copy but
+  looked up that image's manifests and blobs only in the layer inventory,
+  so content the inventory didn't place yet (not reported, or just after a
+  controller restart) went to the registry, which was down. The
+  controller's tag answer now names the nodes holding the tag, and the
+  mirror asks them for that repo's content after the inventory's holders,
+  for 30 s.
+
 ## 1.14.9
 
 ### Fixed
