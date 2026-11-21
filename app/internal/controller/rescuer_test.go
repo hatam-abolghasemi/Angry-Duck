@@ -114,7 +114,6 @@ func TestRescuer_Skips(t *testing.T) {
 
 	rs := newTestRescuer(reg, []kube.Pod{
 		stuckPod("ns", "has-it", "node-a", img, "ImagePullBackOff", "IfNotPresent"),
-		stuckPod("ns", "always", "node-b", img, "ImagePullBackOff", "Always"),
 		stuckPod("ns", "no-source", "node-c", "registry.example.com/team/other:1", "ImagePullBackOff", "IfNotPresent"),
 		stuckPod("ns", "no-worker", "node-d", img, "ImagePullBackOff", "IfNotPresent"),
 		stuckPod("ns", "crashing", "node-c", img, "CrashLoopBackOff", "IfNotPresent"),
@@ -123,6 +122,27 @@ func TestRescuer_Skips(t *testing.T) {
 	rs.wg.Wait()
 	if len(sink.orders) != 0 {
 		t.Fatalf("expected no orders, got %+v", sink.orders)
+	}
+}
+
+// imagePullPolicy Always pods are rescued like the rest: the mirror
+// answers their tag from the local copy when the registry can't.
+func TestRescuer_RescuesPullAlways(t *testing.T) {
+	sink := &orderSink{}
+	target := sink.server(t)
+	reg := NewRegistry(time.Minute, time.Minute)
+	report(reg, "node-b", strings.TrimPrefix(target.URL, "http://"), 0.1)
+	report(reg, "worker14", "10.0.0.14:18081", 0.1, img)
+
+	rs := NewRescuer(reg, fakePods{[]kube.Pod{
+		stuckPod("ns", "always", "node-b", img, "ImagePullBackOff", "Always"),
+	}}, rescueToken, RescuerConfig{
+		Interval: time.Hour, RetryAfter: time.Hour, Timeout: 5 * time.Second, MaxConcurrent: 4, MaxSources: 2,
+	})
+	rs.tick(context.Background())
+	rs.wg.Wait()
+	if len(sink.orders) != 1 || sink.orders[0].Image != img {
+		t.Fatalf("orders = %+v, want one for the Always pod", sink.orders)
 	}
 }
 

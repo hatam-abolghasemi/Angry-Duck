@@ -22,10 +22,9 @@ import (
 
 // rescuesTotal counts rescue decisions per target node. result is one of:
 // success, failure, no_source (no fresh worker has the image),
-// no_target (no fresh worker on the stuck pod's node), pull_policy_always
-// (kubelet would ignore a local copy anyway).
+// no_target (no fresh worker on the stuck pod's node).
 var (
-	rescueResults = []string{"success", "failure", "no_source", "no_target", "pull_policy_always"}
+	rescueResults = []string{"success", "failure", "no_source", "no_target"}
 	rescueCauses  = []string{"missing", "denied", "unreachable", "other"}
 
 	rescuesTotal = metrics.NewCounterVec(
@@ -223,11 +222,10 @@ func (rs *Rescuer) Run(ctx context.Context) {
 
 // stuckImage is one image one node can't pull, and who is waiting on it.
 type stuckImage struct {
-	Node       string
-	Image      string
-	Pods       []string // namespace/name
-	PullAlways bool
-	Cause      string // see pullCause; "" until a message says
+	Node  string
+	Image string
+	Pods  []string // namespace/name
+	Cause string   // see pullCause; "" until a message says
 }
 
 // count records one rescue decision for s.
@@ -460,9 +458,6 @@ func (rs *Rescuer) tick(ctx context.Context) {
 
 		target := byNode[s.Node]
 		switch {
-		case s.PullAlways:
-			rs.skip(st, "pull_policy_always", "imagePullPolicy is Always, so kubelet would go to the registry even with a local copy")
-			continue
 		case target == nil:
 			rs.skip(st, "no_target", "no fresh worker on that node")
 			continue
@@ -731,12 +726,6 @@ func findStuck(pods []kube.Pod) []stuckImage {
 				s.Cause = pullCause(cs.State.Waiting.Message)
 			}
 			s.Pods = appendUnique(s.Pods, p.Metadata.Namespace+"/"+p.Metadata.Name)
-			// kubelet defaults imagePullPolicy to Always for :latest and
-			// untagged images; the API server fills it in, so it is
-			// always present on real pods.
-			if spec.ImagePullPolicy == "Always" {
-				s.PullAlways = true
-			}
 		}
 	}
 	out := make([]stuckImage, 0, len(byKey))
