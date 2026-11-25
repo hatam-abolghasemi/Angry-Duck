@@ -124,6 +124,7 @@ func (s *Spread) wholeStreamWorker(job string, j *unpackJob, l LayerSpec) {
 	case err == nil && x.Key != "" && !dropped:
 		delete(j.pending, l.ChainID)
 		j.extracted[l.ChainID] = extractedLayer{LayerSpec: l, x: x, result: "streamed"}
+		observeUnpack("streamed", l.Size, start)
 		logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) on its own while it arrived in %s, attaching it once the layer below is", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 	case err == nil && x.Key == "":
 		delete(j.pending, l.ChainID)
@@ -132,6 +133,7 @@ func (s *Spread) wholeStreamWorker(job string, j *unpackJob, l LayerSpec) {
 		clear(j.commitTried) // what waited on it may commit now
 		if applied {
 			spreadUnpacksTotal.Inc(s.nodeID, "streamed")
+			observeUnpack("streamed", l.Size, start)
 			logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) while it arrived, done %s after starting", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 		} else {
 			spreadUnpacksTotal.Inc(s.nodeID, "present")
@@ -158,6 +160,7 @@ func (s *Spread) wholeStreamWorker(job string, j *unpackJob, l LayerSpec) {
 func (s *Spread) wholeLandedWorker(job string, j *unpackJob, l LayerSpec) {
 	defer s.afterUnpack()
 	start := time.Now()
+	method := "landed" // by containerd; "landed_own" when this worker unpacks it
 	lease, err := s.lease(j.ctx, job)
 	applied := false
 	var x ExtractedLayer
@@ -180,6 +183,7 @@ func (s *Spread) wholeLandedWorker(job string, j *unpackJob, l LayerSpec) {
 				x = ExtractedLayer{}
 			}
 		case own && streamUnpackable(l.MediaType):
+			method = "landed_own"
 			x, err = s.extractStreaming(j.ctx, lease, l)
 		}
 	}
@@ -191,6 +195,7 @@ func (s *Spread) wholeLandedWorker(job string, j *unpackJob, l LayerSpec) {
 	case err == nil && x.Key != "" && !dropped:
 		delete(j.pending, l.ChainID)
 		j.extracted[l.ChainID] = extractedLayer{LayerSpec: l, x: x, result: "applied"}
+		observeUnpack(method, l.Size, start)
 		logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) on its own in %s, attaching it once the layer below is", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 	case err == nil && x.Key == "":
 		delete(j.pending, l.ChainID)
@@ -199,6 +204,7 @@ func (s *Spread) wholeLandedWorker(job string, j *unpackJob, l LayerSpec) {
 		clear(j.commitTried)
 		if applied {
 			spreadUnpacksTotal.Inc(s.nodeID, "applied")
+			observeUnpack(method, l.Size, start)
 			logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) in %s", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 		} else {
 			spreadUnpacksTotal.Inc(s.nodeID, "present")

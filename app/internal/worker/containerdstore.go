@@ -576,6 +576,7 @@ func (s *ContainerdStore) Import(ctx context.Context, r io.Reader, platform stri
 	defer s.importEnded(ren.prefix)
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(ren.rewrite(r, pw)) }()
+	registering := time.Now()
 	imgs, err := s.client.Import(ctx, pr,
 		containerd.WithImageRefTranslator(archive.AddRefPrefix("import-"+time.Now().Format("2006-01-02"))),
 		containerd.WithImportPlatform(match),
@@ -589,9 +590,12 @@ func (s *ContainerdStore) Import(ctx context.Context, r io.Reader, platform stri
 		s.dropTemps(ctx, ren.temps())
 		return fmt.Errorf("import: %w", err)
 	}
+	observeImport("register", registering)
+	unpacking := time.Now()
 	if err := s.unpackAndPublish(ctx, imgs, ren, match); err != nil {
 		return err
 	}
+	observeImport("unpack", unpacking)
 	return nil
 }
 
@@ -1347,10 +1351,12 @@ func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string
 		abort()
 		return n, err
 	}
+	committing := time.Now()
 	if err := cw.Commit(ctx, size, d); err != nil && !errdefs.IsAlreadyExists(err) {
 		abort()
 		return n, err
 	}
+	observeBlobCommit("api", size, committing)
 	cw.Close()
 	return n, hold()
 }

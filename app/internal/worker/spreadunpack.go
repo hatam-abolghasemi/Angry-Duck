@@ -313,9 +313,11 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 			switch {
 			case err == nil && applied && l.arriving:
 				spreadUnpacksTotal.Inc(s.nodeID, "streamed")
+				observeUnpack("streamed", l.Size, start)
 				logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) while it arrived, done %s after starting", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 			case err == nil && applied:
 				spreadUnpacksTotal.Inc(s.nodeID, "applied")
+				observeUnpack("landed", l.Size, start)
 				logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) in %s", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 			case err == nil:
 				spreadUnpacksTotal.Inc(s.nodeID, "present")

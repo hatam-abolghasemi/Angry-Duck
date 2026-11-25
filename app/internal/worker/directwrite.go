@@ -196,10 +196,12 @@ func (s *ContainerdStore) writeDirect(ctx context.Context, lease, ref string, d 
 		cw.Close()
 		return n, fmt.Errorf("containerd resumed %s at %d bytes, want %d", ref, st.Offset, size)
 	}
+	committing := time.Now()
 	if err := cw.Commit(ctx, size, d); err != nil && !errdefs.IsAlreadyExists(err) {
 		cw.Close()
 		return n, err
 	}
+	observeBlobCommit("direct", size, committing)
 	cw.Close()
 	return n, s.holdContent(ctx, lease, d.String())
 }

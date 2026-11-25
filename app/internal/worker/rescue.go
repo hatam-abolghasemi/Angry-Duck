@@ -608,6 +608,7 @@ func (rs *Rescue) receiveSnapshot(ctx context.Context, plan blobship.Plan, l blo
 	if i := layerIndex(plan, l.ChainID); i > 0 {
 		parent = plan.Layers[i-1].ChainID
 	}
+	began := time.Now()
 	body, err := json.Marshal(model.SnapshotExportRequest{Image: plan.Image, Platform: rs.platform, ChainID: l.ChainID, Format: blobship.FormatOCILayer})
 	if err != nil {
 		return 0, err
@@ -654,6 +655,9 @@ func (rs *Rescue) receiveSnapshot(ctx context.Context, plan blobship.Plan, l blo
 		return nil
 	}
 	err = rs.store.ApplySnapshot(ctx, l.ChainID, parent, layer, verify)
+	if err == nil {
+		observeSnapshotReceive(counted.n, began)
+	}
 	return counted.n, err
 }
 

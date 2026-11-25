@@ -158,6 +158,7 @@ type Spread struct {
 	// Every layer unpacking at once while blobs arrive (see
 	// spreadwhole.go): nil when stream unpacking is off or can't extract.
 	streamExtractor LayerStreamExtractor
+	slotsHook       sync.Once // registers the unpack slots gauge's scrape hook once
 }
 
 type spreadJob struct {
@@ -166,6 +167,7 @@ type spreadJob struct {
 	gen      int
 	leasedAt time.Time
 	touched  time.Time
+	started  time.Time // first lease of the job here: where spreadReadySeconds starts; under Spread.mu
 }
 
 type spreadXfer struct {
@@ -417,7 +419,7 @@ func (s *Spread) lease(ctx context.Context, job string) (string, error) {
 	s.mu.Lock()
 	j := s.jobs[job]
 	if j == nil {
-		j = &spreadJob{}
+		j = &spreadJob{started: time.Now()}
 		s.jobs[job] = j
 	}
 	j.touched = time.Now()
@@ -458,6 +460,7 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	result := model.SpreadResultOK
 	switch {
 	case err == nil:
+		observeBlobFetch(o.Path, o.Size, took)
 		// Won: stop the other path if it is fetching this same blob.
 		s.mu.Lock()
 		if n >= recvRateMinBytes && took > 0 {
@@ -519,6 +522,7 @@ func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) 
 	}
 	var body io.ReadCloser
 	var length int64
+	opening := time.Now()
 	if o.Path == model.SpreadPathRegistry {
 		body, length, err = s.registry.OpenBlob(ctx, imageref.Normalize(o.Image), o.Digest)
 	} else {
@@ -527,6 +531,7 @@ func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) 
 	if err != nil {
 		return 0, o.Stream && ctx.Err() == nil, err
 	}
+	observeBlobOpen(o.Path, opening)
 	defer body.Close()
 	if length >= 0 && length != o.Size {
 		return 0, false, fmt.Errorf("source announced %d bytes, want %d", length, o.Size)
@@ -712,6 +717,7 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 	// Layers still being unpacked as they arrived are finished first:
 	// the import then finds them unpacked and skips them.
 	s.unpackStop(ctx, f.Job, false)
+	observeFinalizePhase("drain", start)
 	err = s.finalize(ctx, f, image)
 	if err != nil {
 		spreadFinalizesTotal.Inc(s.nodeID, "failure")
@@ -727,6 +733,15 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusBadGateway, model.SpreadFinalizeResult{Error: err.Error()})
 		return
+	}
+	s.mu.Lock()
+	var began time.Time
+	if j := s.jobs[f.Job]; j != nil {
+		began = j.started
+	}
+	s.mu.Unlock()
+	if !began.IsZero() {
+		observeSince(spreadReadySeconds, began)
 	}
 	s.release(ctx, f.Job) // the image references its blobs now
 	spreadFinalizesTotal.Inc(s.nodeID, "success")
@@ -786,9 +801,11 @@ func checkFinalize(f model.SpreadFinalize) error {
 // vanishing after this check can't leave a broken image behind.
 func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image string) error {
 	top := blobship.Descriptor{MediaType: f.TopType, Digest: f.TopDig, Size: f.TopSize}
+	holding := time.Now()
 	if err := s.holdLayers(ctx, f, top); err != nil {
 		return err
 	}
+	observeFinalizePhase("hold", holding)
 	pr, pw := io.Pipe()
 	go func() {
 		pw.CloseWithError(func() error {
@@ -804,6 +821,7 @@ func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image str
 			return aw.Close()
 		}())
 	}()
+	importing := time.Now()
 	err := s.store.Import(ctx, pr, s.platform)
 	pr.CloseWithError(errImportEnded)
 	if err != nil {
@@ -812,6 +830,7 @@ func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image str
 	if _, got, err := s.store.Resolve(ctx, image); err != nil || got != f.TopDig {
 		return fmt.Errorf("after import, %s resolves to %q (err %v), want %s", image, got, err, f.TopDig)
 	}
+	observeFinalizePhase("import", importing)
 	return nil
 }
 

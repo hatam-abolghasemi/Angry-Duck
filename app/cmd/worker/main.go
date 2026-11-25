@@ -69,6 +69,7 @@ func main() {
 		}
 		nodeID = hostname
 	}
+	worker.SetMetricsNode(nodeID)
 	selfAddress := config.String("SELF_ADDRESS", "")
 	if selfAddress == "" {
 		log.Fatalf("angryduck-worker: SELF_ADDRESS must be set to a controller-reachable host or host:port (e.g. pod IP via downward API)")
