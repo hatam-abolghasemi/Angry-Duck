@@ -271,6 +271,50 @@ what is moving, not history:
 
 The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
 
+<a id="durations"></a>Durations. Histograms of how long each stage took, so a slow
+registry, a slow disk or one unusually slow layer shows up in a quantile
+instead of an average. They record **successful** operations only; failures
+and cancellations stay in the counters above. A series appears with its first
+observation (not at zero). Labels are the node, a small fixed vocabulary and a
+size class (`small` under 8 MiB, `medium` under 64 MiB, `large` from there),
+never an image, digest or layer; per-image detail stays in
+[image history](#image-history). Buckets, in seconds: 0.05 to 300.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `angryduck_worker_blob_fetch_seconds` | `node`, `path`, `size_class` | One spread blob transfer into containerd's content store: source connect, download, write and the digest check at commit. `path` is `registry` or `peer`. |
+| `angryduck_worker_blob_open_seconds` | `node`, `path` | From asking a source for a blob until it starts answering (before the first byte is read): the registry's auth, redirect and queueing, or a peer's response. |
+| `angryduck_worker_blob_commit_seconds` | `node`, `mode`, `size_class` | containerd committing a written blob (digest check and rename into the store). `mode` is `api` or `direct` (`DIRECT_WRITES`). Subtract from the fetch time to get download plus writes. |
+| `angryduck_worker_layer_unpack_seconds` | `node`, `method`, `size_class` | Unpacking one layer into a snapshot, before any commit onto its parent. `method`: `streamed` (this worker, while the blob arrived: includes waiting for the bytes), `landed` (containerd, from the landed blob), `landed_own` (this worker, from the landed blob). |
+| `angryduck_worker_layer_commit_seconds` | `node`, `size_class` | Attaching an already unpacked layer onto the layer below and committing its snapshot (layers unpacked on their own, committed later). |
+| `angryduck_worker_snapshot_receive_seconds` | `node`, `size_class` | One layer received as a snapshot from a peer and committed locally (a peer that holds the layer unpacked but has no blob, e.g. with containerd's `discard_unpacked_layers`). Transfer and apply are streamed together, so it is one number; it is not in `blob_fetch_seconds`. `size_class` is the bytes on the wire. |
+| `angryduck_worker_spread_finalize_seconds` | `node`, `phase` | Registering a spread image: `drain` (waiting for layers still unpacking as they arrive), `hold` (checking and pinning the layers), `import` (containerd import and unpack under a temporary name, then publishing the real name). |
+| `angryduck_worker_import_seconds` | `node`, `phase` | The two parts of every containerd import this worker makes (spread, rescue, repair): `register` (reading the archive, creating the temporary image) and `unpack` (unpacking layers without a snapshot, publishing the name). |
+| `angryduck_worker_spread_ready_seconds` | `node` | From the first transfer or layer check this node made for a spread until its image name was registered: the node-local time to image ready. |
+| `angryduck_worker_unpack_slots` | `node`, `state` | Layer unpack slots across spreads: `in_use` now and `max` (`SPREAD_UNPACK_PARALLEL_MAX`). Only with parallel unpacking on. `in_use` pinned at `max` while layers still wait is serialization. |
+| `angryduck_registry_request_seconds` | `kind` | Both components. The registry's answer time: `resolve` (manifest, index and config of an image, cache misses only) or `blob_open` (until a blob's response headers arrive). No node or image label. |
+
+Where the time goes for a layer that streamed in from the registry:
+`blob_open` is the registry's response time, `blob_fetch - blob_open -
+blob_commit` is download plus writing, `blob_commit` is verification, and
+`layer_unpack` with `method="streamed"` overlaps the fetch, so it is not
+added to it. What `landed` hides: containerd's unpack does decompression and
+extraction in one call, so those two are not separate here.
+
+```promql
+# p95 time to download+ingest a large blob, by source
+histogram_quantile(0.95, sum by (le, path) (
+  rate(angryduck_worker_blob_fetch_seconds_bucket{size_class="large"}[15m])))
+# registry time to first byte, p95
+histogram_quantile(0.95, sum by (le) (
+  rate(angryduck_registry_request_seconds_bucket{kind="blob_open"}[15m])))
+# share of unpacks done while the blob arrived (needs stream unpack on)
+sum(rate(angryduck_worker_layer_unpack_seconds_count{method="streamed"}[1h]))
+  / sum(rate(angryduck_worker_layer_unpack_seconds_count[1h]))
+# unpack slot saturation per node
+angryduck_worker_unpack_slots{state="in_use"} / ignoring(state) angryduck_worker_unpack_slots{state="max"}
+```
+
 ### Both components
 
 | Metric | Type | Labels | Meaning |

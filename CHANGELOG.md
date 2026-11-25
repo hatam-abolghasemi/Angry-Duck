@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.14.11
+
+### Added
+
+- **Duration histograms for each stage of getting an image onto a node.**
+  Until now the spread path exposed counts, bytes and summed time, so a slow
+  registry or one slow layer was lost in an average. New:
+  `angryduck_worker_blob_fetch_seconds`, `_blob_open_seconds`,
+  `_blob_commit_seconds`, `_layer_unpack_seconds`, `_layer_commit_seconds`,
+  `_snapshot_receive_seconds`,
+  `_spread_finalize_seconds`, `_import_seconds`, `_spread_ready_seconds`, the
+  gauge `_unpack_slots`, and `angryduck_registry_request_seconds` on both
+  components. Successful operations only; labels are node, a small fixed
+  vocabulary and a three-way size class, never an image or digest. Series
+  appear with their first observation. No change on the nodes. See
+  [Observability](docs/observability.md#durations).
+- `internal/metrics` has a `HistogramVec`.
+
 ## 1.14.10
 
 ### Fixed
