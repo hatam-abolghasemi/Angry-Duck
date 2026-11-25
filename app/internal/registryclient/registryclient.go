@@ -32,8 +32,22 @@ import (
 	"angryduck/internal/blobship"
 	"angryduck/internal/imageref"
 	"angryduck/internal/layerindex"
+	"angryduck/internal/metrics"
 	"angryduck/internal/registryauth"
 )
+
+// requestSeconds is how long the registry took to answer, by kind:
+// "resolve" (the whole manifest, index and config read for an image, cache
+// misses only) and "blob_open" (a blob request until its response headers
+// arrive, after auth and redirects: the registry's time to first byte).
+// Successful requests only; failures are counted where they are handled.
+// No node or image label: both components import this package, and the
+// image is bounded elsewhere (see docs/observability.md).
+var requestSeconds = metrics.NewHistogramVec(
+	"angryduck_registry_request_seconds",
+	"Time the registry took to answer an Angry Duck request, by kind: resolve (manifest, index and config of an image; cache misses only) or blob_open (until the blob's response headers arrive).",
+	[]float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+	"kind")
 
 const acceptManifests = blobship.MediaTypeOCIIndex + ", " + blobship.MediaTypeDockerList + ", " +
 	blobship.MediaTypeOCIManifest + ", " + blobship.MediaTypeDockerManifest
@@ -150,7 +164,11 @@ func (c *Client) Resolve(ctx context.Context, image, platform string) (Resolved,
 	}
 	c.mu.Unlock()
 
+	began := time.Now()
 	res, err := c.resolve(ctx, image, platform)
+	if err == nil {
+		requestSeconds.Observe(time.Since(began).Seconds(), "resolve")
+	}
 	c.mu.Lock()
 	// Keep the cache small: drop what expired before adding.
 	for k, e := range c.cache {
@@ -334,10 +352,12 @@ func (c *Client) OpenBlob(ctx context.Context, image, digest string) (body io.Re
 	if err != nil {
 		return nil, 0, err
 	}
+	began := time.Now()
 	resp, err := c.do(ctx, c.blob, http.MethodGet, ref, "blobs/"+digest, "*/*")
 	if err != nil {
 		return nil, 0, err
 	}
+	requestSeconds.Observe(time.Since(began).Seconds(), "blob_open")
 	return resp.Body, resp.ContentLength, nil
 }
 
