@@ -137,8 +137,8 @@ On a node holding 304 images, 614 snapshots and 918 blobs, with containerd 2.2:
   read of the file before the commit caches it again, charged to containerd,
   as it was when containerd wrote it.
 - A few seconds after a burst of work ends, worker and controller hand freed
-  heap back to the OS when more than 1 MiB is
-  retained, so after a burst memory returns to near its idle level. kubelet's
+  heap, and garbage the burst left that no collection has reached yet, back
+  to the OS when more than 1 MiB is held, so after a burst memory returns to near its idle level. kubelet's
   probes (`/healthz`) and Prometheus' scrapes (`/metrics`) don't count as
   work: they arrive every few seconds and would keep putting it off.
 - Snapshot shipping (only when no node has a layer's blob, as with
@@ -209,7 +209,7 @@ network); find a healthy one with
 Run this on the stuck node:
 
 ```bash
-IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.13
+IMG=ghcr.io/hatam-abolghasemi/angry-duck-worker:1.14.14
 SRC=<healthy-worker-pod-ip>:18081
 TOKEN=<token from the angryduck-rescue-token secret>
 

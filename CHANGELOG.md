@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.14.14
+
+### Fixed
+
+- **Memory a burst of work used could stay after it ended.** A few seconds
+  after a burst, worker and controller hand back heap held for nothing when
+  more than 1 MiB is held, but only heap already freed by a collection
+  counted. A burst that ended before the next collection (most do: at
+  `GOGC=50` one runs only once the heap has grown by half its live size)
+  looked like nothing to free, and its garbage stayed until the next burst
+  or Go's slow background return: in a simulation of a worker with ~4 MiB
+  live, 1–2 MiB after an ordinary burst, up to 16 MiB after one with a few
+  big buffers. Garbage no collection has reached yet now counts too, so it
+  goes back the same way. The check reads four runtime counters instead of
+  two; nothing else runs, and no collection is added when there is nothing
+  to free.
+
 ## 1.14.13
 
 ### Fixed
