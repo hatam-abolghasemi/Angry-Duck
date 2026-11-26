@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,6 +37,8 @@ type fakeRegistry struct {
 	digestHdr   bool // send Docker-Content-Digest with manifests
 	layers      []string
 	diffIDs     []string
+	ranges      string // blobs: "" ignores Range (200), "honour" answers 206, "wrong" answers 206 from the wrong byte
+	rangeAsked  []string
 }
 
 func newFake(t *testing.T, scheme string) *fakeRegistry {
@@ -106,6 +111,21 @@ func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", f.contentType[ref])
 	if f.digestHdr && kind == "manifests" {
 		w.Header().Set("Docker-Content-Digest", ref)
+	}
+	if rng := r.Header.Get("Range"); kind == "blobs" && rng != "" {
+		f.rangeAsked = append(f.rangeAsked, rng)
+		from, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rng, "bytes="), "-"))
+		switch f.ranges {
+		case "honour", "wrong":
+			at := from
+			if f.ranges == "wrong" {
+				at = from - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", at, len(b)-1, len(b)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(b[at:])
+			return
+		}
 	}
 	_, _ = w.Write(b)
 }
@@ -233,6 +253,45 @@ func TestOpenBlobStreamsOneLayerWithAuth(t *testing.T) {
 	}
 	if _, _, err := c.OpenBlob(context.Background(), image, dig([]byte("absent"))); err == nil {
 		t.Fatal("expected an error for a missing blob")
+	}
+}
+
+// A download going on from a byte asks for the rest with a Range request,
+// and says where the body starts: there, or at 0 when the registry sends
+// the whole blob. A range starting elsewhere is refused.
+func TestOpenBlobFromAsksForTheRest(t *testing.T) {
+	for _, mode := range []string{"honour", "", "wrong"} {
+		f := newFake(t, "bearer")
+		f.ranges = mode
+		c, image := client(t, f)
+		body, start, _, err := c.OpenBlobFrom(context.Background(), image, f.layers[1], 2) // "app-gz"
+		if mode == "wrong" {
+			if err == nil {
+				body.Close()
+				t.Fatal("a range from the wrong byte was taken")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", mode, err)
+		}
+		b, _ := io.ReadAll(body)
+		body.Close()
+		want, wantStart := "p-gz", int64(2)
+		if mode == "" {
+			want, wantStart = "app-gz", 0
+		}
+		if string(b) != want || start != wantStart || len(f.rangeAsked) != 1 || f.rangeAsked[0] != "bytes=2-" {
+			t.Fatalf("%q: got %q from %d, asked %v", mode, b, start, f.rangeAsked)
+		}
+	}
+	if n, ok := RangeStart("bytes 100-199/200"); !ok || n != 100 {
+		t.Fatalf("RangeStart = %d %v", n, ok)
+	}
+	for _, bad := range []string{"", "bytes */200", "items 1-2/3", "bytes x-1/2"} {
+		if _, ok := RangeStart(bad); ok {
+			t.Fatalf("RangeStart(%q) accepted", bad)
+		}
 	}
 }
 

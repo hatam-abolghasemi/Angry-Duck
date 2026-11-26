@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -362,6 +363,45 @@ func (c *Client) OpenBlob(ctx context.Context, image, digest string) (body io.Re
 	return resp.Body, resp.ContentLength, nil
 }
 
+// OpenBlobFrom is OpenBlob from byte from on, to continue an interrupted
+// download: a Range request. start is where the body really starts: from
+// when the registry (or the storage it redirects to) honoured the range,
+// 0 when it sent the whole blob. size is the body's Content-Length, or -1.
+func (c *Client) OpenBlobFrom(ctx context.Context, image, digest string, from int64) (body io.ReadCloser, start, size int64, err error) {
+	ref, err := ParseRef(image)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	resp, err := c.doFrom(ctx, c.blob, http.MethodGet, ref, "blobs/"+digest, "*/*", from)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		got, ok := RangeStart(resp.Header.Get("Content-Range"))
+		if !ok || got != from {
+			resp.Body.Close()
+			return nil, 0, 0, fmt.Errorf("GET blob %s: asked for bytes from %d, got range %q", digest, from, resp.Header.Get("Content-Range"))
+		}
+		return resp.Body, from, resp.ContentLength, nil
+	}
+	return resp.Body, 0, resp.ContentLength, nil
+}
+
+// RangeStart reads the first byte position of a Content-Range header
+// ("bytes 100-199/200").
+func RangeStart(h string) (int64, bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(h), "bytes ")
+	if !ok {
+		return 0, false
+	}
+	first, _, ok := strings.Cut(rest, "-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(first), 10, 64)
+	return n, err == nil && n >= 0
+}
+
 // OpenManifest starts streaming one manifest or index of image's
 // repository by digest. Registries serve these under /manifests/, not
 // /blobs/.
@@ -462,6 +502,13 @@ func Availability(err error) string {
 // do sends method /v2/<repo>/<path> with hc, answering an auth challenge
 // once, and returns a 200 response for the caller to read and close.
 func (c *Client) do(ctx context.Context, hc *http.Client, method string, ref Ref, path, accept string) (*http.Response, error) {
+	return c.doFrom(ctx, hc, method, ref, path, accept, 0)
+}
+
+// doFrom is do asking for the body from byte from on (a Range request
+// when from > 0). The registry may answer 206 with that range or 200
+// with all of it; the caller tells which.
+func (c *Client) doFrom(ctx context.Context, hc *http.Client, method string, ref Ref, path, accept string, from int64) (*http.Response, error) {
 	u := "https://" + ref.APIHost + "/v2/" + ref.Repo + "/" + path
 	scope := "repository:" + ref.Repo + ":pull"
 	auth := c.cachedToken(ref.APIHost, scope)
@@ -473,6 +520,9 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method string, ref Ref
 		req.Header.Set("Accept", accept)
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
+		}
+		if from > 0 {
+			req.Header.Set("Range", "bytes="+strconv.FormatInt(from, 10)+"-")
 		}
 		resp, err := hc.Do(req)
 		if err != nil {
@@ -487,7 +537,7 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method string, ref Ref
 			}
 			continue
 		}
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode != http.StatusOK && !(from > 0 && resp.StatusCode == http.StatusPartialContent) {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 			resp.Body.Close()
 			return nil, &StatusError{Method: method, URL: u, Code: resp.StatusCode, Body: strings.TrimSpace(string(b))}
