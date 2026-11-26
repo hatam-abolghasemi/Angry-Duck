@@ -22,8 +22,11 @@ starting.
   the snapshot directories containerd prepared for it.
 - Host mounts (the content store, snapshots) must leave nothing behind that
   containerd can't handle: writes go into containerd's ingest under a lease,
-  are aborted on failure, and temporary snapshots carry a prefix that the
-  next worker cleans up (`pins.go`).
+  are aborted when containerd rejects them, and a spread transfer that stops
+  part-way leaves its ingest exactly as an interrupted pull leaves one, for
+  the next transfer of the blob to go on from (`resume.go`), until the
+  lease ends. Temporary snapshots carry a prefix that the next worker
+  cleans up (`pins.go`).
 - Real pulls stay with containerd. Angry Duck decides and delivers ahead of
   time; it is not in the data path of a pull containerd makes on its own,
   beyond the mirror serving what the nodes hold.

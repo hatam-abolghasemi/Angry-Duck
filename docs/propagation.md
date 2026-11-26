@@ -40,10 +40,12 @@ source:
   `SPREAD_RACE_PER_BLOB` (2) pulls per layer. A node with a bad route to the
   registry can't hold a heavy layer hostage.
 - **Races end on the receiving node.** A node pulling a layer from the
-  registry still gets it pushed from a peer as soon as a peer has it. When
-  either copy lands, the worker cancels the other right away, by itself.
-  Sometimes the registry is the slow path, sometimes the peer: the faster
-  one wins.
+  registry still gets it pushed from a peer as soon as a peer has it, if
+  that should finish clearly sooner (below). The peer copy then takes the
+  pull's bytes over and sends only the rest ([resuming](#transfers-that-stop-part-way)),
+  instead of a second copy from byte 0. Where both copies do run (a
+  late registry pull raced by another node's stream, controllers before
+  1.9.0), the worker cancels the slower one as soon as either lands.
 - **Registering the image.** When a node holds every layer (its blob, or
   its unpacked snapshot), the controller sends it the image's metadata it
   read from the registry, checked against its digests on arrival, and the
@@ -102,11 +104,13 @@ node about when it reaches the first, not one transfer later.
     sooner, judging its own link by its fastest finished transfer, or,
     without that history, keeping its stream while other transfers are
     coming in too (its link is then the limit, and a restart would only
-    share it).
+    share it). A restart goes on from the bytes the late stream already
+    has, so it only has to be faster for the rest.
 - *A second copy that wouldn't help:* a node already receiving a blob
   over one path is offered it over the other only if that should finish
-  clearly sooner, judged the same way. A node at its own link's limit
-  declines (asked again after 10 s) instead of splitting its link.
+  clearly sooner, judged the same way; a peer copy then takes the running
+  transfer's bytes over. A node at its own link's limit declines (asked
+  again after 10 s) instead of splitting its link.
 - **Mixed versions.** Workers say whether they stream in their reports. A
   worker without containerd's content store mounted, or older than 1.9.0,
   neither streams nor is streamed to.
@@ -132,6 +136,46 @@ sequenceDiagram
     Note over A: L2 lands from B: A cancels its own registry pull
     C->>A: finalize (metadata)
 ```
+
+## Transfers that stop part-way
+
+A transfer can stop before its blob is whole: the registry or a peer
+drops the connection, a stream is cut because its source stopped, a late
+transfer is restarted from a faster peer, or a peer copy takes over a slow
+registry pull. Until 1.15.0 its bytes were thrown away and the next
+transfer of the blob started from byte 0. Now they stay, and the next
+transfer of the blob on that node, from any source, asks for the rest only
+(a `Range` request) and goes on from there
+(`SPREAD_RESUME_ENABLED`, on by default).
+
+- **The blob is still the unit.** The controller still orders whole
+  blobs; a resume lives inside one node's transfer of one blob. A blob's
+  bytes are the same from every source, so the rest from one follows the
+  start from another, and containerd checks the whole blob's digest at
+  commit, as always. A blob that fails its check is aborted, and the next
+  transfer starts from 0.
+- **Taking over a running transfer.** A restart from a faster peer, or a
+  peer copy of a blob still coming from the registry, stops the running
+  transfer and takes its ingest over once it has stopped writing. A
+  stream reading the blob meanwhile goes on across the hand-off. Only
+  peers take over: a registry may not honour a range, and a race then
+  keeps both copies running, as before.
+- **Where the bytes stay.** In containerd's ingest, under the job's lease,
+  as an interrupted pull's do. containerd counts what is there by hashing
+  it when the next transfer opens it, then hashes the whole blob again at
+  commit: CPU on the node, in place of the network.
+- **Sources that can't skip.** A registry that ignores `Range`, or a peer
+  before 1.15.0 (during a rollout), sends the whole blob: what was there
+  is dropped and the transfer starts over, as before.
+- **A blob containerd already has**, in another namespace on the node,
+  is committed without fetching anything (before 1.15.0, a direct write
+  of one failed).
+- **Forgotten** when the blob lands, when the job ends (finalized, dropped
+  or superseded: its lease goes, and the bytes with it), or after an hour.
+- **Watching it:** `angryduck_worker_spread_resumed_bytes_total` counts
+  bytes not fetched again; `angryduck_worker_spread_discarded_bytes_total`
+  counts bytes received and thrown away, by reason. The Delivery tab's
+  *Resumed & thrown-away bytes* row shows both.
 
 ## Unpacking as layers arrive
 
@@ -278,7 +322,7 @@ still lacks, and every transfer moving right now. See
 
 `SPREAD_ENABLED`, `SPREAD_MAX_REGISTRY_PULLS`, `SPREAD_RACE_PER_BLOB`,
 `SPREAD_RETRY_AFTER_S`, `SPREAD_BACKOFF_MAX_S`, `SPREAD_TRANSFER_TIMEOUT_S`,
-`SPREAD_STREAM_ENABLED`, `SPREAD_STREAM_MIN_MB`, `SPREAD_STREAM_MAX_DEPTH`,
+`SPREAD_STREAM_ENABLED`, `SPREAD_RESUME_ENABLED`, `SPREAD_STREAM_MIN_MB`, `SPREAD_STREAM_MAX_DEPTH`,
 `SPREAD_EXPRESS_MAX_MB`, `SPREAD_SLOW_FACTOR`,
 and from propagation `PROPAGATE_INTERVAL_S`, `PROPAGATE_WINDOW_S`,
 `PROPAGATE_PER_SOURCE`,

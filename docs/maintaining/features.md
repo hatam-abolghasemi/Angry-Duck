@@ -25,17 +25,28 @@ The main path: a pushed image reaches every eligible node blob by blob.
   `spreadwhole.go`, `attach.go`).
 - **State:** the controller holds each running spread in memory; a spread
   that runs past its time expires. A worker holds a job's blobs under a
-  containerd lease until finalize, or until the lease expires.
+  containerd lease until finalize, or until the lease expires, and, with
+  `SPREAD_RESUME_ENABLED`, the ingest each stopped transfer left, by blob
+  (`partials`), until a transfer of the blob takes it, the blob lands or
+  the job ends.
 - **Shows:** Delivery and Image tabs; `angryduck_controller_spread*`,
   `angryduck_worker_spread*`, image history (`image_delivered`, `received_bytes`).
 - **Fails:** a node that can't get a blob is left to kubelet (it pulls as it
   would have); a transfer slower than expected is restarted from a faster
   source (`spreadguard.go`); a node fuller than `PROPAGATE_MAX_UTILIZATION`
-  gets nothing new.
+  gets nothing new. A transfer that stops part-way leaves its bytes, and the
+  next transfer of the blob goes on from them (`resume.go`); a restart, or a
+  peer copy of a blob still coming from the registry, takes the running
+  transfer's ingest over once it has stopped writing (`spreadXfer.after`,
+  `stopped`). The new transfer's feed is registered before the old one is
+  stopped, so a stream reading the blob never finds it gone in between.
 - **Tests:** `controller/spreader*_test.go`, `worker/spread*_test.go`
-  (`spread_e2e_test.go` runs whole spreads over HTTP), and the containerd
-  integration tests (`containerd_spread_parallel_integration_test.go`,
-  `containerd_stream*_integration_test.go`, `containerd_unpack_integration_test.go`).
+  (`spread_e2e_test.go` runs whole spreads over HTTP), `worker/resume_test.go`
+  (resumes, take-overs, sources that can't skip, rejected bytes, ranges
+  served), and the containerd integration tests
+  (`containerd_spread_parallel_integration_test.go`,
+  `containerd_stream*_integration_test.go`, `containerd_unpack_integration_test.go`,
+  `containerd_resume_integration_test.go`).
 
 ### Unpacking as layers land
 
