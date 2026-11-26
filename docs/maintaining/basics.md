@@ -239,8 +239,9 @@ Kubernetes' **working set** (`container_memory_working_set_bytes`, what
 before comparing.
 
 Go itself: the runtime keeps freed heap for reuse and returns it to the OS
-only gradually. After a burst of work the worker hands it back explicitly
-(`internal/memlimit/idle.go`). Angry Duck's own view of its memory, split by
+only gradually, and the garbage a burst leaves counts as heap in use until
+the next collection reaches it. After a burst of work the worker hands both
+back explicitly (`internal/memlimit/idle.go`). Angry Duck's own view of its memory, split by
 kind, is `angryduck_process_memory_bytes` ([Resource ledger](resources.md)).
 
 To look at a worker's cgroup on its node:

@@ -20,9 +20,9 @@ var minRetained atomic.Uint64
 // has freed for reuse and returns it only gradually; after a burst (a
 // rescue, a big listing) that is a few MiB held for nothing until the next
 // burst. Shortly after each burst of work ends (see Soon: every loop and
-// request ends with it), if more than retained bytes of freed heap are
-// held, it runs a collection and returns them. Nothing runs between
-// bursts. The check itself reads two counters; the collection costs well
+// request ends with it), if more than retained bytes are held for nothing
+// (heldForNothing), it runs a collection and returns them. Nothing runs
+// between bursts. The check itself reads four counters; the collection costs well
 // under a millisecond at this heap size. angryduck_process_memory_bytes
 // shows the effect. ctx and interval are unused, kept for callers.
 func ReleaseWhenIdle(ctx context.Context, interval time.Duration, retained uint64) {
@@ -35,12 +35,32 @@ func release() {
 	if min == 0 {
 		return // ReleaseWhenIdle isn't running
 	}
-	s := []metrics.Sample{{Name: "/memory/classes/heap/free:bytes"}, {Name: "/memory/classes/heap/unused:bytes"}}
-	metrics.Read(s)
-	if retained := s[0].Value.Uint64() + s[1].Value.Uint64(); retained > min {
+	if retained := heldForNothing(); retained > min {
 		debug.FreeOSMemory()
 		logging.Debugf("memlimit: released %d KiB of idle heap to the OS", retained/1024)
 	}
+}
+
+// heldForNothing is heap the process holds but doesn't use: heap already
+// free, plus objects allocated since the last collection beyond what that
+// collection found live, i.e. the garbage a burst left that no collection
+// has reached yet. Without the second part, a burst that ends before a
+// collection (most of them: at GOGC 50 one runs only once the heap has grown
+// by half its live size) looks like nothing to free, and its garbage stays
+// until the next burst.
+func heldForNothing() uint64 {
+	s := []metrics.Sample{
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/gc/heap/live:bytes"},
+	}
+	metrics.Read(s)
+	held := s[0].Value.Uint64() + s[1].Value.Uint64()
+	if objects, live := s[2].Value.Uint64(), s[3].Value.Uint64(); objects > live {
+		held += objects - live
+	}
+	return held
 }
 
 // quiet runs once things are quiet after a burst of work.

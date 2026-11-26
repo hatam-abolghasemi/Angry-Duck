@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"runtime/debug"
 	"runtime/metrics"
 	"testing"
 	"time"
@@ -35,6 +36,39 @@ func TestReleaseWhenIdleRunsNothingOnItsOwn(t *testing.T) {
 	if minRetained.Load() != 1<<20 {
 		t.Fatalf("threshold %d", minRetained.Load())
 	}
+}
+
+// Garbage a burst leaves before any collection reaches it is held for
+// nothing too: a burst that ends between two collections must still be
+// handed back.
+func TestSoonReleasesUncollectedGarbage(t *testing.T) {
+	old := quietAfter
+	quietAfter = 50 * time.Millisecond
+	defer func() { quietAfter = old }()
+	minRetained.Store(1 << 20)
+	defer minRetained.Store(0)
+	runtime.GC()
+	debug.FreeOSMemory()
+	// No collection runs during the burst or the wait: only the release
+	// itself may reach the garbage, as when a burst ends between two.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	for i := 0; i < 4; i++ {
+		sink = append(sink, make([]byte, 4<<20))
+	}
+	sink = nil
+	before := heapHeld()
+	Soon()
+	time.Sleep(300 * time.Millisecond)
+	if after := heapHeld(); after+8<<20 > before {
+		t.Fatalf("held %d KiB before, %d KiB after: a 16 MiB burst's garbage wasn't handed back", before>>10, after>>10)
+	}
+}
+
+// heapHeld is the heap memory taken from the OS and not handed back.
+func heapHeld() uint64 {
+	s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}, {Name: "/memory/classes/heap/unused:bytes"}, {Name: "/memory/classes/heap/free:bytes"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64() + s[1].Value.Uint64() + s[2].Value.Uint64()
 }
 
 func TestSoonReleasesAfterQuiet(t *testing.T) {

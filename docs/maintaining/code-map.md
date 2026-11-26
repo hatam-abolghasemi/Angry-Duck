@@ -81,7 +81,7 @@ Underneath:
 | `features` | The switch tree. |
 | `config` | `.env` loading and typed getters; values that can't be used fall back to the default with a warning. |
 | `metrics` | A small Prometheus registry: counters, gauges, "recent" gauges for events, process memory. |
-| `memlimit` | GOMEMLIMIT from the cgroup, GOGC 50, freed heap handed back after bursts, the cgroup's page cache and file records handed back after stream unpacks (`reclaim.go`, `memory.reclaim`). |
+| `memlimit` | GOMEMLIMIT from the cgroup, GOGC 50, freed heap and uncollected garbage handed back after bursts, the cgroup's page cache and file records handed back after stream unpacks (`reclaim.go`, `memory.reclaim`). |
 | `sharedtoken` | The bearer token between controller and workers. |
 | `kube` | The smallest Kubernetes client: pod list and watch, the worker's DaemonSet. |
 
