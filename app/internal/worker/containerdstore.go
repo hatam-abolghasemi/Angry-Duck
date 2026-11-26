@@ -209,7 +209,7 @@ func (s *ContainerdStore) OpenIngest(ref string) (*os.File, error) {
 // zero, wrote with the bytes containerd has written so far, each time
 // they grow. The bytes up to that count can be read from the ingest file.
 type writeObserver interface {
-	opened()
+	opened(at int64) // the ingest file holds the write's first at bytes
 	wrote(total int64)
 }
 
@@ -1298,12 +1298,49 @@ func (s *ContainerdStore) DeleteLease(ctx context.Context, id string) error {
 // mid-transfer) is restarted from zero, and a failed write is aborted
 // right away, so partial data never stays on disk.
 func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string, size int64, r io.Reader) (int64, error) {
+	res, err := s.WriteBlobFrom(ctx, lease, ref, dgst, size, fromStart(r), nil)
+	return res.Received, err
+}
+
+// BlobSource opens a blob's source from byte off. It returns the body and
+// the offset it really starts at: off, or 0 for a source that can only
+// send the whole blob.
+type BlobSource func(off int64) (body io.ReadCloser, start int64, err error)
+
+// fromStart is the BlobSource of a reader that holds the whole blob.
+func fromStart(r io.Reader) BlobSource {
+	return func(int64) (io.ReadCloser, int64, error) { return io.NopCloser(r), 0, nil }
+}
+
+// WriteResult says what one WriteBlobFrom did with the bytes.
+type WriteResult struct {
+	Received int64 // read from the source by this call
+	Resumed  int64 // already in the write under ref, kept from an earlier one
+	Dropped  int64 // were in the write under ref, dropped: the source could only start at 0
+	Kept     bool  // failed, and the write stays under ref (Resumed+Received bytes) for the next one
+	Present  bool  // containerd had every byte already (see commitPresent): committed, no source read
+}
+
+// ResumingStore writes a blob continuing an interrupted write.
+// ContainerdStore has it.
+type ResumingStore interface {
+	WriteBlobFrom(ctx context.Context, lease, ref, dgst string, size int64, open BlobSource, keep func(error) bool) (WriteResult, error)
+}
+
+// WriteBlobFrom is WriteBlob for a write that may continue an earlier,
+// interrupted one under ref: containerd says how far that one got, open is
+// asked for the rest from there, and the bytes go on after it. containerd
+// still checks the whole blob's digest at commit. When the write fails
+// before the commit, keep (nil: never) is asked whether to leave it under
+// ref for the next write to continue; a write containerd rejects (wrong
+// size or digest) is always aborted.
+func (s *ContainerdStore) WriteBlobFrom(ctx context.Context, lease, ref, dgst string, size int64, open BlobSource, keep func(error) bool) (res WriteResult, err error) {
 	d, err := digest.Parse(dgst)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	if s.directWrites && size >= directMin {
-		return s.writeDirect(ctx, lease, ref, d, size, r, writeObserverFrom(ctx))
+		return s.writeDirect(ctx, lease, ref, d, size, open, keep, writeObserverFrom(ctx))
 	}
 	ctx = leases.WithLease(s.ns(ctx), lease)
 	cs := s.client.ContentStore()
@@ -1316,10 +1353,10 @@ func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string
 	}
 	cw, err := content.OpenWriter(ctx, cs, content.WithRef(ref), content.WithDescriptor(ocispec.Descriptor{Digest: d, Size: size}))
 	if errdefs.IsAlreadyExists(err) {
-		return 0, hold() // committed meanwhile, by us or anyone: just hold it
+		return res, hold() // committed meanwhile, by us or anyone: just hold it
 	}
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	defer s.invalidate()
 	abort := func() {
@@ -1328,38 +1365,77 @@ func (s *ContainerdStore) WriteBlob(ctx context.Context, lease, ref, dgst string
 		_ = cs.Abort(actx, ref)
 		cancel()
 	}
-	if st, err := cw.Status(); err == nil && st.Offset > 0 {
+	var off int64
+	if st, err := cw.Status(); err == nil && st.Offset > 0 && st.Offset <= size {
+		off = st.Offset
+	}
+	if off == size {
+		return res, s.commitPresent(ctx, cw, lease, d, size, "api", func() {
+			actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			_ = cs.Abort(actx, ref)
+			cancel()
+		}, &res)
+	}
+	body, start, err := open(off)
+	if err != nil {
+		if off == 0 || keep == nil || !keep(err) {
+			abort()
+		} else {
+			cw.Close() // the ingest stays, under the lease
+			res.Kept = true
+		}
+		return res, err
+	}
+	defer body.Close()
+	if start != off {
+		res.Dropped = off
+		off = 0
+	}
+	if st, err := cw.Status(); err == nil && st.Offset > off {
 		if err := cw.Truncate(0); err != nil {
 			abort()
-			return 0, err
+			return res, err
 		}
 	}
+	res.Resumed = off
 	// Every Write is one synchronous round trip to containerd: batch them
 	// at 1 MiB, the same as snapshot staging.
 	var sink io.Writer = cw
 	if obs := writeObserverFrom(ctx); obs != nil {
-		obs.opened()
-		sink = &observedWriter{w: cw, obs: obs}
+		obs.opened(off)
+		sink = &observedWriter{w: cw, obs: obs, total: off}
 	}
 	bw, bwDone := chunkWriter(sink)
-	n, err := io.Copy(bw, io.LimitReader(r, size+1))
+	n, err := io.Copy(bw, io.LimitReader(body, size-off+1))
 	if err == nil {
 		err = bw.Flush()
 	}
 	bwDone()
-	if err == nil && n != size {
-		err = fmt.Errorf("got %d bytes, want %d", n, size)
+	res.Received = n
+	total := off + n
+	if err == nil && total != size {
+		err = fmt.Errorf("got %d bytes, want %d", total, size)
 	}
 	if err != nil {
+		// Through the API, containerd has what it acknowledged: a resume
+		// asks it how far that is.
+		if total <= size && total > 0 && keep != nil && keep(err) {
+			if st, serr := cw.Status(); serr == nil && st.Offset >= off {
+				res.Received = st.Offset - off // bytes still buffered here never reached it
+			}
+			cw.Close()
+			res.Kept = true
+			return res, err
+		}
 		abort()
-		return n, err
+		return res, err
 	}
 	committing := time.Now()
 	if err := cw.Commit(ctx, size, d); err != nil && !errdefs.IsAlreadyExists(err) {
 		abort()
-		return n, err
+		return res, err
 	}
 	observeBlobCommit("api", size, committing)
 	cw.Close()
-	return n, hold()
+	return res, hold()
 }

@@ -55,7 +55,7 @@ const (
 // streams that serve it.
 type feed struct {
 	ref     string
-	opened  bool  // the ingest file holds this write, from zero
+	opened  bool  // the ingest file holds this write, from byte 0 up to written
 	written int64 // bytes containerd has written so far
 	state   int
 	// readers are the streams reading this feed's ingest file, at the
@@ -82,8 +82,8 @@ type feedObserver struct {
 	f      *feed
 }
 
-func (o feedObserver) opened() {
-	o.s.feedUpdate(o.digest, o.f, func(f *feed) { f.opened, f.written = true, 0 })
+func (o feedObserver) opened(at int64) {
+	o.s.feedUpdate(o.digest, o.f, func(f *feed) { f.opened, f.written = true, at })
 }
 func (o feedObserver) wrote(total int64) {
 	o.s.feedUpdate(o.digest, o.f, func(f *feed) { f.written = total })
@@ -253,28 +253,37 @@ func (s *Spread) serveStream(w http.ResponseWriter, r *http.Request, dgst string
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Docker-Content-Digest", dgst)
 	w.Header().Set(StreamHeader, "1")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		return true
 	}
-	n, err := s.stream(r.Context(), w, dgst, size)
+	// A receiver going on from what it has gets the rest only.
+	from := rangeFrom(r, size)
+	if from > 0 {
+		partialHeaders(w, from, size)
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	end, err := s.stream(r.Context(), w, dgst, from, size)
+	n := end - from
 	spreadBytesTotal.Add(n, s.nodeID, "served")
 	spreadStreamedBytes.Add(n, s.nodeID)
 	if err != nil {
-		logging.Infof("angryduck-worker[%s]: spread: streaming %s to %s stopped after %d of %d bytes: %v", s.nodeID, dgst, r.RemoteAddr, n, size, err)
+		logging.Infof("angryduck-worker[%s]: spread: streaming %s to %s stopped after %d of %d bytes: %v", s.nodeID, dgst, r.RemoteAddr, n, size-from, err)
 		panic(http.ErrAbortHandler) // short body: the receiver's write fails
 	}
-	logging.Debugf("angryduck-worker[%s]: spread: streamed %s (%d bytes) to %s", s.nodeID, dgst, n, r.RemoteAddr)
+	logging.Debugf("angryduck-worker[%s]: spread: streamed %s (%d bytes from byte %d) to %s", s.nodeID, dgst, n, from, r.RemoteAddr)
 	return true
 }
 
 var errStreamSourceGone = errors.New("the transfer feeding the stream ended and the blob isn't here")
 
-// stream copies dgst to w from offset 0 to size, following whichever feed
-// has the bytes, then the committed blob. It returns the bytes sent.
-func (s *Spread) stream(ctx context.Context, w io.Writer, dgst string, size int64) (int64, error) {
+// stream copies dgst to w from offset from to size, following whichever
+// feed has the bytes, then the committed blob. It returns the offset it
+// got to.
+func (s *Spread) stream(ctx context.Context, w io.Writer, dgst string, from, size int64) (int64, error) {
 	var (
-		off  int64
+		off  = from
 		cur  *feed
 		file *os.File // cur's ingest file, or the committed blob
 		// pos is this stream's place among posFeed's readers, while it

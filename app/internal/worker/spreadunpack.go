@@ -354,7 +354,7 @@ func (s *Spread) withBlobStream(jctx context.Context, l LayerSpec, fn func(conte
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, err := s.stream(ctx, pw, l.Digest, l.Size)
+		_, err := s.stream(ctx, pw, l.Digest, 0, l.Size)
 		pw.CloseWithError(err) // nil: the whole blob, then EOF
 	}()
 	err := fn(ctx, pr)

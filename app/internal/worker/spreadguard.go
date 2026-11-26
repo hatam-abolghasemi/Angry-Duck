@@ -13,8 +13,9 @@ import (
 // how fast its transfer is going.
 
 // replaceMargin: restart only when the new source should finish at least
-// this much sooner than the running transfer (a restart throws away what
-// arrived so far).
+// this much sooner than the running transfer. A restart that takes the
+// running transfer's bytes over (see resume.go) fetches only the rest; one
+// that can't throws away what arrived so far.
 const replaceMargin = 1.25
 
 // rateWindow: the running transfer is judged on its recent speed, not its
@@ -27,9 +28,25 @@ const rateWindow = 3 * time.Second
 type xferProgress struct {
 	mu    sync.Mutex
 	began time.Time
+	base  int64 // bytes already in its ingest when it started writing (resumed)
 	got   int64
 	marks [4]progressMark // every ~rateWindow/2, oldest first once full
 	n     int
+}
+
+// resumedAt records that the transfer's write goes on from byte base.
+func (p *xferProgress) resumedAt(base int64) {
+	p.mu.Lock()
+	p.base = base
+	p.mu.Unlock()
+}
+
+// have returns how many bytes of the blob its ingest holds: resumed ones
+// and received ones.
+func (p *xferProgress) have() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.base + p.got
 }
 
 type progressMark struct {
@@ -129,12 +146,15 @@ func (r *progressReader) Read(b []byte) (int, error) {
 
 // keepRunning decides a Replace order: keep the running transfer unless
 // restarting at expect bytes per second should finish clearly sooner.
-func keepRunning(p *xferProgress, size int64, expect float64, now time.Time) (bool, string) {
-	got, rate := p.state(now)
+// kept is how many of the bytes the running transfer has the restart
+// wouldn't fetch again (it goes on from them; 0 when it starts over).
+func keepRunning(p *xferProgress, size, kept int64, expect float64, now time.Time) (bool, string) {
+	_, rate := p.state(now)
+	got := p.have()
 	if expect <= 0 {
 		return true, "keeping: no room to expect a faster restart"
 	}
-	restart := float64(size) / expect
+	restart := float64(size-kept) / expect
 	if rate <= 0 {
 		return false, fmt.Sprintf("stalled after %d of %d bytes; restarting should take %.1fs", got, size, restart)
 	}

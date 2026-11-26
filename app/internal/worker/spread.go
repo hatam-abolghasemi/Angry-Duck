@@ -23,6 +23,7 @@ import (
 	"angryduck/internal/memlimit"
 	"angryduck/internal/metrics"
 	"angryduck/internal/model"
+	"angryduck/internal/registryclient"
 	"angryduck/internal/sharedtoken"
 )
 
@@ -142,8 +143,14 @@ type Spread struct {
 	ingest   IngestStore
 	streamMu sync.Mutex
 	arriving map[string]*arriving // by digest: blobs coming in now
-	replaced atomic.Int64         // restarts from a faster source, naming their ingests
+	refs     atomic.Int64         // names every transfer's ingest apart
 	peakRecv float64              // fastest finished transfer here, bytes/s: what this node's link takes; under mu
+
+	// Resuming (see resume.go): nil resumer when the store can't continue
+	// a write. partials are the ingests transfers stopped part-way left
+	// for the next transfer of their blob, by digest, under mu.
+	resumer  ResumingStore
+	partials map[string]partial
 
 	// Unpacking layers as they arrive (see spreadunpack.go): nil applier
 	// when off.
@@ -174,14 +181,21 @@ type spreadXfer struct {
 	job, digest, path string
 	ref               string // its ingest
 	cancel            context.CancelFunc
-	cancelled         atomic.Bool // cancelled on purpose: race lost, job dropped or replaced
-	feed              *feed       // what peers stream from while it runs; nil when this node can't stream
+	cancelled         atomic.Bool  // cancelled on purpose: why says why
+	why               atomic.Int32 // a stop* reason, once cancelled
+	feed              *feed        // what peers stream from while it runs; nil when this node can't stream
 	progress          xferProgress
+	// stopped is closed once the transfer no longer writes its ingest.
+	// after is the transfer it took the ingest over from (handOff): it
+	// writes only once that one has stopped.
+	stopped chan struct{}
+	after   *spreadXfer
 }
 
-// spreadRef names the ingest of a spread transfer of dgst over path.
-func spreadRef(path, dgst string) string {
-	return "angryduck-spread-" + path + "-" + strings.TrimPrefix(dgst, "sha256:")
+// spreadRef names the ingest of a spread transfer of dgst over path: n
+// sets transfers of this process apart, epoch apart from a previous one's.
+func (s *Spread) spreadRef(path, dgst string) string {
+	return "angryduck-spread-" + path + "-" + strings.TrimPrefix(dgst, "sha256:") + "-" + s.epoch + "-" + strconv.FormatInt(s.refs.Add(1), 10)
 }
 
 // xferKey names a running transfer: one blob over one path.
@@ -236,9 +250,13 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 		finalizing: newKeyedLock(),
 		arriving:   map[string]*arriving{},
 		unpacks:    map[string]*unpackJob{},
+		partials:   map[string]partial{},
 	}
 	if is, ok := store.(IngestStore); ok && is.CanStream() {
 		sp.ingest = is
+	}
+	for _, r := range discardReasons {
+		spreadDiscardedBytes.Add(0, nodeID, r)
 	}
 	return sp
 }
@@ -318,9 +336,14 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	key := xferKey{o.Digest, o.Path}
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-	x := &spreadXfer{job: o.Job, digest: o.Digest, path: o.Path, ref: spreadRef(o.Path, o.Digest), cancel: cancel}
+	x := &spreadXfer{job: o.Job, digest: o.Digest, path: o.Path, ref: s.spreadRef(o.Path, o.Digest), cancel: cancel, stopped: make(chan struct{})}
 	x.progress.start(time.Now())
+	now := time.Now()
 	s.mu.Lock()
+	// prev is the running transfer of the blob this one stops: restarted
+	// from a faster source, or taken over.
+	var prev *spreadXfer
+	var why string
 	if old, running := s.xfers[key]; running {
 		if !o.Replace {
 			s.mu.Unlock()
@@ -328,40 +351,65 @@ func (s *Spread) HandleFetch(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Reason: "already fetching " + o.Digest + " from " + o.Path})
 			return
 		}
-		keep, why := keepRunning(&old.progress, o.Size, s.expectLocked(old, o.ExpectRate, time.Now()), time.Now())
+		keep, reason := keepRunning(&old.progress, o.Size, s.keptFor(old, o.Path), s.expectLocked(old, o.ExpectRate, now), now)
 		if keep {
 			s.mu.Unlock()
 			cancel()
-			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Kept: true, Reason: why})
+			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Kept: true, Reason: reason})
 			return
 		}
 		// Restart from the faster source. The old transfer reports its
-		// own end (cancelled, under its own ID); its ingest may still be
-		// held while it aborts, so this one writes under another ref.
-		old.cancelled.Store(true)
-		old.cancel()
-		x.ref = fmt.Sprintf("%s-r%d", x.ref, s.replaced.Add(1))
-		logging.Infof("angryduck-worker[%s]: spread: restarting %s from %s: %s", s.nodeID, o.Digest, o.Peer.NodeID, why)
+		// own end (cancelled, under its own ID).
+		prev, why = old, reason
 	}
 	// The blob is already coming over the other path: start this second
 	// copy only if it should finish clearly sooner (a node whose own link
 	// is the limit would only split it). Orders without ExpectRate, from
 	// controllers before 1.9.0, race as before.
 	if other := s.xfers[xferKey{o.Digest, otherPath(o.Path)}]; other != nil && o.ExpectRate > 0 && !o.Replace {
-		if keep, why := keepRunning(&other.progress, o.Size, s.expectLocked(other, o.ExpectRate, time.Now()), time.Now()); keep {
+		keep, reason := keepRunning(&other.progress, o.Size, s.keptFor(other, o.Path), s.expectLocked(other, o.ExpectRate, now), now)
+		switch {
+		case keep:
 			s.mu.Unlock()
 			cancel()
-			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Kept: true, Reason: why})
+			writeJSON(w, http.StatusConflict, model.SpreadFetchAck{Kept: true, Reason: reason})
 			return
+		case s.handsOff(o.Path):
+			// A hand-off, not a race: the other copy stops, and this one
+			// goes on from its bytes instead of fetching them again.
+			prev, why = other, reason
 		}
+	}
+	// Its ingest: the one it takes over (a peer goes on from those
+	// bytes), else what an earlier transfer of the blob left part-way,
+	// else its own, new one.
+	if prev != nil && s.handsOff(o.Path) {
+		x.ref, x.after = prev.ref, prev
+	} else {
+		s.takePartialLocked(x)
 	}
 	s.xfers[key] = x
 	s.activeLocked(o.Path)
-	s.pruneJobsLocked(time.Now())
-	s.mu.Unlock()
-	// Streamable from the moment the order is accepted: the controller
-	// may send peers here as soon as it sees the 202.
+	s.pruneJobsLocked(now)
+	// Streamable from the moment the order is accepted (the controller
+	// may send peers here as soon as it sees the 202), and before the
+	// transfer it replaces stops: a stream of the blob never finds it
+	// gone in between.
 	x.feed = s.feedStart(o.Digest, x.ref, o.Size)
+	switch {
+	case prev == nil:
+	case x.after != nil:
+		prev.stop(stopHandOff)
+		if prev.path == o.Path {
+			logging.Infof("angryduck-worker[%s]: spread: restarting %s from %s, going on from its %d bytes: %s", s.nodeID, o.Digest, o.Peer.NodeID, prev.progress.have(), why)
+		} else {
+			logging.Infof("angryduck-worker[%s]: spread: %s goes on from %s instead of the %s, from its %d bytes: %s", s.nodeID, o.Digest, o.Peer.NodeID, prev.path, prev.progress.have(), why)
+		}
+	default:
+		prev.stop(stopRestart)
+		logging.Infof("angryduck-worker[%s]: spread: restarting %s from %s: %s", s.nodeID, o.Digest, o.Peer.NodeID, why)
+	}
+	s.mu.Unlock()
 	// Its layer may be unpacked while it arrives (stream unpacking).
 	s.arrives(o.Job, o)
 
@@ -401,6 +449,7 @@ func (s *Spread) pruneJobsLocked(now time.Time) {
 			delete(s.jobs, id)
 		}
 	}
+	s.forgetPartialsLocked("", now)
 	s.pruneUnpacksLocked(now)
 }
 
@@ -450,7 +499,9 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	defer s.wg.Done()
 	defer memlimit.Soon() // its buffers are garbage now
 	start := time.Now()
-	n, upstream, err := s.fetch(ctx, x, o)
+	w, upstream, err := s.fetch(ctx, x, o)
+	n := w.Received
+	close(x.stopped) // its ingest is free for a transfer taking it over
 	x.cancel()
 	took := time.Since(start)
 	// Before the other path is cancelled below: streams then go on from
@@ -460,7 +511,9 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	result := model.SpreadResultOK
 	switch {
 	case err == nil:
-		observeBlobFetch(o.Path, o.Size, took)
+		if w.Resumed == 0 && !w.Present {
+			observeBlobFetch(o.Path, o.Size, took)
+		}
 		// Won: stop the other path if it is fetching this same blob.
 		s.mu.Lock()
 		if n >= recvRateMinBytes && took > 0 {
@@ -469,15 +522,22 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 			}
 		}
 		if other := s.xfers[xferKey{o.Digest, otherPath(o.Path)}]; other != nil {
-			other.cancelled.Store(true)
-			other.cancel()
+			other.stop(stopOtherPath)
+		}
+		// Nothing left to continue: the blob is here. Bytes another
+		// transfer left for it, which this one didn't go on from, go.
+		if p, ok := s.partials[o.Digest]; ok {
+			delete(s.partials, o.Digest)
+			spreadDiscardedBytes.Add(p.bytes, s.nodeID, "unused")
 		}
 		s.mu.Unlock()
+		spreadResumedBytes.Add(w.Resumed, s.nodeID, o.Path)
 	case x.cancelled.Load():
 		result = model.SpreadResultCancelled
 	default:
 		result = model.SpreadResultFailed
 	}
+	s.settle(x, o, w, err)
 
 	s.mu.Lock()
 	if key := (xferKey{o.Digest, o.Path}); s.xfers[key] == x {
@@ -497,9 +557,13 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	switch result {
 	case model.SpreadResultOK:
 		s.landed(o.Job, o)
-		logging.Infof("angryduck-worker[%s]: spread: got %s (%d bytes) from %s in %s", s.nodeID, o.Digest, n, from, took.Round(time.Millisecond))
+		if w.Resumed > 0 {
+			logging.Infof("angryduck-worker[%s]: spread: got %s (%d bytes, %d of them kept from before) from %s in %s", s.nodeID, o.Digest, n+w.Resumed, w.Resumed, from, took.Round(time.Millisecond))
+		} else {
+			logging.Infof("angryduck-worker[%s]: spread: got %s (%d bytes) from %s in %s", s.nodeID, o.Digest, n, from, took.Round(time.Millisecond))
+		}
 	case model.SpreadResultCancelled:
-		logging.Debugf("angryduck-worker[%s]: spread: stopped fetching %s from %s after %d bytes: it arrived another way first", s.nodeID, o.Digest, from, n)
+		logging.Debugf("angryduck-worker[%s]: spread: stopped fetching %s from %s after %d bytes: %s", s.nodeID, o.Digest, from, n, stopReason(x.why.Load()))
 	default:
 		done.Error = err.Error()
 		done.Upstream = upstream
@@ -512,62 +576,118 @@ func (s *Spread) run(ctx context.Context, x *spreadXfer, o model.SpreadFetch) {
 	s.report(done)
 }
 
-// fetch streams the blob from its source into the content store.
-// upstream is set when a stream from a peer still receiving the blob
-// failed on the peer's side (see SpreadDone.Upstream).
-func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) (n int64, upstream bool, err error) {
+// fetch streams the blob from its source into the content store, going on
+// from what an earlier transfer of it left here when it can. upstream is
+// set when a stream from a peer still receiving the blob failed on the
+// peer's side (see SpreadDone.Upstream).
+func (s *Spread) fetch(ctx context.Context, x *spreadXfer, o model.SpreadFetch) (w WriteResult, upstream bool, err error) {
+	if x.after != nil {
+		// Taking over an ingest: write only once its last writer stopped
+		// (it was stopped for this one, so that is soon). Even when this
+		// one is stopped meanwhile: a transfer taking over from it in turn
+		// waits on this one alone.
+		<-x.after.stopped
+		if err := ctx.Err(); err != nil {
+			return w, false, err
+		}
+	}
 	lease, err := s.lease(ctx, o.Job)
 	if err != nil {
-		return 0, false, err
+		return w, false, err
 	}
-	var body io.ReadCloser
-	var length int64
-	opening := time.Now()
-	if o.Path == model.SpreadPathRegistry {
-		body, length, err = s.registry.OpenBlob(ctx, imageref.Normalize(o.Image), o.Digest)
-	} else {
-		body, length, err = s.openPeer(ctx, o.Peer.Address, o.Digest)
-	}
-	if err != nil {
-		return 0, o.Stream && ctx.Err() == nil, err
-	}
-	observeBlobOpen(o.Path, opening)
-	defer body.Close()
-	if length >= 0 && length != o.Size {
-		return 0, false, fmt.Errorf("source announced %d bytes, want %d", length, o.Size)
-	}
-	var src io.Reader = &progressReader{r: body, p: &x.progress}
 	var tracker *readTracker
-	if o.Stream {
-		tracker = &readTracker{r: src}
-		src = tracker
+	var openErr error // the source couldn't be opened
+	open := func(off int64) (io.ReadCloser, int64, error) {
+		opening := time.Now()
+		body, start, length, err := s.openFrom(ctx, o, off)
+		if err != nil {
+			openErr = err
+			return nil, 0, err
+		}
+		observeBlobOpen(o.Path, opening)
+		if length >= 0 && length != o.Size-start {
+			body.Close()
+			return nil, 0, fmt.Errorf("source announced %d bytes from byte %d, want %d", length, start, o.Size-start)
+		}
+		x.progress.resumedAt(start)
+		var src io.Reader = &progressReader{r: body, p: &x.progress}
+		if o.Stream {
+			tracker = &readTracker{r: src}
+			src = tracker
+		}
+		return readCloser2{src, body}, start, nil
 	}
 	if x.feed != nil {
 		ctx = withWriteObserver(ctx, feedObserver{s: s, digest: o.Digest, f: x.feed})
 	}
-	n, err = s.store.WriteBlob(ctx, lease, x.ref, o.Digest, o.Size, src)
-	if err != nil && tracker != nil && tracker.failed() && !x.cancelled.Load() {
+	if s.resumer != nil {
+		w, err = s.resumer.WriteBlobFrom(ctx, lease, x.ref, o.Digest, o.Size, open, x.keep)
+	} else {
+		var body io.ReadCloser
+		if body, _, err = open(0); err == nil {
+			w.Received, err = s.store.WriteBlob(ctx, lease, x.ref, o.Digest, o.Size, body)
+			body.Close()
+		}
+	}
+	switch {
+	case err != nil && openErr != nil:
+		upstream = o.Stream && ctx.Err() == nil
+	case err != nil && tracker != nil && tracker.failed() && !x.cancelled.Load():
 		upstream = true
 	}
-	return n, upstream, err
+	return w, upstream, err
 }
 
-func (s *Spread) openPeer(ctx context.Context, addr, dgst string) (io.ReadCloser, int64, error) {
+// readCloser2 reads from r and closes c.
+type readCloser2 struct {
+	io.Reader
+	c io.Closer
+}
+
+func (r readCloser2) Close() error { return r.c.Close() }
+
+// openFrom opens o's source from byte off: start is where the body really
+// starts (off, or 0 from a source that can only send it whole), length the
+// body's announced size or -1.
+func (s *Spread) openFrom(ctx context.Context, o model.SpreadFetch, off int64) (body io.ReadCloser, start, length int64, err error) {
+	if o.Path == model.SpreadPathRegistry {
+		if ro, ok := s.registry.(RangeOpener); ok && off > 0 {
+			return ro.OpenBlobFrom(ctx, imageref.Normalize(o.Image), o.Digest, off)
+		}
+		body, length, err = s.registry.OpenBlob(ctx, imageref.Normalize(o.Image), o.Digest)
+		return body, 0, length, err
+	}
+	return s.openPeer(ctx, o.Peer.Address, o.Digest, off, o.Size)
+}
+
+// openPeer asks a peer for blob dgst of size bytes from byte off (a Range
+// request when off > 0). Peers before 1.15.0 send it whole: start is 0.
+func (s *Spread) openPeer(ctx context.Context, addr, dgst string, off, size int64) (body io.ReadCloser, start, length int64, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/spread/content/"+dgst, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	sharedtoken.Set(req, s.token)
+	if off > 0 {
+		req.Header.Set("Range", "bytes="+strconv.FormatInt(off, 10)+"-")
+	}
 	resp, err := s.peers.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		msg := readError(resp)
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return resp.Body, 0, resp.ContentLength, nil
+	case resp.StatusCode == http.StatusPartialContent && off > 0:
+		if got, ok := registryclient.RangeStart(resp.Header.Get("Content-Range")); ok && got == off {
+			return resp.Body, off, resp.ContentLength, nil
+		}
 		resp.Body.Close()
-		return nil, 0, fmt.Errorf("peer %s: %s", addr, msg)
+		return nil, 0, 0, fmt.Errorf("peer %s: asked for %s from byte %d, got range %q", addr, dgst, off, resp.Header.Get("Content-Range"))
 	}
-	return resp.Body, resp.ContentLength, nil
+	msg := readError(resp)
+	resp.Body.Close()
+	return nil, 0, 0, fmt.Errorf("peer %s: %s", addr, msg)
 }
 
 // report tells the controller a transfer ended. A lost report only costs
@@ -623,6 +743,24 @@ func (s *Spread) HandleContent(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		return
 	}
+	// A receiver going on from what it has: the rest only.
+	if from := rangeFrom(r, size); from > 0 {
+		if err := skipTo(body, from); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		partialHeaders(w, from, size)
+		n, err := copyToWriter(w, &io.LimitedReader{R: body, N: size - from})
+		spreadBytesTotal.Add(n, s.nodeID, "served")
+		if err == nil && n < size-from {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			logging.Warnf("angryduck-worker[%s]: spread: serving %s from byte %d to %s failed after %d bytes: %v", s.nodeID, dgst, from, r.RemoteAddr, n, err)
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
 	n, err := serveBody(w, body, size)
 	spreadBytesTotal.Add(n, s.nodeID, "served")
 	if err != nil {
@@ -647,8 +785,7 @@ func (s *Spread) HandleDrop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	for _, x := range s.xfers {
 		if x.job == d.Job {
-			x.cancelled.Store(true)
-			x.cancel()
+			x.stop(stopDropped)
 		}
 	}
 	s.mu.Unlock()
@@ -664,6 +801,7 @@ func (s *Spread) release(ctx context.Context, job string) {
 	if !s.busyLocked(job) {
 		delete(s.jobs, job)
 	}
+	s.forgetPartialsLocked(job, time.Now())
 	s.mu.Unlock()
 	if j == nil {
 		return

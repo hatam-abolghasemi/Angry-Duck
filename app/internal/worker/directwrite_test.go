@@ -50,7 +50,7 @@ func pageCacheDir(t *testing.T) string {
 // holdAt is a write observer with a reader stuck at an offset.
 type holdAt struct{ from, written int64 }
 
-func (h *holdAt) opened()           {}
+func (h *holdAt) opened(int64)      {}
 func (h *holdAt) wrote(total int64) { h.written = total }
 func (h *holdAt) holdFrom() int64   { return h.from }
 

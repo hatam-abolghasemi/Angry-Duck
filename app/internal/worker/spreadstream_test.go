@@ -54,7 +54,7 @@ func (s *ingestStore) WriteBlob(ctx context.Context, lease, ref, d string, size 
 	defer f.Close()
 	obs := writeObserverFrom(ctx)
 	if obs != nil {
-		obs.opened()
+		obs.opened(0)
 	}
 	var all bytes.Buffer
 	chunk := s.chunk

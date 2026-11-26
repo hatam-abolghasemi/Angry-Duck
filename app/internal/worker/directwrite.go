@@ -68,7 +68,7 @@ const (
 
 var directWritesTotal = metrics.NewCounterVec(
 	"angryduck_worker_direct_writes_total",
-	"Blobs written straight into containerd's ingest file, by result: ok, or failed (the write was aborted, as a failed transfer through the API would be).",
+	"Blobs written straight into containerd's ingest file, by result: ok, failed (the write was aborted, as a failed transfer through the API would be), or kept (a spread transfer stopped part-way, and its bytes stay in the ingest for the next transfer of that blob to continue).",
 	"node", "result",
 )
 
@@ -97,7 +97,7 @@ func (s *ContainerdStore) EnableDirectWrites(ctx context.Context, nodeID string)
 		return fmt.Errorf("creating the probe's lease: %w", err)
 	}
 	defer func() { _ = s.DeleteLease(context.WithoutCancel(ctx), lease) }()
-	if _, err := s.writeDirect(ctx, lease, lease, d, int64(len(b)), bytes.NewReader(b), nil); err != nil {
+	if _, err := s.writeDirect(ctx, lease, lease, d, int64(len(b)), fromStart(bytes.NewReader(b)), nil, nil); err != nil {
 		return err
 	}
 	if have, _ := s.HasBlob(d.String()); !have {
@@ -111,17 +111,18 @@ func (s *ContainerdStore) EnableDirectWrites(ctx context.Context, nodeID string)
 // files.
 func (s *ContainerdStore) DirectWrites() bool { return s.directWrites }
 
-// writeDirect is WriteBlob's direct path (see the top of this file).
-func (s *ContainerdStore) writeDirect(ctx context.Context, lease, ref string, d digest.Digest, size int64, r io.Reader, obs writeObserver) (n int64, err error) {
+// writeDirect is WriteBlob's direct path (see the top of this file), and
+// WriteBlobFrom's: open and keep as there.
+func (s *ContainerdStore) writeDirect(ctx context.Context, lease, ref string, d digest.Digest, size int64, open BlobSource, keep func(error) bool, obs writeObserver) (res WriteResult, err error) {
 	ctx = leases.WithLease(s.ns(ctx), lease)
 	cs := s.client.ContentStore()
 	desc := ocispec.Descriptor{Digest: d, Size: size}
 	cw, err := content.OpenWriter(ctx, cs, content.WithRef(ref), content.WithDescriptor(desc))
 	if errdefs.IsAlreadyExists(err) {
-		return 0, s.holdContent(ctx, lease, d.String())
+		return res, s.holdContent(ctx, lease, d.String())
 	}
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	defer s.invalidate()
 	abort := func() {
@@ -129,56 +130,96 @@ func (s *ContainerdStore) writeDirect(ctx context.Context, lease, ref string, d 
 		_ = cs.Abort(actx, ref)
 		cancel()
 	}
-	if st, err := cw.Status(); err == nil && st.Offset > 0 {
-		if err := cw.Truncate(0); err != nil {
-			cw.Close()
-			abort()
-			return 0, err
-		}
+	// How far an earlier, interrupted write under ref got: containerd
+	// tells, having hashed what is there.
+	var off int64
+	if st, err := cw.Status(); err == nil && st.Offset > 0 && st.Offset <= size {
+		off = st.Offset
 	}
+	if off == size {
+		return res, s.commitPresent(ctx, cw, lease, d, size, "direct", abort, &res)
+	}
+	body, start, err := open(off)
+	if err != nil {
+		cw.Close()
+		if off == 0 || keep == nil || !keep(err) {
+			abort()
+		} else {
+			res.Kept = true
+		}
+		return res, err
+	}
+	defer body.Close()
+	if start != off {
+		// The source starts at 0: what is here goes.
+		res.Dropped = off
+		off = 0
+	}
+	res.Resumed = off
 	// Close it (the ingest stays, under the lease) so containerd holds no
 	// writer of its own while ours fills the file.
 	if err := cw.Close(); err != nil {
 		abort()
-		return 0, err
+		return res, err
 	}
+	keepIt := false // a failure leaves the write for a resume
 	defer func() {
-		if err != nil {
+		switch {
+		case err == nil:
+			directWritesTotal.Inc(s.nodeID, "ok")
+		case keepIt:
+			res.Kept = true
+			directWritesTotal.Inc(s.nodeID, "kept")
+		default:
 			abort()
 			directWritesTotal.Inc(s.nodeID, "failed")
-		} else {
-			directWritesTotal.Inc(s.nodeID, "ok")
 		}
 	}()
 	path, err := s.ingestDataPath(ref)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
-	if st, err := f.Stat(); err != nil || st.Size() != 0 {
+	// The file holds what containerd counted, or more (bytes it hadn't
+	// hashed, or a write starting over): cut it to where this one goes on.
+	// containerd's own Truncate through the API takes effect only with a
+	// write through it, which a direct write never makes. It holds no
+	// writer now, and hashes the file again when reopened.
+	if err := f.Truncate(off); err != nil {
+		f.Close()
+		return res, err
+	}
+	if st, err := f.Stat(); err != nil || st.Size() != off {
 		f.Close()
 		if err == nil {
-			err = fmt.Errorf("ingest file of %s isn't empty (%d bytes)", ref, st.Size())
+			err = fmt.Errorf("ingest file of %s holds %d bytes, want %d", ref, st.Size(), off)
 		}
-		return 0, err
+		return res, err
 	}
 	if obs != nil {
-		obs.opened()
+		obs.opened(off)
 	}
-	pw := &pageWindow{f: f, obs: obs}
-	n, err = pw.copyFrom(io.LimitReader(r, size+1))
+	pw := &pageWindow{f: f, obs: obs, off: off, flushed: off, dropped: off}
+	total, err := pw.copyFrom(io.LimitReader(body, size-off+1))
 	pw.release()
+	res.Received = total - off
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil && n != size {
-		err = fmt.Errorf("got %d bytes, want %d", n, size)
+	switch {
+	case err == nil && total > size:
+		err = fmt.Errorf("got %d bytes, want %d", total, size)
+	case err == nil && total < size:
+		err = fmt.Errorf("got %d bytes, want %d", total, size)
+		keepIt = keep != nil && total > 0 && keep(err)
+	case err != nil:
+		keepIt = keep != nil && total > 0 && keep(err)
 	}
 	if err != nil {
-		return n, err
+		return res, err
 	}
 	// Reopen: containerd reads the file and hashes it, then commits.
 	cw, err = content.OpenWriter(ctx, cs, content.WithRef(ref), content.WithDescriptor(desc))
@@ -187,23 +228,41 @@ func (s *ContainerdStore) writeDirect(ctx context.Context, lease, ref string, d 
 		// other path of a spread, a pull): ours is spare. As through the
 		// API, that is success: drop our write, hold the blob.
 		abort()
-		return n, s.holdContent(ctx, lease, d.String())
+		return res, s.holdContent(ctx, lease, d.String())
 	}
 	if err != nil {
-		return n, err
+		return res, err
 	}
 	if st, serr := cw.Status(); serr == nil && st.Offset != size {
 		cw.Close()
-		return n, fmt.Errorf("containerd resumed %s at %d bytes, want %d", ref, st.Offset, size)
+		return res, fmt.Errorf("containerd resumed %s at %d bytes, want %d", ref, st.Offset, size)
 	}
 	committing := time.Now()
 	if err := cw.Commit(ctx, size, d); err != nil && !errdefs.IsAlreadyExists(err) {
 		cw.Close()
-		return n, err
+		return res, err
 	}
 	observeBlobCommit("direct", size, committing)
 	cw.Close()
-	return n, s.holdContent(ctx, lease, d.String())
+	return res, s.holdContent(ctx, lease, d.String())
+}
+
+// commitPresent commits a write whose every byte containerd already has,
+// without reading any source: the blob is in containerd's store under
+// another namespace (containerd shares it), or an earlier write finished
+// without its commit. containerd still checks the digest; a wrong one is
+// aborted, and the next write starts from 0.
+func (s *ContainerdStore) commitPresent(ctx context.Context, cw content.Writer, lease string, d digest.Digest, size int64, mode string, abort func(), res *WriteResult) error {
+	res.Present = true
+	committing := time.Now()
+	if err := cw.Commit(ctx, size, d); err != nil && !errdefs.IsAlreadyExists(err) {
+		cw.Close()
+		abort()
+		return err
+	}
+	observeBlobCommit(mode, size, committing)
+	cw.Close()
+	return s.holdContent(ctx, lease, d.String())
 }
 
 // holdContent adds blob dgst to lease (already there is fine).

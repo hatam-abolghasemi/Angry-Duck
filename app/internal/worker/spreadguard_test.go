@@ -24,19 +24,19 @@ func TestKeepRunningJudgesOnRecentSpeed(t *testing.T) {
 	for s := 1; s <= 5; s++ {
 		at(&p, float64(s), int64(s)*10<<20)
 	}
-	if keep, why := keepRunning(&p, size, 100<<20, t0.Add(5*time.Second)); keep {
+	if keep, why := keepRunning(&p, size, 0, 100<<20, t0.Add(5*time.Second)); keep {
 		t.Fatalf("kept a transfer 5x slower than a restart: %s", why)
 	}
 	// Restarting at 12 MB/s (8.3s) isn't worth it against 5s to go.
-	if keep, why := keepRunning(&p, size, 12<<20, t0.Add(5*time.Second)); !keep {
+	if keep, why := keepRunning(&p, size, 0, 12<<20, t0.Add(5*time.Second)); !keep {
 		t.Fatalf("restarted a transfer that finishes sooner: %s", why)
 	}
 	// Stalled for a while: restart.
-	if keep, why := keepRunning(&p, size, 5<<20, t0.Add(12*time.Second)); keep {
+	if keep, why := keepRunning(&p, size, 0, 5<<20, t0.Add(12*time.Second)); keep {
 		t.Fatalf("kept a stalled transfer: %s", why)
 	}
 	// Unknown rate for the new source: keep.
-	if keep, _ := keepRunning(&p, size, 0, t0.Add(5*time.Second)); !keep {
+	if keep, _ := keepRunning(&p, size, 0, 0, t0.Add(5*time.Second)); !keep {
 		t.Fatal("restarted without an expected rate")
 	}
 	// Slow for a long time, fast lately (its source got a faster copy):
@@ -48,7 +48,7 @@ func TestKeepRunningJudgesOnRecentSpeed(t *testing.T) {
 	}
 	at(&q, 21.5, 60<<20)
 	at(&q, 23, 90<<20) // then 20 MB/s
-	if keep, why := keepRunning(&q, size, 40<<20, t0.Add(23*time.Second)); !keep {
+	if keep, why := keepRunning(&q, size, 0, 40<<20, t0.Add(23*time.Second)); !keep {
 		t.Fatalf("restarted a transfer that just sped up: %s", why)
 	}
 }
@@ -203,7 +203,7 @@ func TestSpreadRestartExpectationRespectsTheNodesOwnLink(t *testing.T) {
 	}
 	// What that means for the decision on a 100 MB blob, 10 MB in at 1 MB/s.
 	old.progress.add(10<<20-int(old.progress.got), now)
-	if keep, why := keepRunning(&old.progress, 100<<20, sp.expectLocked(old, 50<<20, now), now); keep {
+	if keep, why := keepRunning(&old.progress, 100<<20, 0, sp.expectLocked(old, 50<<20, now), now); keep {
 		t.Fatalf("90 s to go against ~12 s from a holder: %s", why)
 	}
 }

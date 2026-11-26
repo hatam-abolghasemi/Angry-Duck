@@ -36,7 +36,7 @@ var durationBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120
 var (
 	blobFetchSeconds = metrics.NewHistogramVec(
 		"angryduck_worker_blob_fetch_seconds",
-		"Wall time of one successful spread blob transfer into containerd's content store: source connect, download, write and the digest check at commit. By path (registry, peer) and blob size class.",
+		"Wall time of one successful spread blob transfer into containerd's content store, the whole blob from byte 0: source connect, download, write and the digest check at commit. A transfer that went on from bytes an earlier one left (resumed) isn't in it. By path (registry, peer) and blob size class.",
 		durationBuckets, "node", "path", "size_class")
 
 	blobOpenSeconds = metrics.NewHistogramVec(
