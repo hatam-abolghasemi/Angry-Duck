@@ -34,6 +34,13 @@ something that was once forgotten.
 3. Add it to the metrics tables in `docs/observability.md`.
 4. Show it on the dashboard ([below](#a-dashboard-change)) if it answers a
    question someone will ask.
+5. A duration (`metrics.NewHistogramVec`, in `worker/histograms.go`): time
+   it where the work starts and ends, usually inside the store, not around
+   a caller that also does other things (a caller's span silently takes in a
+   prepare, a commit or a retry). Every value of a label must mean the same
+   span. Record successes only, after the outcome is known. Don't time the
+   same span twice under two names. Its series appear with their first
+   observation, not at 0: panels on it say "Nothing in this time range".
 
 ## A wire type or endpoint
 

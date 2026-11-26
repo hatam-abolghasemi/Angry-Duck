@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.14.12
+
+### Fixed
+
+- **Unpack times meant two different things under one label.** In 1.14.11,
+  `angryduck_worker_layer_unpack_seconds{method="landed"}` included the
+  snapshot commit on one path and not on the other, and every unpack time
+  included preparing the snapshot. Unpack and commit are now timed inside
+  the store, where each starts and ends: an unpack is decompressing and
+  writing files, nothing else, on every path.
+- **`spread_finalize_seconds{phase="drain"}` counted finalizes that failed
+  or didn't wait**, piling near-zero samples into the lowest bucket and
+  pulling its quantiles down. `drain` is now recorded only when a layer was
+  still unpacking, and `drain` and `hold` only once the whole finalize
+  worked, as the help text always said.
+- **`spread_ready_seconds` skipped spreads silently** whose job was
+  forgotten before finalize (idle past its lease). The help text says so
+  now, and the worker logs it at debug level.
+
+### Changed
+
+- `angryduck_worker_layer_unpack_seconds` has a **`compression` label**
+  (`gzip`, `zstd`, `none`, `other`, from the layer's media type).
+- `angryduck_worker_layer_commit_seconds` covers **every snapshot commit**,
+  by `kind`: `in_place`, `onto_parent` (containerd's parallel unpack) and
+  `attach` (the worker's own). Its `size_class` label is gone: a commit's
+  time doesn't follow the layer's size.
+- `angryduck_worker_import_seconds` has a **`caller` label** (`spread`,
+  `rescue`, `repair`) and a third phase, **`publish`** (pointing the real
+  name at the image), which used to hide inside `unpack`.
+- **Removed:** `angryduck_registry_request_seconds{kind="blob_open"}`
+  (the same span as `angryduck_worker_blob_open_seconds{path="registry"}`)
+  and `angryduck_worker_spread_finalize_seconds{phase="import"}` (the same
+  as `import_seconds{caller="spread"}`). Both were new in 1.14.11.
+
+### Added
+
+- **`angryduck_worker_layer_unpack_stage_seconds{stage, compression}`**:
+  for each layer the worker unpacks itself, the time spent waiting for the
+  blob's bytes (`input`), decompressing (`decompress`) and writing files
+  (`write`), each without the time it waited on the others. The highest one
+  is the bottleneck: network, CPU or disk. The pipes between the stages
+  read the clock only when one is about to wait; reads from the source are
+  timed each (about 1.6 ms of clock reads over a 1 GiB layer). No memory
+  held beyond the histogram series.
+- **Dashboard: a Timings row on the Delivery tab** (collapsed): every stage
+  of a blob's life on a node in order with count, average, p50 and p95;
+  the p95 of the main stages per node; transfers by path and size; source
+  answer times; unpacks by who and compression; where the worker's own
+  unpacks spend their time; registering by phase; node time to ready;
+  unpack slots.
+- Maintainer docs: a checklist for duration metrics, and the Timings row in
+  the slow-pod walkthrough.
+
 ## 1.14.11
 
 ### Added

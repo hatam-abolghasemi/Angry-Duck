@@ -23,8 +23,15 @@ the part: `angryduck-worker[<node>]: spread: ...`, `mirror:`, `image cleanup:`,
    *Transfers Running* (Delivery tab) while it runs; afterwards, the node's
    received bytes per path. A node above `PROPAGATE_MAX_UTILIZATION` gets
    nothing new.
-5. Code: `controller/spreader.go` (planning), `worker/spread.go` (the
-   transfer), `worker/spreadguard.go` (restarts from a faster source).
+5. The node had the bytes but was still slow: **Delivery tab, Timings**.
+   *Where the Time Goes* names the stage with the highest p95; *Stage p95
+   per Node* says whether it is that node (slow in every column) or that
+   stage (slow on every node). For the worker's own unpacks, *Where the
+   Worker's Own Unpacks Spend Their Time* says network, CPU or disk.
+6. Code: `controller/spreader.go` (planning), `worker/spread.go` (the
+   transfer), `worker/spreadguard.go` (restarts from a faster source),
+   `worker/histograms.go` (the timings; each is recorded where the work
+   is, mostly in the store).
 
 ## A pod is stuck in ImagePullBackOff
 
