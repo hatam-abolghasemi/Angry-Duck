@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.15.0
+
+### Added
+
+- **A transfer that stops part-way no longer throws its bytes away.** When
+  a registry or a peer drops the connection, a stream is cut because its
+  source stopped, or a late transfer is restarted, the bytes a node already
+  received stay in containerd's ingest, under the job's lease, as an
+  interrupted pull's do. The next transfer of that blob on the node, from
+  any source, asks only for the rest (`Range: bytes=N-`) and goes on from
+  there. The blob is still the unit: the controller still orders whole
+  blobs, and containerd still checks the whole blob's digest at commit. A
+  blob that fails its check is aborted and the next transfer starts from 0.
+  `SPREAD_RESUME_ENABLED` (default `true`); `false` aborts a stopped
+  transfer, as before. See [resuming](docs/propagation.md#transfers-that-stop-part-way).
+- **A restart or a peer copy takes the running transfer over** instead of
+  starting from byte 0. The slow-chain guard's restart from a faster peer,
+  and a peer copy of a blob still coming from the registry (until now a
+  second, racing copy), stop the running transfer and go on from its bytes.
+  The receiver weighs a restart against the rest of the blob only, so it
+  switches to a faster source whenever that source is clearly faster. A
+  stream reading the blob meanwhile goes on across the hand-off. Only
+  peers take over (a registry may ignore a range); orders from controllers
+  before 1.9.0 still race.
+- **Workers serve the rest of a blob from a byte on** (`Range: bytes=N-`
+  on `/spread/content`, `206`), committed or still arriving. Other range
+  forms are ignored and get the whole blob, as before.
+- **Metrics:** `angryduck_worker_spread_resumed_bytes_total{node,path}`,
+  bytes not fetched again; `angryduck_worker_spread_discarded_bytes_total{node,reason}`,
+  bytes received for spreads and thrown away (`lost_race`, `dropped`,
+  `restarted`, `failed`, `unused`), which until now were mixed into
+  `spread_bytes_total` with the useful ones. `direct_writes_total` has a
+  third result, `kept`.
+- **Dashboard:** the Delivery tab's new *Resumed & thrown-away bytes* row.
+
+### Changed
+
+- `angryduck_worker_blob_fetch_seconds` counts whole blobs fetched from
+  byte 0 only: a resumed transfer, which fetches only the rest, isn't in it.
+- Spread ingests are named per transfer (blob, epoch and a counter), so a
+  transfer and the one taking its ingest over never share a name by chance.
+- During a rollout, a hand-off to a peer before 1.15.0 starts over (it
+  sends the whole blob), as a restart did before.
+
+### Fixed
+
+- **A direct write of a blob another namespace on the node already held
+  failed every time.** containerd shares content across namespaces, so
+  there is no ingest file to write, and the write failed with "finding the
+  ingest file ... file does not exist"; the transfer was retried with
+  backoff and never worked. A write whose every byte containerd already has
+  is now committed without fetching anything.
+- **A stream could be cut when a restart replaced the transfer feeding
+  it**, if the old transfer ended before the new one was registered: the
+  blob looked as if nothing was arriving. The new transfer is now
+  registered first.
+- containerd's `Truncate` through its API takes effect only with a write
+  through it, which a direct write never makes: an ingest left under the
+  same name (by a worker that died mid-transfer) made the next direct write
+  of that blob fail once ("isn't empty") instead of starting over. The
+  worker now cuts the file itself.
+
 ## 1.14.14
 
 ### Fixed
