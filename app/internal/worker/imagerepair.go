@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -169,11 +168,7 @@ func NewImageRepair(store RepairStore, registry RepairRegistry, platform, nodeID
 	return &ImageRepair{
 		store: store, registry: registry, platform: platform, nodeID: nodeID, interval: interval,
 		busy: busy, onChange: onChange, transfer: 30 * time.Minute,
-		peers: &http.Client{Transport: &http.Transport{
-			Proxy:                 nil, // peers are on the node network
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		peers:  &http.Client{Transport: peerTransport(5*time.Second, 30*time.Second)},
 		ctl:    &http.Client{Timeout: 5 * time.Second},
 		broken: map[string]string{}, names: map[string][]string{}, known: map[string]knownImage{},
 		queue: map[string]string{}, wake: make(chan struct{}, 1), deleted: make(chan struct{}, 1),
@@ -558,6 +553,8 @@ func (r *ImageRepair) repair(ctx context.Context, digest string, names []string,
 	logging.Warnf("angryduck-worker[%s]: image repair: image=%s can't start containers (%s): repairing it in place", r.nodeID, name, what)
 	start := time.Now()
 	res, err := r.fix(ctx, name, corrupt)
+	// Its connections to peers are idle now (see peerconns.go).
+	r.peers.CloseIdleConnections()
 	if err == nil {
 		if inv, ok := r.store.(interface{ Invalidate() }); ok {
 			inv.Invalidate()

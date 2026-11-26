@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -116,11 +115,7 @@ func NewRescue(store blobship.Store, pins *Pins, token, nodeID, platform string,
 		// No client-wide timeout: an export streams for as long as the
 		// image takes. Every request carries a context instead, and a
 		// peer that never answers is caught by the header timeout.
-		client: &http.Client{Transport: &http.Transport{
-			Proxy:                 nil, // peers are on the node network, never via a proxy
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 2 * time.Minute,
-		}},
+		client:   &http.Client{Transport: peerTransport(5*time.Second, 2*time.Minute)},
 		sem:      make(chan struct{}, maxConcurrent),
 		inflight: make(map[string]*rescueCall),
 	}
@@ -178,7 +173,13 @@ func (rs *Rescue) HandleRescue(w http.ResponseWriter, r *http.Request) {
 			memlimit.Soon()
 			rs.mu.Lock()
 			delete(rs.inflight, order.Image)
+			quiet := len(rs.inflight) == 0
 			rs.mu.Unlock()
+			if quiet {
+				// The last rescue here ended: its connections to peers
+				// are idle now (see peerconns.go).
+				rs.client.CloseIdleConnections()
+			}
 			close(call.done)
 		}()
 	}

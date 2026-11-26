@@ -62,6 +62,12 @@ Underneath:
   container listings) go through `runtime.go`.
 - `directwrite.go`: writes received bytes straight into containerd's ingest
   files, with their page cache handed back as it goes.
+- `peerconns.go`: the transport every client to other workers uses (spread,
+  repair, rescue, the mirror): idle connections closed after
+  `IDLE_CONN_TIMEOUT_S`, each one counted (`peer_connections`), and the API
+  server's side counted too. Each feature closes its idle connections when
+  its work ends; a new client to peers uses `peerTransport` and does the
+  same.
 - `pagecache.go`: hands back the page cache that serving blob files brings
   in (`PAGE_CACHE_RELEASE_AFTER_S`).
 - `leanlist.go`, `leancri.go`, `listing.go`, `inventory.go`: cheap listings,

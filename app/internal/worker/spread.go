@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -239,11 +238,7 @@ func NewSpread(store SpreadStore, registry BlobOpener, token, nodeID, platform, 
 		store: store, registry: registry, token: token, nodeID: nodeID, platform: platform,
 		controllerURL: strings.TrimRight(controllerURL, "/"), timeout: timeout, epoch: randomSuffix()[:8],
 		// Peers stream for as long as a blob takes; ctx bounds it.
-		peers: &http.Client{Transport: &http.Transport{
-			Proxy:                 nil,
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 30 * time.Second,
-		}},
+		peers:      &http.Client{Transport: peerTransport(5*time.Second, 30*time.Second)},
 		ctl:        &http.Client{Timeout: 5 * time.Second},
 		jobs:       map[string]*spreadJob{},
 		xfers:      map[xferKey]*spreadXfer{},
@@ -802,7 +797,14 @@ func (s *Spread) release(ctx context.Context, job string) {
 		delete(s.jobs, job)
 	}
 	s.forgetPartialsLocked(job, time.Now())
+	quiet := len(s.jobs) == 0 && len(s.xfers) == 0
 	s.mu.Unlock()
+	if quiet {
+		// The last job here ended: its connections to peers are idle now
+		// (see peerconns.go). One in use (a transfer of a newer job that
+		// started meanwhile) is left alone.
+		s.peers.CloseIdleConnections()
+	}
 	if j == nil {
 		return
 	}

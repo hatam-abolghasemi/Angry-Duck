@@ -86,6 +86,16 @@ func main() {
 	if !strings.Contains(selfAddress, ":") {
 		selfAddress = selfAddress + ":" + listenPort(listenAddr)
 	}
+	// Idle connections between Angry Duck processes are closed when the
+	// work that used them ends, or after this long (a safety net); see
+	// internal/worker/peerconns.go. Before any peer client is built.
+	idleConnTimeout := config.Duration("IDLE_CONN_TIMEOUT_S", 60)
+	countAPIConns := worker.SetPeerConns(nodeID, idleConnTimeout)
+	if idleConnTimeout > 0 {
+		log.Printf("angryduck-worker[%s]: idle connections to and from peers are closed when their work ends, or after %s idle", nodeID, idleConnTimeout)
+	} else {
+		log.Printf("angryduck-worker[%s]: idle connections to and from peers are closed when their work ends only (IDLE_CONN_TIMEOUT_S=0)", nodeID)
+	}
 	metricsURL := config.String("NODE_EXPORTER_URL", "http://localhost:9100/metrics")
 	controllerURL := config.String("CONTROLLER_URL", "http://angryduck-controller:8080")
 	reportInterval := config.Duration("REPORT_INTERVAL_S", 15)
@@ -477,7 +487,7 @@ func main() {
 					time.Duration(config.Int("MIRROR_RESOLVE_VERIFY_TIMEOUT_MS", 3000))*time.Millisecond)
 			}
 			extra = append(extra, m.RegisterPeer)
-			mirrorSrv = &http.Server{Addr: mirrorListen, Handler: memlimit.AfterEach(m.Handler()), ReadHeaderTimeout: 10 * time.Second}
+			mirrorSrv = &http.Server{Addr: mirrorListen, Handler: memlimit.AfterEach(m.Handler()), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleConnTimeout}
 			go func() {
 				log.Printf("angryduck-worker[%s]: mirror listening on %s, containerd reaches it at %s", nodeID, mirrorListen, mirrorAddr)
 				if err := mirrorSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -503,7 +513,8 @@ func main() {
 		}()
 	}
 
-	httpServer := &http.Server{Addr: listenAddr, Handler: memlimit.AfterEach(worker.NewServer(auth, puller, rescue, extra...))}
+	httpServer := &http.Server{Addr: listenAddr, Handler: memlimit.AfterEach(worker.NewServer(auth, puller, rescue, extra...)),
+		IdleTimeout: idleConnTimeout, ConnState: countAPIConns}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("angryduck-worker[%s]: http server failed: %v", nodeID, err)

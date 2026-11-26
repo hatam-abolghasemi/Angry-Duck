@@ -56,6 +56,17 @@ something that was once forgotten.
    (`sharedtoken`). Bound request bodies.
 3. Document it in `docs/api.md`.
 
+## A client to other workers or the controller
+
+1. Build its transport with `peerTransport` (`internal/worker/peerconns.go`):
+   no proxy, idle connections closed after `IDLE_CONN_TIMEOUT_S`, every
+   connection counted in `peer_connections`. A new `http.Transport` keeps
+   idle connections forever unless told otherwise; that is how every worker
+   once held one to each peer it had ever talked to.
+2. Close its idle connections (`CloseIdleConnections`) when the work that
+   used them ends, so they don't wait for the timeout.
+3. A test that the work leaves no connection open (`peerconns_test.go`).
+
 ## A containerd call
 
 1. Through `ContainerdStore` (gRPC API) or `runtime.go` (CRI), never a
