@@ -37989,6 +37989,2580 @@
           },
           "transparent": true
         }
+      },
+      "panel-191": {
+        "kind": "Panel",
+        "spec": {
+          "id": 191,
+          "title": "Where the Time Goes, Stage by Stage",
+          "description": "Every stage a blob and its image go through on a node during a spread, in order, over the time range: how many times it happened, its average, median (p50) and p95. Blob stages are per blob, layer stages per layer, image stages per image and node. A transfer includes its source answering and the commit; a node's time to ready spans everything. The stage with the highest p95 next to its count is where nodes wait. Percentiles are estimated inside the buckets (… 1 s, 2.5 s, 5 s, 10 s …). Rescue and repair imports aren't in it.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "round(sum by (stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "count",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum by (stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n)\n/ (sum by (stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n) > 0)",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "avg",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.5, sum by (le, stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "p50",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "p95",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "stage",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterByValue",
+                  "spec": {
+                    "options": {
+                      "filters": [
+                        {
+                          "config": {
+                            "id": "lower",
+                            "options": {
+                              "value": 0.5
+                            }
+                          },
+                          "fieldName": "Value #count"
+                        }
+                      ],
+                      "match": "any",
+                      "type": "exclude"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterFieldsByName",
+                  "spec": {
+                    "options": {
+                      "include": {
+                        "names": [
+                          "stage",
+                          "Value #count",
+                          "Value #avg",
+                          "Value #p50",
+                          "Value #p95"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {},
+                      "includeByName": {},
+                      "indexByName": {
+                        "stage": 0,
+                        "Value #count": 1,
+                        "Value #avg": 2,
+                        "Value #p50": 3,
+                        "Value #p95": 4
+                      },
+                      "renameByName": {
+                        "stage": "stage",
+                        "Value #count": "times",
+                        "Value #avg": "avg",
+                        "Value #p50": "p50",
+                        "Value #p95": "p95"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": false,
+                    "displayName": "stage"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No spreads in this time range",
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "filterable": false,
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "stage"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#d5dbe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "times"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 72
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "avg"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 72
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "p50"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 72
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "p95"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 72
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-192": {
+        "kind": "Panel",
+        "spec": {
+          "id": 192,
+          "title": "Blob Transfer Time p95 by Path and Size (last 15 minutes)",
+          "description": "How long one spread blob took to arrive, p95 over the preceding 15 minutes, by where it came from and its size class (small under 8 MiB, medium under 64 MiB, large). Small blobs are dominated by round trips, large ones by throughput: a high small-blob line points at the source's answer time (next panel), a high large-blob line at bandwidth. No line: no transfer of that kind.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, path, size_class) (rate(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "legendFormat": "{{path}} {{size_class}}",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^peer.*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#3c9874",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^registry.*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a36b",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": ".* small$"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            10,
+                            10
+                          ],
+                          "fill": "dash"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": ".* large$"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.lineWidth",
+                        "value": 2
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-193": {
+        "kind": "Panel",
+        "spec": {
+          "id": 193,
+          "title": "Source Answer Time p95 (last 15 minutes)",
+          "description": "How long a source took to start answering, p95 over the preceding 15 minutes: for a blob, from the request until its headers arrived (the registry's auth, redirects and queueing, or a peer's answer), before any byte; for the registry, also how long resolving an image's manifest, index and config took (cache misses). A slow answer adds to every small blob; it is not bandwidth.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, path) (rate(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "legendFormat": "blob from {{path}}",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le) (rate(angryduck_registry_request_seconds_bucket{k8s_source_cluster=~\"$cluster\", kind=\"resolve\"}[15m])))",
+                        "legendFormat": "registry: resolve an image",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "blob from peer"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#3c9874",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "blob from registry"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a36b",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "registry: resolve an image"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a36b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            10,
+                            10
+                          ],
+                          "fill": "dash"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-194": {
+        "kind": "Panel",
+        "spec": {
+          "id": 194,
+          "title": "Layer Unpack Time p95 by Who and Compression (last 15 minutes)",
+          "description": "How long turning one layer blob into files took (decompressing and writing them, nothing else), p95 over the preceding 15 minutes, by who unpacked it and the layer's compression. landed: containerd, from the landed blob. streamed: this worker, while the blob arrived (it includes waiting for the bytes). landed_own: this worker, from the landed blob. zstd layers are always unpacked by containerd. Compare like with like: a layer's time grows with its size.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, method, compression) (rate(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "legendFormat": "{{method}} {{compression}}",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": ".* zstd$"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            10,
+                            10
+                          ],
+                          "fill": "dash"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": ".* none$"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            0,
+                            10
+                          ],
+                          "fill": "dot"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^landed .*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^streamed .*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#8ab8ff",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^landed_own .*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-195": {
+        "kind": "Panel",
+        "spec": {
+          "id": 195,
+          "title": "Where the Worker's Own Unpacks Spend Their Time",
+          "description": "For the layers this worker unpacks itself (streamed and landed_own), the average seconds per layer spent in each stage: waiting for the blob's bytes (input: the network or peer while it arrives, the disk once landed), decompressing, and writing files, each without the time it waited on the others. The stages run side by side, so they overlap: the highest line is the bottleneck. Input on top while a blob arrives is normal (the unpack keeps up with the download); decompress on top means CPU, write on top means the disk.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum by (stage, compression) (rate(angryduck_worker_layer_unpack_stage_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__rate_interval]))\n/ (sum by (stage, compression) (rate(angryduck_worker_layer_unpack_stage_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__rate_interval])) > 0)",
+                        "legendFormat": "{{stage}} ({{compression}})",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "No layer unpacked by the worker itself in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^input.*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#3c9874",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^decompress.*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": "^write.*"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#c9c4b6",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "scope": "series",
+                      "options": ".*\\(none\\)$"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            10,
+                            10
+                          ],
+                          "fill": "dash"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-196": {
+        "kind": "Panel",
+        "spec": {
+          "id": 196,
+          "title": "Registering a Spread Image p95 by Phase (last 15 minutes)",
+          "description": "After its last layer, how long each phase of registering a spread image on a node took, p95 over the preceding 15 minutes: waiting for layers still unpacking (drain, only when one was), checking and pinning the layers (hold), containerd's import (register), containerd unpacking what wasn't unpacked ahead (unpack: near zero when everything was), and publishing the name. A high unpack line means layers weren't unpacked on arrival.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "legendFormat": "{{phase}}",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\"}[15m])))",
+                        "legendFormat": "import {{phase}}",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "drain"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#808080",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "hold"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#c9c4b6",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "import register"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "import unpack"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "import publish"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-197": {
+        "kind": "Panel",
+        "spec": {
+          "id": 197,
+          "title": "Node Time to Image Ready (last 15 minutes)",
+          "description": "From the first transfer or layer check a node made for a spread until the image was registered there: the node-local time to ready, over the preceding 15 minutes. Half the nodes were faster than p50; p95 is the slow tail. It starts when the node starts, not at the preheat: the controller's Average Spread Time includes waiting for a turn.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.5, sum by (le) (rate(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "legendFormat": "p50",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le) (rate(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "legendFormat": "p95",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(rate(angryduck_worker_spread_ready_seconds_sum{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])) / (sum(rate(angryduck_worker_spread_ready_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])) > 0)",
+                        "legendFormat": "average",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Nothing in this time range",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "p50"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#7fb87a",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "p95"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#e0a960",
+                          "mode": "fixed"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "average"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            10,
+                            10
+                          ],
+                          "fill": "dash"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-198": {
+        "kind": "Panel",
+        "spec": {
+          "id": 198,
+          "title": "Layer Unpack Slots in Use",
+          "description": "Layers unpacking at once on a node across spreads, against the most it allows (SPREAD_UNPACK_PARALLEL_MAX). Only with parallel unpacking (containerd 2.2 and later). In use at the most while layers wait means unpacking is serialized: more slots, or more CPU and disk for containerd, would help.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "max by (node) (angryduck_worker_unpack_slots{k8s_source_cluster=~\"$cluster\", node=~\"$node\", state=\"in_use\"})",
+                        "legendFormat": "{{node}}",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "max(angryduck_worker_unpack_slots{k8s_source_cluster=~\"$cluster\", node=~\"$node\", state=\"max\"})",
+                        "legendFormat": "most allowed",
+                        "instant": false,
+                        "range": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "annotations": {
+                  "clustering": -1,
+                  "multiLane": false
+                },
+                "legend": {
+                  "calcs": [
+                    "lastNotNull",
+                    "mean",
+                    "max"
+                  ],
+                  "displayMode": "table",
+                  "enableFacetedFilter": false,
+                  "overflow": "ellipsis",
+                  "placement": "bottom",
+                  "showLegend": true,
+                  "sortBy": "Max",
+                  "sortDesc": true
+                },
+                "tooltip": {
+                  "hideZeros": true,
+                  "maxHeight": 400,
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "noValue": "Parallel unpacking is off, or no worker reports it",
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 5,
+                    "gradientMode": "opacity",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 3,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
+                  },
+                  "decimals": 1
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "most allowed"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#808080",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "dash": [
+                            10,
+                            10
+                          ],
+                          "fill": "dash"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
+      },
+      "panel-199": {
+        "kind": "Panel",
+        "spec": {
+          "id": 199,
+          "title": "Stage p95 per Node",
+          "description": "Per node, over the time range: how many spread images it registered, and the p95 of each main stage: a blob from the registry, from a peer, the blob commit, a layer unpack, the snapshot commit, containerd's register, and the node's time to ready. One node slow in every column is the node (disk, CPU, network); one column slow on every node is the stage.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "round(sum by (node) (increase(angryduck_worker_spread_ready_seconds_count{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "spreads",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "reg",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "peer",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "bcommit",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "unpack",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "lcommit",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "import",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "legendFormat": "__auto",
+                        "instant": true,
+                        "range": false,
+                        "exemplar": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "ready",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "node",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterFieldsByName",
+                  "spec": {
+                    "options": {
+                      "include": {
+                        "names": [
+                          "node",
+                          "Value #spreads",
+                          "Value #reg",
+                          "Value #peer",
+                          "Value #bcommit",
+                          "Value #unpack",
+                          "Value #lcommit",
+                          "Value #import",
+                          "Value #ready"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {},
+                      "includeByName": {},
+                      "indexByName": {
+                        "node": 0,
+                        "Value #spreads": 1,
+                        "Value #reg": 2,
+                        "Value #peer": 3,
+                        "Value #bcommit": 4,
+                        "Value #unpack": 5,
+                        "Value #lcommit": 6,
+                        "Value #import": 7,
+                        "Value #ready": 8
+                      },
+                      "renameByName": {
+                        "node": "node",
+                        "Value #spreads": "images",
+                        "Value #reg": "registry transfer",
+                        "Value #peer": "peer transfer",
+                        "Value #bcommit": "blob commit",
+                        "Value #unpack": "unpack",
+                        "Value #lcommit": "snapshot commit",
+                        "Value #import": "register",
+                        "Value #ready": "ready"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.2.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "ready"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "No spreads in this time range",
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "filterable": false,
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "node"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.filterable",
+                        "value": true
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#c9c4b6",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "images"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 72
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#9b759b",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "registry transfer"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "peer transfer"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "blob commit"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "unpack"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "snapshot commit"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "register"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "scope": "series",
+                      "options": "ready"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.width",
+                        "value": 88
+                      },
+                      {
+                        "id": "custom.filterable",
+                        "value": false
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "fixedColor": "#74afe3",
+                          "mode": "fixed"
+                        }
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "–"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "transparent": true
+        }
       }
     },
     "layout": {
@@ -39380,6 +41954,137 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-178"
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "RowsLayoutRow",
+                      "spec": {
+                        "title": "Timings",
+                        "collapse": true,
+                        "layout": {
+                          "kind": "GridLayout",
+                          "spec": {
+                            "items": [
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 0,
+                                  "width": 24,
+                                  "height": 11,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-191"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 11,
+                                  "width": 24,
+                                  "height": 9,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-199"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 20,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-192"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 20,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-193"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 30,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-194"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 30,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-195"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 40,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-196"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 40,
+                                  "width": 12,
+                                  "height": 10,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-197"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 50,
+                                  "width": 24,
+                                  "height": 8,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-198"
                                   }
                                 }
                               }
