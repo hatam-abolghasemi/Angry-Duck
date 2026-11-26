@@ -40,7 +40,7 @@ yours there).
 | **Rescue & Repair** | What is stuck or broken, and who it hits: stuck pulls per node and image with why the pull failed, rescue state and failures in a row, broken images, the pods waiting on them and kubelet's reason, rescues, layers by delivery method, repairs and their downloads. |
 | **Mirror & Registry** | The mirror's hit ratio (per node in the Overview's node table), requests and bytes; tags it resolved, by what the registry answered and where the manifest came from; what each registry answered at the last origin check; images their registry no longer serves, the copies left and the containers using them. |
 | **Disk Cleanup** | Cleanup state per node over time, images removable per tier, images removed, failed removals, images coming back after removal; retention copies; companion images kept on every node and where each is missing; image by image, what was removed from which node and what comes up next, and when. |
-| **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method; the Page cache row: file cache counted as each worker's memory, next to what its page cache tracker holds; inventory events, the controller's layer index and work in flight. |
+| **Runtime** | Angry Duck's own cost: processes, versions, restarts, memory really held (`rss_anon`), CPU, containerd calls per node and method, connections each worker holds open with peers and the controller; the Page cache row: file cache counted as each worker's memory, next to what its page cache tracker holds; inventory events, the controller's layer index and work in flight. |
 
 Every panel has a one-line description (hover its title). Click a node or an
 image anywhere, in a table or a chart, to focus the whole dashboard on it.
@@ -272,6 +272,7 @@ what is moving, not history:
 | `angryduck_worker_temp_images_removed_total` | counter | `node` | Temporary import names a killed worker left behind, removed by the repair. |
 | `angryduck_worker_preheated_containers_running` | gauge | `node`, `repo` | Running containers from repos recently preheated on the node. |
 
+| `angryduck_worker_peer_connections` | gauge | `node`, `direction` | Open TCP connections between this worker and other Angry Duck processes: `in`, accepted by its API (`WORKER_LISTEN_ADDR`) from peers and the controller; `out`, opened by its spread, repair, rescue and mirror to other workers' API, and by the mirror to the controller. Idle ones close when the work that used them ends, or after `IDLE_CONN_TIMEOUT_S`, so between jobs it drops back toward 0. |
 | `angryduck_worker_containerd_calls_total` | counter | `node`, `method` | gRPC calls to containerd, by service and method (`Content/List`, `ImageService/PullImage`, ...). The load the worker puts on containerd. |
 
 The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
