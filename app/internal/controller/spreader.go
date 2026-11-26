@@ -130,6 +130,10 @@ type SpreaderConfig struct {
 	// layer that lands and keeps up with the rest. Off: rarest layer first
 	// to peers, largest first from the registry.
 	BottomUp bool
+	// IdleConnTimeout: a connection to a worker idle this long is closed
+	// (IDLE_CONN_TIMEOUT_S), a safety net behind closing them when every
+	// job ended. 0: only that.
+	IdleConnTimeout time.Duration
 }
 
 // Slow-chain guard timing.
@@ -220,8 +224,11 @@ type Spreader struct {
 	byID      map[string]*sjob
 	starting  map[string]context.CancelCauseFunc // images whose manifest Begin is still reading
 	published bool
-	wakeup    waker
-	wg        sync.WaitGroup // order goroutines, for tests
+	// talked: orders went to workers since the last quiet tick, so their
+	// connections may sit idle once every job ended.
+	talked bool
+	wakeup waker
+	wg     sync.WaitGroup // order goroutines, for tests
 
 	// Scratch reused across ticks (tick runs under mu).
 	present, blob []bool
@@ -357,8 +364,8 @@ func NewSpreader(registry *Registry, resolver ImageResolver, token string, cfg S
 	dial := (&net.Dialer{Timeout: 5 * time.Second}).DialContext
 	return &Spreader{
 		registry: registry, resolver: resolver, token: token, cfg: cfg,
-		orders:   &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, DialContext: dial}},
-		finals:   &http.Client{Timeout: 16 * time.Minute, Transport: &http.Transport{Proxy: nil, DialContext: dial}},
+		orders:   &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, DialContext: dial, IdleConnTimeout: cfg.IdleConnTimeout}},
+		finals:   &http.Client{Timeout: 16 * time.Minute, Transport: &http.Transport{Proxy: nil, DialContext: dial, IdleConnTimeout: cfg.IdleConnTimeout}},
 		jobs:     map[string]*sjob{},
 		byID:     map[string]*sjob{},
 		starting: map[string]context.CancelCauseFunc{},
@@ -506,9 +513,18 @@ func (s *Spreader) tick(ctx context.Context) {
 			s.lateTimer.Stop()
 			s.lateTimer = nil
 		}
+		talked := s.talked
+		s.talked = false
 		s.mu.Unlock()
+		if talked {
+			// Every job ended: connections to workers are idle now. One
+			// still carrying a last drop is closed by IDLE_CONN_TIMEOUT_S.
+			s.orders.CloseIdleConnections()
+			s.finals.CloseIdleConnections()
+		}
 		return
 	}
+	s.talked = true
 	s.mu.Unlock()
 
 	fresh := s.registry.FreshWorkers() // least-full first

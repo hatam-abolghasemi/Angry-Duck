@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +53,7 @@ type spreadFleet struct {
 	drops     []string
 	busy      map[string]bool // answer fetches with 409
 	kept      map[string]bool // answer restart offers with 409, kept
+	open      atomic.Int64    // connections open to the workers, all together
 }
 
 type fetchRec struct {
@@ -59,7 +62,7 @@ type fetchRec struct {
 }
 
 func (f *spreadFleet) worker(t *testing.T, node string) string {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		switch r.URL.Path {
@@ -95,6 +98,15 @@ func (f *spreadFleet) worker(t *testing.T, node string) string {
 			t.Errorf("unexpected %s on %s", r.URL.Path, node)
 		}
 	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		switch st {
+		case http.StateNew:
+			f.open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			f.open.Add(-1)
+		}
+	}
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://")
 }

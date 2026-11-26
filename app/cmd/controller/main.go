@@ -66,6 +66,10 @@ func main() {
 	log.Printf("angryduck-controller: starting: listen=%s stale_after=%s target_ttl=%s rank_interval=%s top_n=%d rank_exclude_node_substrings=%v rank_prefer_image_locality=%v metrics_label_registry=%v",
 		listenAddr, staleAfter, targetTTL, rankInterval, topN, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 
+	// Idle connections to workers are closed when every spread ended, or
+	// after this long (a safety net); the server drops idle ones from
+	// workers after it too.
+	idleConnTimeout := config.Duration("IDLE_CONN_TIMEOUT_S", 60)
 	registry := controller.NewRegistry(staleAfter, targetTTL)
 	ranker := controller.NewRanker(registry, topN, rankInterval, excludeNodeSubstrings, preferImageLocality, labelRegistry)
 	ranker.SetMaxUtilization(config.Fraction("PROPAGATE_MAX_UTILIZATION", 0.70))
@@ -135,7 +139,7 @@ func main() {
 			go pods.Run(ctx)
 			go rescuer.Run(ctx)
 		}
-		spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN, feat)
+		spreader := newSpreader(registry, regClient, token, excludeNodeSubstrings, platform, topN, feat, idleConnTimeout)
 		if propagator := newPropagator(registry, token, excludeNodeSubstrings, platform, feat.Propagate); propagator != nil {
 			propagator.SetSeeds(ranker.Seeds)
 			if rescuer != nil {
@@ -197,8 +201,9 @@ func main() {
 	go ranker.Run(ctx)
 
 	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: memlimit.AfterEach(server.Handler()),
+		Addr:        listenAddr,
+		Handler:     memlimit.AfterEach(server.Handler()),
+		IdleTimeout: idleConnTimeout,
 	}
 
 	go func() {
@@ -285,7 +290,7 @@ func newPropagator(registry *controller.Registry, token string, rankExclude []st
 // when it's off or can't work: it reads each image's layers from its
 // registry, so it needs RANK_BY_LAYERS. Without it, preheats seed whole
 // images and propagation spreads them.
-func newSpreader(registry *controller.Registry, rc *registryclient.Client, token string, rankExclude []string, platform string, topN int, feat features.Flags) *controller.Spreader {
+func newSpreader(registry *controller.Registry, rc *registryclient.Client, token string, rankExclude []string, platform string, topN int, feat features.Flags, idleConnTimeout time.Duration) *controller.Spreader {
 	if !feat.Spread {
 		log.Println("angryduck-controller: blob-by-blob spreading disabled (SPREAD_ENABLED=false): seeding and propagating whole images")
 		return nil
@@ -316,6 +321,7 @@ func newSpreader(registry *controller.Registry, rc *registryclient.Client, token
 		ExpressMaxBytes: int64(config.Int("SPREAD_EXPRESS_MAX_MB", 32)) << 20,
 		SlowFactor:      config.Float("SPREAD_SLOW_FACTOR", 2),
 		BottomUp:        feat.SpreadBottomUp,
+		IdleConnTimeout: idleConnTimeout,
 	}
 	switch {
 	case !cfg.Stream:
