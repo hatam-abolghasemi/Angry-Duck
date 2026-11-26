@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/leases"
@@ -46,6 +47,7 @@ func (s *ContainerdStore) attachExtracted(ctx context.Context, lease string, l L
 		return false, err
 	}
 	key := "angryduck-attach-" + randomSuffix()
+	committing := time.Now()
 	mounts, err := sn.Prepare(ctx, key, l.Parent)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
@@ -76,6 +78,7 @@ func (s *ContainerdStore) attachExtracted(ctx context.Context, lease string, l L
 		}
 		return false, fmt.Errorf("committing %s: %w", l.ChainID, err)
 	}
+	observeLayerCommit(commitAttach, committing)
 	committed = true
 	removeQuietly(ctx, sn, x.Key)
 	s.labelUncompressed(ctx, l, x.DiffID)

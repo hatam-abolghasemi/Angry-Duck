@@ -160,6 +160,7 @@ func (s *ContainerdStore) ExtractLayer(ctx context.Context, lease string, l Laye
 		mounts = bindToOverlay(mounts)
 	}
 	desc := ocispec.Descriptor{MediaType: l.MediaType, Digest: digest.Digest(l.Digest), Size: l.Size}
+	unpacking := time.Now()
 	diff, err := s.client.DiffService().Apply(ctx, desc, mounts)
 	if err == nil && chainOf(l.Parent, diff.Digest.String()) != l.ChainID {
 		err = fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, chainOf(l.Parent, diff.Digest.String()), l.ChainID)
@@ -168,6 +169,7 @@ func (s *ContainerdStore) ExtractLayer(ctx context.Context, lease string, l Laye
 		removeQuietly(ctx, sn, key)
 		return ExtractedLayer{}, fmt.Errorf("unpacking %s: %w", l.Digest, err)
 	}
+	observeUnpack(unpackLanded, l, time.Since(unpacking))
 	return ExtractedLayer{Key: key, DiffID: diff.Digest.String()}, nil
 }
 
@@ -189,6 +191,7 @@ func (s *ContainerdStore) CommitExtracted(ctx context.Context, lease string, l L
 			return false, err
 		}
 	}
+	committing := time.Now()
 	if err := s.commitOnto(ctx, l.ChainID, x.Key, l.Parent); err != nil {
 		if errdefs.IsAlreadyExists(err) {
 			removeQuietly(ctx, sn, x.Key)
@@ -196,6 +199,7 @@ func (s *ContainerdStore) CommitExtracted(ctx context.Context, lease string, l L
 		}
 		return false, fmt.Errorf("committing %s onto %q: %w", l.ChainID, l.Parent, err)
 	}
+	observeLayerCommit(commitOntoParent, committing)
 	// A wrong parent would make every image using this layer wrong: read
 	// it back, and take the snapshot away at once if containerd dropped it.
 	info, err := sn.Stat(ctx, l.ChainID)

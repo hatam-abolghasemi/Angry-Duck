@@ -181,8 +181,9 @@ func TestSpreadFinalizeWaitsForTheLayerBeingUnpacked(t *testing.T) {
 		t.Fatalf("started %s", got)
 	}
 	stopped := make(chan struct{})
+	var waited bool
 	go func() {
-		sp.unpackStop(context.Background(), "s1", false)
+		waited = sp.unpackStop(context.Background(), "s1", false)
 		close(stopped)
 	}()
 	select {
@@ -197,6 +198,19 @@ func TestSpreadFinalizeWaitsForTheLayerBeingUnpacked(t *testing.T) {
 	sp.wg.Wait()
 	if got := ap.applied(); len(got) != 1 || got[0] != chains[0] {
 		t.Fatalf("applied %v, want only the layer that was running", got)
+	}
+	if !waited {
+		t.Error("unpackStop says it didn't wait (finalize's drain would go unrecorded)")
+	}
+}
+
+// A finalize with nothing unpacking doesn't wait, and says so: its drain
+// isn't recorded as a near-zero sample.
+func TestSpreadFinalizeWithNothingUnpackingDoesntWait(t *testing.T) {
+	sp, _ := newTestSpread(t, newFakeSpreadStore(), &fakeRegistry{}, nil, "n1")
+	sp.EnableUnpack(newFakeApplier())
+	if sp.unpackStop(context.Background(), "unknown", false) {
+		t.Error("unpackStop of a job with no unpacking says it waited")
 	}
 }
 

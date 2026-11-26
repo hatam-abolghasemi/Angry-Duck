@@ -313,11 +313,9 @@ func (s *Spread) unpackPass(job string, j *unpackJob) {
 			switch {
 			case err == nil && applied && l.arriving:
 				spreadUnpacksTotal.Inc(s.nodeID, "streamed")
-				observeUnpack("streamed", l.Size, start)
 				logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) while it arrived, done %s after starting", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 			case err == nil && applied:
 				spreadUnpacksTotal.Inc(s.nodeID, "applied")
-				observeUnpack("landed", l.Size, start)
 				logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) in %s", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 			case err == nil:
 				spreadUnpacksTotal.Inc(s.nodeID, "present")
@@ -368,13 +366,14 @@ func (s *Spread) withBlobStream(jctx context.Context, l LayerSpec, fn func(conte
 
 // unpackStop ends a job's early unpacking. Finalize waits for a layer
 // being unpacked right now (it is useful, and containerd's unpack would
-// otherwise unpack it again side by side); a drop cancels it.
-func (s *Spread) unpackStop(ctx context.Context, job string, cancel bool) {
+// otherwise unpack it again side by side); a drop cancels it. waited
+// says whether it had to wait for one.
+func (s *Spread) unpackStop(ctx context.Context, job string, cancel bool) (waited bool) {
 	s.mu.Lock()
 	j := s.unpacks[job]
 	if j == nil {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	// Kept, stopped, so a blob landing late doesn't start the job over;
 	// forgotten by pruneUnpacksLocked.
@@ -385,7 +384,7 @@ func (s *Spread) unpackStop(ctx context.Context, job string, cancel bool) {
 	if cancel || !running {
 		j.cancel()
 		s.discardExtracted(j)
-		return
+		return false
 	}
 	select {
 	case <-idle:
@@ -393,6 +392,7 @@ func (s *Spread) unpackStop(ctx context.Context, job string, cancel bool) {
 	}
 	j.cancel()
 	s.discardExtracted(j)
+	return true
 }
 
 // pruneUnpacksLocked forgets stopped jobs once no late transfer of theirs

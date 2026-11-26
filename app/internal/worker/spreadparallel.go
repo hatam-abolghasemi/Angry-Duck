@@ -147,7 +147,6 @@ func (s *Spread) extractWorker(job string, j *unpackJob, l LayerSpec) {
 	case err == nil && !dropped:
 		delete(j.pending, l.ChainID)
 		j.extracted[l.ChainID] = extractedLayer{LayerSpec: l, x: x}
-		observeUnpack("landed", l.Size, start)
 		logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) on its own in %s, committing it once the layer below is", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 	case !dropped:
 		delete(j.pending, l.ChainID)
@@ -183,7 +182,6 @@ func (s *Spread) streamWorker(job string, j *unpackJob, l LayerSpec) {
 		clear(j.commitTried) // what waited on it may commit now
 		if applied {
 			spreadUnpacksTotal.Inc(s.nodeID, "streamed")
-			observeUnpack("streamed", l.Size, start)
 			logging.Debugf("angryduck-worker[%s]: spread: unpacked %s (%d bytes) while it arrived, done %s after starting", s.nodeID, l.Digest, l.Size, time.Since(start).Round(time.Millisecond))
 		} else {
 			spreadUnpacksTotal.Inc(s.nodeID, "present")
@@ -233,7 +231,6 @@ func (s *Spread) commitWorker(job string, j *unpackJob) {
 
 		lease, err := s.lease(j.ctx, job)
 		applied := false
-		committing := time.Now()
 		if err == nil {
 			ctx, cancel := context.WithTimeout(j.ctx, time.Minute)
 			applied, err = s.committer(next.x).CommitExtracted(ctx, lease, next.LayerSpec, next.x)
@@ -247,9 +244,6 @@ func (s *Spread) commitWorker(job string, j *unpackJob) {
 			delete(j.extracted, next.ChainID)
 			j.ready[next.ChainID] = true
 			clear(j.commitTried)
-			if applied {
-				observeLayerCommit(next.Size, committing)
-			}
 			switch {
 			case !applied:
 				spreadUnpacksTotal.Inc(s.nodeID, "present")

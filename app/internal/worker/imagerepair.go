@@ -734,7 +734,7 @@ func (r *ImageRepair) fix(ctx context.Context, image string, corrupt map[string]
 			return aw.Close()
 		}())
 	}()
-	err = r.store.Import(ctx, pr, r.platform)
+	err = r.store.Import(withImportCaller(ctx, importByRepair), pr, r.platform)
 	pr.CloseWithError(errImportEnded)
 	if err != nil {
 		for diffID := range corruptLayers(err.Error()) {

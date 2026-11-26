@@ -211,16 +211,21 @@ func (s *ContainerdStore) ApplyLayerStream(ctx context.Context, lease string, l 
 			opts = append(opts, archive.WithParents(parents))
 		}
 	}
-	diffID, err := streamInto(ctx, root, opts, nil, l, r)
+	unpacking := time.Now()
+	diffID, st, err := streamInto(ctx, root, opts, nil, l, r)
 	if err != nil {
 		return false, err
 	}
+	observeUnpack(streamUnpackMethod(ctx), l, time.Since(unpacking))
+	observeUnpackStages(l, st)
+	committing := time.Now()
 	if err := sn.Commit(ctx, l.ChainID, key); err != nil {
 		if errdefs.IsAlreadyExists(err) {
 			return false, nil // unpacked meanwhile: theirs is as good
 		}
 		return false, fmt.Errorf("committing %s: %w", l.ChainID, err)
 	}
+	observeLayerCommit(commitInPlace, committing)
 	committed = true
 	s.labelUncompressed(ctx, l, diffID)
 	return true, nil
@@ -261,11 +266,14 @@ func (s *ContainerdStore) ExtractLayerStream(ctx context.Context, lease string, 
 	}
 	dirs := &impliedDirs{listed: map[string]bool{}, implied: map[string]bool{}}
 	opts := []archive.ApplyOpt{archive.WithConvertWhiteout(archive.OverlayConvertWhiteout)}
-	diffID, err := streamInto(ctx, root, opts, dirs, l, r)
+	unpacking := time.Now()
+	diffID, st, err := streamInto(ctx, root, opts, dirs, l, r)
 	if err != nil {
 		removeQuietly(ctx, sn, key)
 		return ExtractedLayer{}, err
 	}
+	observeUnpack(streamUnpackMethod(ctx), l, time.Since(unpacking))
+	observeUnpackStages(l, st)
 	return ExtractedLayer{Key: key, DiffID: diffID, ByWorker: true, Implied: dirs.list(), RootEntry: dirs.root}, nil
 }
 
@@ -283,14 +291,20 @@ func (s *ContainerdStore) labelUncompressed(ctx context.Context, l LayerSpec, di
 // own digest isn't computed here: containerd checks it when it commits the
 // blob, and a diffID that matches already proves the content is the
 // layer's. dirs, if set, notes the directories the layer only implies.
-func streamInto(ctx context.Context, root string, opts []archive.ApplyOpt, dirs *impliedDirs, l LayerSpec, r io.Reader) (string, error) {
+//
+// It also says where the time went (unpackStages): waiting for the blob's
+// bytes, decompressing, and writing files, each without the time it spent
+// waiting on the stage next to it. The pipes read the clock only when a
+// side is about to wait; the source's reads are timed each (two clock
+// reads per read of up to 32 KiB, about 1.6 ms over a 1 GiB layer).
+func streamInto(ctx context.Context, root string, opts []archive.ApplyOpt, dirs *impliedDirs, l LayerSpec, r io.Reader) (string, unpackStages, error) {
 	// Stages on goroutines of their own, so decompressing (most of the
 	// CPU) overlaps the rest: one reads the blob as it arrives, one
 	// decompresses it, and the archive code hashes the tar and writes the
 	// files. Bounded pipes between them hold 1.25 MiB in all. The tar's
 	// trailing bytes are part of the diffID, as in containerd's applier.
 	diffHash := digest.Canonical.Digester()
-	counted := &countingReader{r: sourceReader{r}}
+	counted := &countingReader{r: sourceReader{r}, timed: true}
 	blob := newChunkPipe(streamUnpackChunks, streamUnpackBlobChunk)
 	pipe := newChunkPipe(streamUnpackChunks, streamUnpackChunk)
 	read, produced := make(chan error, 1), make(chan error, 1)
@@ -299,7 +313,9 @@ func streamInto(ctx context.Context, root string, opts []archive.ApplyOpt, dirs 
 		blob.closeWrite(err)
 		read <- err
 	}()
+	var decompressing time.Duration // set before produced is sent
 	go func() {
+		began := time.Now()
 		err := func() error {
 			dec, err := decompressor(blob)
 			if err != nil {
@@ -314,6 +330,7 @@ func streamInto(ctx context.Context, root string, opts []archive.ApplyOpt, dirs 
 		}()
 		blob.closeRead()
 		pipe.closeWrite(err)
+		decompressing = time.Since(began) - blob.readWait - pipe.writeWait
 		produced <- err
 	}()
 	tarStream := io.TeeReader(pipe, diffHash.Hash())
@@ -325,31 +342,35 @@ func streamInto(ctx context.Context, root string, opts []archive.ApplyOpt, dirs 
 			return pages.next(h)
 		}
 	}
+	writing := time.Now()
 	_, err := archive.Apply(ctx, root, tarStream, append([]archive.ApplyOpt{archive.WithFilter(filter)}, opts...)...)
 	pages.done()
 	if err == nil {
 		_, err = io.Copy(io.Discard, tarStream) // the tar's trailing bytes
 	}
+	st := unpackStages{write: time.Since(writing) - pipe.readWait}
 	pipe.closeRead()
 	if perr := <-produced; err == nil && perr != nil {
 		err = perr
 	}
+	st.decompress = decompressing
 	if err == nil {
 		// The decompressor read the blob to its end: the reader is done.
 		err = <-read
+		st.input = counted.waited
 	}
 	// Otherwise the reader may still wait on r: the caller closes r.
 	if err != nil {
-		return "", fmt.Errorf("unpacking %s: %w", l.Digest, err)
+		return "", st, fmt.Errorf("unpacking %s: %w", l.Digest, err)
 	}
 	if counted.n != l.Size {
-		return "", fmt.Errorf("read %d bytes of blob %s, it has %d", counted.n, l.Digest, l.Size)
+		return "", st, fmt.Errorf("read %d bytes of blob %s, it has %d", counted.n, l.Digest, l.Size)
 	}
 	diffID := diffHash.Digest().String()
 	if got := chainOf(l.Parent, diffID); got != l.ChainID {
-		return "", fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, got, l.ChainID)
+		return "", st, fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, got, l.ChainID)
 	}
-	return diffID, nil
+	return diffID, st, nil
 }
 
 // impliedDirs notes, as a layer's tar entries go by, the directories it
@@ -441,9 +462,13 @@ type chunkPipe struct {
 	chunk      []byte // the chunk being read, whole
 	cur        []byte // what is left of it
 	mu         sync.Mutex
-	werr       error         // why the writer stopped (io.EOF: the end)
-	stop       chan struct{} // closed when the reader is gone
-	stopOnce   sync.Once
+	werr       error // why the writer stopped (io.EOF: the end)
+	// Time each side waited on the other: readWait by the reader for a
+	// chunk, writeWait by the writer for a free one. Each is touched only
+	// by its own side's goroutine.
+	readWait, writeWait time.Duration
+	stop                chan struct{} // closed when the reader is gone
+	stopOnce            sync.Once
 }
 
 func newChunkPipe(n, size int) *chunkPipe {
@@ -464,6 +489,16 @@ func (p *chunkPipe) Write(b []byte) (int, error) {
 		case c = <-p.free:
 		case <-p.stop:
 			return n, errChunkPipeClosed
+		default:
+			// The reader is behind: wait, and count it.
+			waiting := time.Now()
+			select {
+			case c = <-p.free:
+			case <-p.stop:
+				p.writeWait += time.Since(waiting)
+				return n, errChunkPipeClosed
+			}
+			p.writeWait += time.Since(waiting)
 		}
 		k := copy(c[:cap(c)], b)
 		c = c[:k]
@@ -491,7 +526,16 @@ func (p *chunkPipe) closeWrite(err error) {
 
 func (p *chunkPipe) Read(b []byte) (int, error) {
 	if len(p.cur) == 0 {
-		c, ok := <-p.full
+		var c []byte
+		var ok bool
+		select {
+		case c, ok = <-p.full:
+		default:
+			// The writer is behind: wait, and count it.
+			waiting := time.Now()
+			c, ok = <-p.full
+			p.readWait += time.Since(waiting)
+		}
 		if !ok {
 			p.mu.Lock()
 			defer p.mu.Unlock()
@@ -512,12 +556,21 @@ func (p *chunkPipe) Read(b []byte) (int, error) {
 func (p *chunkPipe) closeRead() { p.stopOnce.Do(func() { close(p.stop) }) }
 
 type countingReader struct {
-	r io.Reader
-	n int64
+	r      io.Reader
+	n      int64
+	timed  bool          // also add up the time spent in r's Read
+	waited time.Duration // with timed: that time
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
+	if !c.timed {
+		n, err := c.r.Read(p)
+		c.n += int64(n)
+		return n, err
+	}
+	began := time.Now()
 	n, err := c.r.Read(p)
+	c.waited += time.Since(began)
 	c.n += int64(n)
 	return n, err
 }

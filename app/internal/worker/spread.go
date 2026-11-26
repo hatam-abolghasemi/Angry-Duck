@@ -716,9 +716,9 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// Layers still being unpacked as they arrived are finished first:
 	// the import then finds them unpacked and skips them.
-	s.unpackStop(ctx, f.Job, false)
-	observeFinalizePhase("drain", start)
-	err = s.finalize(ctx, f, image)
+	drained := s.unpackStop(ctx, f.Job, false)
+	drainTook := time.Since(start)
+	held, err := s.finalize(ctx, f, image)
 	if err != nil {
 		spreadFinalizesTotal.Inc(s.nodeID, "failure")
 		logging.Warnf("angryduck-worker[%s]: spread: registering image=%s failed: %v", s.nodeID, image, err)
@@ -734,6 +734,10 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, model.SpreadFinalizeResult{Error: err.Error()})
 		return
 	}
+	if drained {
+		spreadFinalizeSeconds.Observe(drainTook.Seconds(), hnode(), "drain")
+	}
+	spreadFinalizeSeconds.Observe(held.Seconds(), hnode(), "hold")
 	s.mu.Lock()
 	var began time.Time
 	if j := s.jobs[f.Job]; j != nil {
@@ -742,6 +746,8 @@ func (s *Spread) HandleFinalize(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if !began.IsZero() {
 		observeSince(spreadReadySeconds, began)
+	} else {
+		logging.Debugf("angryduck-worker[%s]: spread: job %s for image=%s was forgotten before it finished: its time to ready is not recorded", s.nodeID, f.Job, image)
 	}
 	s.release(ctx, f.Job) // the image references its blobs now
 	spreadFinalizesTotal.Inc(s.nodeID, "success")
@@ -799,13 +805,16 @@ func checkFinalize(f model.SpreadFinalize) error {
 // gone fails the finalize before anything is imported; the import itself
 // only publishes the name once the image is unpacked, so even a layer
 // vanishing after this check can't leave a broken image behind.
-func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image string) error {
+//
+// held is how long the check and pinning took (spread_finalize_seconds
+// {phase="hold"}, recorded by the caller once the whole finalize worked).
+func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image string) (held time.Duration, err error) {
 	top := blobship.Descriptor{MediaType: f.TopType, Digest: f.TopDig, Size: f.TopSize}
 	holding := time.Now()
 	if err := s.holdLayers(ctx, f, top); err != nil {
-		return err
+		return 0, err
 	}
-	observeFinalizePhase("hold", holding)
+	held = time.Since(holding)
 	pr, pw := io.Pipe()
 	go func() {
 		pw.CloseWithError(func() error {
@@ -821,17 +830,15 @@ func (s *Spread) finalize(ctx context.Context, f model.SpreadFinalize, image str
 			return aw.Close()
 		}())
 	}()
-	importing := time.Now()
-	err := s.store.Import(ctx, pr, s.platform)
+	err = s.store.Import(withImportCaller(ctx, importBySpread), pr, s.platform)
 	pr.CloseWithError(errImportEnded)
 	if err != nil {
-		return err
+		return held, err
 	}
 	if _, got, err := s.store.Resolve(ctx, image); err != nil || got != f.TopDig {
-		return fmt.Errorf("after import, %s resolves to %q (err %v), want %s", image, got, err, f.TopDig)
+		return held, fmt.Errorf("after import, %s resolves to %q (err %v), want %s", image, got, err, f.TopDig)
 	}
-	observeFinalizePhase("import", importing)
-	return nil
+	return held, nil
 }
 
 // holdLayers is finalize's check (see there). When the layers can't be

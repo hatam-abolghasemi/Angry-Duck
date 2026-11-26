@@ -590,13 +590,8 @@ func (s *ContainerdStore) Import(ctx context.Context, r io.Reader, platform stri
 		s.dropTemps(ctx, ren.temps())
 		return fmt.Errorf("import: %w", err)
 	}
-	observeImport("register", registering)
-	unpacking := time.Now()
-	if err := s.unpackAndPublish(ctx, imgs, ren, match); err != nil {
-		return err
-	}
-	observeImport("unpack", unpacking)
-	return nil
+	observeImport(ctx, "register", registering)
+	return s.unpackAndPublish(ctx, imgs, ren, match)
 }
 
 // importTempPrefix names the temporary images Import unpacks under. They
@@ -633,6 +628,7 @@ func (s *ContainerdStore) ImportInFlight(name string) bool {
 func (s *ContainerdStore) unpackAndPublish(ctx context.Context, imgs []images.Image, ren *importRenamer, match platforms.MatchComparer) error {
 	temps := ren.temps()
 	defer s.dropTemps(ctx, temps)
+	unpacking := time.Now()
 	for _, img := range imgs {
 		if err := containerd.NewImageWithPlatform(s.client, img, match).Unpack(ctx, s.snapshotter); err != nil {
 			name := img.Name
@@ -647,6 +643,8 @@ func (s *ContainerdStore) unpackAndPublish(ctx context.Context, imgs []images.Im
 			return fmt.Errorf("unpacking %s: %w", name, err)
 		}
 	}
+	observeImport(ctx, "unpack", unpacking)
+	publishing := time.Now()
 	is := s.client.ImageService()
 	for _, img := range imgs {
 		real, ok := ren.real(img.Name)
@@ -658,6 +656,7 @@ func (s *ContainerdStore) unpackAndPublish(ctx context.Context, imgs []images.Im
 			return fmt.Errorf("registering %s: %w", real, err)
 		}
 	}
+	observeImport(ctx, "publish", publishing)
 	return nil
 }
 
@@ -1183,6 +1182,7 @@ func (s *ContainerdStore) ApplyLayer(ctx context.Context, lease string, l LayerS
 		}
 	}()
 	desc := ocispec.Descriptor{MediaType: l.MediaType, Digest: digest.Digest(l.Digest), Size: l.Size}
+	unpacking := time.Now()
 	diffID, err := s.client.DiffService().Apply(ctx, desc, mounts)
 	if err != nil {
 		return false, fmt.Errorf("unpacking %s: %w", l.Digest, err)
@@ -1190,12 +1190,15 @@ func (s *ContainerdStore) ApplyLayer(ctx context.Context, lease string, l LayerS
 	if got := chainOf(l.Parent, diffID.Digest.String()); got != l.ChainID {
 		return false, fmt.Errorf("%s unpacks to chainID %s, the image says %s", l.Digest, got, l.ChainID)
 	}
+	observeUnpack(unpackLanded, l, time.Since(unpacking))
+	committing := time.Now()
 	if err := sn.Commit(ctx, l.ChainID, key); err != nil {
 		if errdefs.IsAlreadyExists(err) {
 			return false, nil // unpacked meanwhile (a pull, a finalize): theirs is as good
 		}
 		return false, fmt.Errorf("committing %s: %w", l.ChainID, err)
 	}
+	observeLayerCommit(commitInPlace, committing)
 	committed = true
 	// What containerd's unpack records too: the blob's uncompressed digest.
 	_, _ = s.client.ContentStore().Update(ctx, content.Info{Digest: desc.Digest,

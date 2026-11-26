@@ -557,7 +557,7 @@ func (rs *Rescue) importMerged(ctx context.Context, image string, top blobship.D
 		pw.CloseWithError(err)
 		writeErr <- err
 	}()
-	importErr := rs.store.Import(ctx, pr, rs.platform)
+	importErr := rs.store.Import(withImportCaller(ctx, importByRescue), pr, rs.platform)
 	pr.CloseWithError(errImportEnded)
 	werr := <-writeErr
 	if werr != nil && !errors.Is(werr, errImportEnded) {

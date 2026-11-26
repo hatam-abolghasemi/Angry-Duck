@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"context"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,9 +18,9 @@ import (
 // cancellations are already counted by the matching counters, and a
 // cancelled transfer's duration says nothing about the stage.
 //
-// Series count is bounded by construction: labels are the node, a small
-// fixed vocabulary (path, method, phase) and a three-way size class. Never
-// an image, a digest or a layer. Per-image and per-node detail stays in the
+// Series count is bounded by construction: labels are the node, small
+// fixed vocabularies (path, mode, method, compression, stage, kind, caller,
+// phase) and a three-way size class. Never an image, a digest or a layer. Per-image and per-node detail stays in the
 // TTL-held event gauges (see docs/observability.md#image-history).
 //
 // A histogram series appears with its first observation (see
@@ -46,13 +48,18 @@ var (
 
 	layerUnpackSeconds = metrics.NewHistogramVec(
 		"angryduck_worker_layer_unpack_seconds",
-		"Wall time of unpacking one layer into a snapshot, before any commit onto its parent. method: streamed (by this worker while the blob arrived, so it includes waiting for the bytes), landed (by containerd from the landed blob), landed_own (by this worker from the landed blob). Successful unpacks only.",
-		durationBuckets, "node", "method", "size_class")
+		"Wall time of turning one layer blob into files in a snapshot: decompressing it and writing its files, nothing else (preparing the snapshot and committing it are not in it; commits are layer_commit_seconds). method: landed (containerd, from the landed blob), streamed (this worker, while the blob arrived, so it includes waiting for the bytes), landed_own (this worker, from the landed blob). compression: gzip, zstd, none or other, from the blob's media type. size_class is the compressed blob size. Successful unpacks only.",
+		durationBuckets, "node", "method", "compression", "size_class")
+
+	layerUnpackStageSeconds = metrics.NewHistogramVec(
+		"angryduck_worker_layer_unpack_stage_seconds",
+		"For each layer this worker unpacks itself (methods streamed and landed_own), where its unpack time went, one observation per stage per layer. The stages run side by side, so they overlap and don't add up to the unpack time: the stage closest to the unpack time is the bottleneck. stage: input (waiting for the blob's bytes: the network or peer while it arrives, the disk once landed), decompress (decompressing, waiting on neither side), write (writing files, waiting on neither side). Not available for layers containerd unpacks (method landed). Successful unpacks only.",
+		durationBuckets, "node", "stage", "compression")
 
 	layerCommitSeconds = metrics.NewHistogramVec(
 		"angryduck_worker_layer_commit_seconds",
-		"Time to attach an already unpacked layer onto the layer below it and commit its snapshot. Only layers unpacked on their own and committed later.",
-		durationBuckets, "node", "size_class")
+		"Time to commit one unpacked layer's snapshot under its chainID. kind: in_place (unpacked onto the layer below, committed right after), onto_parent (unpacked on its own by containerd, committed onto the layer below), attach (unpacked on its own by this worker, its files moved onto the layer below, then committed). Successful commits only.",
+		durationBuckets, "node", "kind")
 
 	snapshotReceiveSeconds = metrics.NewHistogramVec(
 		"angryduck_worker_snapshot_receive_seconds",
@@ -61,17 +68,17 @@ var (
 
 	spreadFinalizeSeconds = metrics.NewHistogramVec(
 		"angryduck_worker_spread_finalize_seconds",
-		"Time spent in each phase of registering a spread image: drain (waiting for layers still unpacking as they arrive), hold (checking and pinning the layers), import (containerd import and unpack under a temporary name, then publishing the real name). Successful finalizes only.",
+		"Time spent in the phases of registering a spread image before containerd's import (the import itself is import_seconds{caller=\"spread\"}): drain (waiting for layers still unpacking as they arrived; only when one was), hold (checking and pinning the layers). Successful finalizes only.",
 		durationBuckets, "node", "phase")
 
 	importSeconds = metrics.NewHistogramVec(
 		"angryduck_worker_import_seconds",
-		"Time in the two parts of a containerd image import, for every import this worker makes (spread, rescue, repair): register (reading the archive and creating the temporary image) and unpack (unpacking the layers that have no snapshot yet, then publishing the real name).",
-		durationBuckets, "node", "phase")
+		"Time in each part of a containerd image import this worker makes: register (reading the archive and creating the image under a temporary name), unpack (containerd unpacking the layers that have no snapshot yet; near zero when they were unpacked ahead), publish (pointing the real name at it). caller: spread, rescue, repair. Successful parts only.",
+		durationBuckets, "node", "caller", "phase")
 
 	spreadReadySeconds = metrics.NewHistogramVec(
 		"angryduck_worker_spread_ready_seconds",
-		"Time from the first transfer or layer check this node made for a spread until its image name was registered, i.e. the node-local time to image ready.",
+		"Time from the first transfer or layer check this node made for a spread until its image name was registered, i.e. the node-local time to image ready. A spread whose job here was forgotten before it finished (idle for longer than its lease lives) is not recorded.",
 		durationBuckets, "node")
 
 	unpackSlots = metrics.NewGaugeVec(
@@ -114,6 +121,21 @@ func sizeClass(n int64) string {
 	}
 }
 
+// compressionOf names a layer blob's compression from its media type, as
+// the unpack histograms label it: gzip, zstd, none (a plain tar) or other.
+func compressionOf(mediaType string) string {
+	switch {
+	case strings.HasSuffix(mediaType, "+zstd") || strings.HasSuffix(mediaType, ".zstd"):
+		return "zstd"
+	case strings.HasSuffix(mediaType, "+gzip") || strings.HasSuffix(mediaType, ".gzip"):
+		return "gzip"
+	case strings.HasSuffix(mediaType, ".tar"):
+		return "none"
+	default:
+		return "other"
+	}
+}
+
 func observeSince(h *metrics.HistogramVec, start time.Time, labels ...string) {
 	h.Observe(time.Since(start).Seconds(), append([]string{hnode()}, labels...)...)
 }
@@ -128,22 +150,88 @@ func observeBlobCommit(mode string, size int64, start time.Time) {
 	observeSince(blobCommitSeconds, start, mode, sizeClass(size))
 }
 
-// observeUnpack records one successful layer unpack. size is the layer's
-// compressed blob size.
-func observeUnpack(method string, size int64, start time.Time) {
-	observeSince(layerUnpackSeconds, start, method, sizeClass(size))
+// Unpack methods, as layer_unpack_seconds labels them.
+const (
+	unpackLanded    = "landed"     // containerd, from the landed blob
+	unpackStreamed  = "streamed"   // this worker, while the blob arrives
+	unpackLandedOwn = "landed_own" // this worker, from the landed blob
+)
+
+type unpackMethodKey struct{}
+
+// withUnpackMethod tells the store's stream unpack (ApplyLayerStream,
+// ExtractLayerStream) whether the reader it is given is a blob still
+// arriving (unpackStreamed, the default) or one that has landed
+// (unpackLandedOwn): only the caller knows, and only the store knows where
+// the unpack itself starts and ends.
+func withUnpackMethod(ctx context.Context, method string) context.Context {
+	return context.WithValue(ctx, unpackMethodKey{}, method)
 }
 
-func observeLayerCommit(size int64, start time.Time) {
-	observeSince(layerCommitSeconds, start, sizeClass(size))
+func streamUnpackMethod(ctx context.Context) string {
+	if m, ok := ctx.Value(unpackMethodKey{}).(string); ok {
+		return m
+	}
+	return unpackStreamed
+}
+
+// observeUnpack records one successful layer unpack (decompress and write
+// only). Its size class is the layer's compressed blob size.
+func observeUnpack(method string, l LayerSpec, took time.Duration) {
+	layerUnpackSeconds.Observe(took.Seconds(), hnode(), method, compressionOf(l.MediaType), sizeClass(l.Size))
+}
+
+// unpackStages is where one worker-run unpack spent its time (see
+// streamInto). Stage times overlap: the stages run side by side.
+type unpackStages struct {
+	input, decompress, write time.Duration
+}
+
+func observeUnpackStages(l LayerSpec, st unpackStages) {
+	c := compressionOf(l.MediaType)
+	n := hnode()
+	layerUnpackStageSeconds.Observe(st.input.Seconds(), n, "input", c)
+	layerUnpackStageSeconds.Observe(st.decompress.Seconds(), n, "decompress", c)
+	layerUnpackStageSeconds.Observe(st.write.Seconds(), n, "write", c)
+}
+
+// Layer commit kinds, as layer_commit_seconds labels them.
+const (
+	commitInPlace    = "in_place"
+	commitOntoParent = "onto_parent"
+	commitAttach     = "attach"
+)
+
+func observeLayerCommit(kind string, start time.Time) {
+	observeSince(layerCommitSeconds, start, kind)
 }
 
 func observeSnapshotReceive(wireBytes int64, start time.Time) {
 	observeSince(snapshotReceiveSeconds, start, sizeClass(wireBytes))
 }
 
-func observeFinalizePhase(phase string, start time.Time) {
-	observeSince(spreadFinalizeSeconds, start, phase)
+// Import callers, as import_seconds labels them.
+const (
+	importBySpread = "spread"
+	importByRescue = "rescue"
+	importByRepair = "repair"
+)
+
+type importCallerKey struct{}
+
+// withImportCaller names who an import is for, for import_seconds: the
+// store's Import is shared by spread, rescue and repair.
+func withImportCaller(ctx context.Context, caller string) context.Context {
+	return context.WithValue(ctx, importCallerKey{}, caller)
 }
 
-func observeImport(phase string, start time.Time) { observeSince(importSeconds, start, phase) }
+func importCaller(ctx context.Context) string {
+	if c, ok := ctx.Value(importCallerKey{}).(string); ok {
+		return c
+	}
+	return "other"
+}
+
+func observeImport(ctx context.Context, phase string, start time.Time) {
+	observeSince(importSeconds, start, importCaller(ctx), phase)
+}
