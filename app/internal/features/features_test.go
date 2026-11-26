@@ -16,7 +16,7 @@ func resolveWith(vals map[string]bool) Flags {
 
 func TestDefaultsAllOnButStreamUnpack(t *testing.T) {
 	f := resolveWith(nil)
-	if !(f.GC && f.GCRetention && f.Companion && f.Spread && f.SpreadStream && f.SpreadBottomUp && f.SpreadUnpack && f.SpreadUnpackParallel && f.Propagate && f.Rescue && f.Mirror && f.MirrorResolve && f.Repair && f.LayerInventory && f.InventoryEvents) {
+	if !(f.GC && f.GCRetention && f.Companion && f.Spread && f.SpreadStream && f.SpreadResume && f.SpreadBottomUp && f.SpreadUnpack && f.SpreadUnpackParallel && f.Propagate && f.Rescue && f.Mirror && f.MirrorResolve && f.Repair && f.LayerInventory && f.InventoryEvents) {
 		t.Fatalf("every feature is on by default, got %s", f)
 	}
 	if f.SpreadUnpackStream {
@@ -42,7 +42,7 @@ func TestParentOffTurnsChildrenOff(t *testing.T) {
 		t.Fatalf("expected a note per child naming the parent, got %v", f.Notes)
 	}
 	f = resolveWith(map[string]bool{"SPREAD_ENABLED": false})
-	if f.Spread || f.SpreadStream || f.SpreadBottomUp || f.SpreadUnpack || f.SpreadUnpackStream || f.SpreadUnpackParallel {
+	if f.Spread || f.SpreadStream || f.SpreadResume || f.SpreadBottomUp || f.SpreadUnpack || f.SpreadUnpackStream || f.SpreadUnpackParallel {
 		t.Fatalf("spread off must turn streaming off, got %s", f)
 	}
 	f = resolveWith(map[string]bool{"MIRROR_ENABLED": false})
@@ -92,7 +92,7 @@ func TestEachSwitchIsIndependentOfItsSiblings(t *testing.T) {
 // flagOn reports whether the single flag set in probe is on in f.
 func flagOn(f, probe Flags) bool {
 	return (probe.GC && f.GC) || (probe.GCRetention && f.GCRetention) || (probe.Companion && f.Companion) || (probe.Spread && f.Spread) ||
-		(probe.SpreadStream && f.SpreadStream) || (probe.SpreadBottomUp && f.SpreadBottomUp) || (probe.SpreadUnpack && f.SpreadUnpack) ||
+		(probe.SpreadStream && f.SpreadStream) || (probe.SpreadResume && f.SpreadResume) || (probe.SpreadBottomUp && f.SpreadBottomUp) || (probe.SpreadUnpack && f.SpreadUnpack) ||
 		(probe.SpreadUnpackStream && f.SpreadUnpackStream) || (probe.SpreadUnpackParallel && f.SpreadUnpackParallel) || (probe.Propagate && f.Propagate) || (probe.Rescue && f.Rescue) ||
 		(probe.Mirror && f.Mirror) || (probe.MirrorResolve && f.MirrorResolve) || (probe.Repair && f.Repair) || (probe.LayerInventory && f.LayerInventory) ||
 		(probe.InventoryEvents && f.InventoryEvents)

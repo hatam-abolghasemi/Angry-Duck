@@ -285,6 +285,10 @@ func main() {
 			sp.DisableStreaming()
 		}
 		reporter.SetStreams(streams)
+		// A transfer that stops part-way leaves its bytes for the next
+		// one of the blob; SPREAD_RESUME_ENABLED=false aborts it, as
+		// before 1.15.0.
+		resumes := feat.SpreadResume && sp.EnableResume()
 		// Unpacking layers as they arrive, instead of all at finalize;
 		// SPREAD_UNPACK_ENABLED=false leaves it all to finalize.
 		unpacks := false
@@ -330,7 +334,7 @@ func main() {
 				unpackParallel = unpackSlots
 			}
 		}
-		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t unpack_on_arrival=%t unpack_while_arriving=%t unpack_parallel=%d", nodeID, platform, timeout, streams, unpacks, unpackStream, unpackParallel)
+		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t resume=%t unpack_on_arrival=%t unpack_while_arriving=%t unpack_parallel=%d", nodeID, platform, timeout, streams, resumes, unpacks, unpackStream, unpackParallel)
 		timings.Spread, timings.Unpack = true, unpacks
 		timings.StreamUnpack, timings.ParallelUnpack = unpackStream, unpackParallel > 0
 	}

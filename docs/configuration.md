@@ -35,6 +35,7 @@ GC_ENABLED                  image cleanup on each node
 └─ COMPANION_ENABLED        sidecar images of app pods kept on every node
 SPREAD_ENABLED              blob-by-blob spreading
 ├─ SPREAD_STREAM_ENABLED    serving blobs to peers while still receiving them
+├─ SPREAD_RESUME_ENABLED    a transfer going on from what a stopped one left
 ├─ SPREAD_BOTTOM_UP_ENABLED each node gets its layers bottom first
 └─ SPREAD_UNPACK_ENABLED    unpacking each layer as soon as it and the layers below are here
    ├─ SPREAD_UNPACK_STREAM_ENABLED    ... while its blob still arrives (off by default)
@@ -119,6 +120,7 @@ How pushed images reach every node blob by blob. See
 | `SPREAD_BACKOFF_MAX_S` | `600` | Cap for that doubling. |
 | `SPREAD_TRANSFER_TIMEOUT_S` | `1800` | One blob transfer, start to finish (worker). The controller forgets a transfer nobody reported on a minute after. |
 | `SPREAD_STREAM_ENABLED` | `true` | A node still receiving a large blob serves it on to peers as the bytes arrive ([streaming](propagation.md#streaming-large-blobs)). Read by the controller and the worker; a worker streams only with containerd's content store mounted. |
+| `SPREAD_RESUME_ENABLED` | `true` | A transfer that stops part-way leaves its bytes, and the next transfer of the blob on that node asks its source for the rest only; a restart from a faster peer, or a peer copy of a blob still coming from the registry, takes the running transfer's bytes over instead of starting from 0 ([resuming](propagation.md#transfers-that-stop-part-way)). `false`: a stopped transfer is aborted, as before 1.15.0. Read by the worker. |
 | `SPREAD_BOTTOM_UP_ENABLED` | `true` | Each node gets its layers bottom first, the order it unpacks them in, so unpacking starts with the first layer that lands ([order](propagation.md#how-a-push-spreads)). `false`: rarest layer first to peers, largest first from the registry, as before 1.14.0. Read by the controller. |
 | `SPREAD_UNPACK_ENABLED` | `true` | A node unpacks each layer as soon as its blob and the layers below it are here, while the rest still arrive, instead of all at once when the image registers ([unpacking](propagation.md#unpacking-as-layers-arrive)). Read by the worker. |
 | `SPREAD_UNPACK_PARALLEL_ENABLED` | `true` | Where containerd's snapshotter can commit onto a parent (containerd 2.2+, found at startup), a node unpacks layers side by side as they land and commits them bottom up ([side by side](propagation.md#unpacking-layers-side-by-side)). Elsewhere: one at a time. Read by the worker. |
