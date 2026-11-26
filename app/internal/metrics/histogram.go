@@ -107,3 +107,15 @@ func (h *HistogramVec) write(w io.Writer) {
 	_, _ = w.Write(b)
 	*bp = b[:0]
 }
+
+// Count is how many observations the series with these label values has
+// (0 when it has none yet). For tests and debugging; scrapes use write.
+func (h *HistogramVec) Count(labelValues ...string) int64 {
+	key := strings.Join(labelValues, labelSep)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.series[key]; s != nil {
+		return s.count
+	}
+	return 0
+}

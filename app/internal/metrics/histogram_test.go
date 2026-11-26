@@ -46,3 +46,16 @@ func TestHistogramVecNoLabels(t *testing.T) {
 		t.Errorf("missing %q in:\n%s", want, buf.String())
 	}
 }
+
+func TestHistogramVecCount(t *testing.T) {
+	h := &HistogramVec{name: "c_seconds", help: "x", labelNames: []string{"a"}, bounds: []float64{1}, series: map[string]*histSeries{}}
+	if got := h.Count("x"); got != 0 {
+		t.Fatalf("Count before any observation = %d", got)
+	}
+	h.Observe(0.5, "x")
+	h.Observe(3, "x")
+	h.Observe(3, "y")
+	if got := h.Count("x"); got != 2 {
+		t.Errorf("Count(x) = %d, want 2", got)
+	}
+}
