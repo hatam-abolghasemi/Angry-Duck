@@ -38061,7 +38061,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.5, sum by (le, stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n))",
+                        "expr": "histogram_quantile(0.5, sum by (le, stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n)) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -38085,7 +38085,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n))",
+                        "expr": "histogram_quantile(0.95, sum by (le, stage) (\n  label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"01 blob: source answers (registry)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"02 blob: source answers (peer)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]), \"stage\", \"03 blob: transfer from registry\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]), \"stage\", \"04 blob: transfer from peer\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"05 blob: commit into the content store\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"gzip\"}[$__range]), \"stage\", \"06 layer: unpack gzip\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"zstd\"}[$__range]), \"stage\", \"07 layer: unpack zstd\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", compression=\"none\"}[$__range]), \"stage\", \"08 layer: unpack plain tar\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"09 layer: commit its snapshot\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"drain\"}[$__range]), \"stage\", \"10 image: wait for layers unpacking (drain)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", phase=\"hold\"}[$__range]), \"stage\", \"11 image: check and pin layers (hold)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]), \"stage\", \"12 image: register (containerd import)\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"unpack\"}[$__range]), \"stage\", \"13 image: containerd unpack at import\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"publish\"}[$__range]), \"stage\", \"14 image: publish its name\", \"\", \"\")\n  or label_replace(increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]), \"stage\", \"15 node: first transfer to image ready\", \"\", \"\")\n)) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -38443,7 +38443,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, path, size_class) (rate(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, path, size_class) (rate(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m]))) >= 0",
                         "legendFormat": "{{path}} {{size_class}}",
                         "instant": false,
                         "range": true
@@ -38637,7 +38637,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, path) (rate(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, path) (rate(angryduck_worker_blob_open_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m]))) >= 0",
                         "legendFormat": "blob from {{path}}",
                         "instant": false,
                         "range": true
@@ -38659,7 +38659,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le) (rate(angryduck_registry_request_seconds_bucket{k8s_source_cluster=~\"$cluster\", kind=\"resolve\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le) (rate(angryduck_registry_request_seconds_bucket{k8s_source_cluster=~\"$cluster\", kind=\"resolve\"}[15m]))) >= 0",
                         "legendFormat": "registry: resolve an image",
                         "instant": false,
                         "range": true
@@ -38847,7 +38847,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, method, compression) (rate(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, method, compression) (rate(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m]))) >= 0",
                         "legendFormat": "{{method}} {{compression}}",
                         "instant": false,
                         "range": true
@@ -39260,7 +39260,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(angryduck_worker_spread_finalize_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m]))) >= 0",
                         "legendFormat": "{{phase}}",
                         "instant": false,
                         "range": true
@@ -39282,7 +39282,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\"}[15m]))) >= 0",
                         "legendFormat": "import {{phase}}",
                         "instant": false,
                         "range": true
@@ -39492,7 +39492,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.5, sum by (le) (rate(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "expr": "histogram_quantile(0.5, sum by (le) (rate(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m]))) >= 0",
                         "legendFormat": "p50",
                         "instant": false,
                         "range": true
@@ -39514,7 +39514,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le) (rate(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m])))",
+                        "expr": "histogram_quantile(0.95, sum by (le) (rate(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[15m]))) >= 0",
                         "legendFormat": "p95",
                         "instant": false,
                         "range": true
@@ -39926,7 +39926,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"registry\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -39950,7 +39950,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_fetch_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", path=\"peer\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -39974,7 +39974,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_blob_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -39998,7 +39998,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_layer_unpack_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -40022,7 +40022,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_layer_commit_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -40046,7 +40046,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_import_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\", caller=\"spread\", phase=\"register\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -40070,7 +40070,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, node) (increase(angryduck_worker_spread_ready_seconds_bucket{k8s_source_cluster=~\"$cluster\", node=~\"$node\"}[$__range]))) >= 0",
                         "legendFormat": "__auto",
                         "instant": true,
                         "range": false,
@@ -40091,6 +40091,27 @@
                     "options": {
                       "byField": "node",
                       "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterByValue",
+                  "spec": {
+                    "options": {
+                      "filters": [
+                        {
+                          "config": {
+                            "id": "lower",
+                            "options": {
+                              "value": 0.5
+                            }
+                          },
+                          "fieldName": "Value #spreads"
+                        }
+                      ],
+                      "match": "any",
+                      "type": "exclude"
                     }
                   }
                 },
