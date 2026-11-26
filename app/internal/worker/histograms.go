@@ -23,8 +23,11 @@ import (
 // phase) and a three-way size class. Never an image, a digest or a layer. Per-image and per-node detail stays in the
 // TTL-held event gauges (see docs/observability.md#image-history).
 //
-// A histogram series appears with its first observation (see
-// metrics.HistogramVec); none is created at zero.
+// The series of every stage this node can go through are created at zero
+// at startup (InitTimings): spreads come in bursts, and an image is
+// finalized once per node, so a series born holding its first
+// observations would never show them in rate() or increase(). Stages of
+// features that are off get no series.
 
 // durationBuckets are in seconds. They run from a cached local blob (tens
 // of milliseconds) to a multi-GB layer over a slow link (minutes).
@@ -234,4 +237,94 @@ func importCaller(ctx context.Context) string {
 
 func observeImport(ctx context.Context, phase string, start time.Time) {
 	observeSince(importSeconds, start, importCaller(ctx), phase)
+}
+
+// TimingSeries is what this node can do, as far as the duration
+// histograms care: InitTimings creates the series of those stages, and
+// only those, at zero.
+type TimingSeries struct {
+	Spread         bool // blobs from the registry and peers, finalize, ready
+	Unpack         bool // layers unpacked as they land (SPREAD_UNPACK_ENABLED)
+	StreamUnpack   bool // and while they arrive, by this worker
+	ParallelUnpack bool // landed layers side by side (containerd 2.2+)
+	DirectWrites   bool // blobs straight into containerd's ingest
+	Rescue         bool
+	Repair         bool
+}
+
+// Compressions a layer series is created for up front: what images are
+// made of. "other" appears with its first observation.
+var (
+	initCompressions   = []string{"gzip", "zstd", "none"}
+	streamCompressions = []string{"gzip", "none"} // zstd isn't unpacked by the worker
+	sizeClasses        = []string{"small", "medium", "large"}
+)
+
+// InitTimings creates at zero the duration series of every stage this
+// node can go through (see the top of this file). Call it once, after
+// SetMetricsNode, with what the worker turned on.
+func InitTimings(t TimingSeries) {
+	n := hnode()
+	if t.Spread {
+		for _, path := range []string{"registry", "peer"} {
+			blobOpenSeconds.Init(n, path)
+			for _, sc := range sizeClasses {
+				blobFetchSeconds.Init(n, path, sc)
+			}
+		}
+		spreadFinalizeSeconds.Init(n, "hold")
+		spreadReadySeconds.Init(n)
+		initImport(n, importBySpread)
+	}
+	if t.Spread || t.Rescue || t.Repair {
+		modes := []string{"api"}
+		if t.DirectWrites {
+			modes = append(modes, "direct")
+		}
+		for _, m := range modes {
+			for _, sc := range sizeClasses {
+				blobCommitSeconds.Init(n, m, sc)
+			}
+		}
+	}
+	if t.Spread && t.Unpack {
+		for _, c := range initCompressions {
+			for _, sc := range sizeClasses {
+				layerUnpackSeconds.Init(n, unpackLanded, c, sc)
+			}
+		}
+		layerCommitSeconds.Init(n, commitInPlace)
+		spreadFinalizeSeconds.Init(n, "drain")
+		if t.StreamUnpack {
+			for _, c := range streamCompressions {
+				for _, m := range []string{unpackStreamed, unpackLandedOwn} {
+					for _, sc := range sizeClasses {
+						layerUnpackSeconds.Init(n, m, c, sc)
+					}
+				}
+				for _, st := range []string{"input", "decompress", "write"} {
+					layerUnpackStageSeconds.Init(n, st, c)
+				}
+			}
+			layerCommitSeconds.Init(n, commitAttach)
+		}
+		if t.ParallelUnpack {
+			layerCommitSeconds.Init(n, commitOntoParent)
+		}
+	}
+	if t.Rescue {
+		for _, sc := range sizeClasses {
+			snapshotReceiveSeconds.Init(n, sc)
+		}
+		initImport(n, importByRescue)
+	}
+	if t.Repair {
+		initImport(n, importByRepair)
+	}
+}
+
+func initImport(node, caller string) {
+	for _, p := range []string{"register", "unpack", "publish"} {
+		importSeconds.Init(node, caller, p)
+	}
 }

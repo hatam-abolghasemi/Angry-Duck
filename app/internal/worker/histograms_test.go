@@ -174,3 +174,50 @@ func TestStreamIntoSaysWhereTheTimeWent(t *testing.T) {
 		t.Errorf("write = %s, want under %s", st.write, delay)
 	}
 }
+
+// Every stage a node can go through has its series at zero from the
+// start, so the first spread after a restart is seen by rate(); stages of
+// features that are off get none.
+func TestInitTimingsCreatesWhatTheNodeCanDo(t *testing.T) {
+	SetMetricsNode("init-node")
+	InitTimings(TimingSeries{Spread: true, Unpack: true, DirectWrites: true, Repair: true})
+	n := "init-node"
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"ready", spreadReadySeconds.Exists(n)},
+		{"hold", spreadFinalizeSeconds.Exists(n, "hold")},
+		{"drain", spreadFinalizeSeconds.Exists(n, "drain")},
+		{"registry fetch", blobFetchSeconds.Exists(n, "registry", "large")},
+		{"peer open", blobOpenSeconds.Exists(n, "peer")},
+		{"direct commit", blobCommitSeconds.Exists(n, "direct", "medium")},
+		{"api commit", blobCommitSeconds.Exists(n, "api", "small")},
+		{"landed zstd unpack", layerUnpackSeconds.Exists(n, unpackLanded, "zstd", "large")},
+		{"in-place commit", layerCommitSeconds.Exists(n, commitInPlace)},
+		{"spread import publish", importSeconds.Exists(n, importBySpread, "publish")},
+		{"repair import register", importSeconds.Exists(n, importByRepair, "register")},
+	} {
+		if !c.ok {
+			t.Errorf("%s: no series at zero", c.name)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"streamed unpack (stream unpack off)", layerUnpackSeconds.Exists(n, unpackStreamed, "gzip", "small")},
+		{"stages (stream unpack off)", layerUnpackStageSeconds.Exists(n, "input", "gzip")},
+		{"attach (stream unpack off)", layerCommitSeconds.Exists(n, commitAttach)},
+		{"onto_parent (parallel off)", layerCommitSeconds.Exists(n, commitOntoParent)},
+		{"rescue import (rescue off)", importSeconds.Exists(n, importByRescue, "register")},
+		{"snapshot receive (rescue off)", snapshotReceiveSeconds.Exists(n, "small")},
+	} {
+		if c.ok {
+			t.Errorf("%s: series created for a stage this node can't go through", c.name)
+		}
+	}
+	if got := spreadReadySeconds.Count(n); got != 0 {
+		t.Errorf("ready count %d, want 0", got)
+	}
+}

@@ -94,6 +94,9 @@ type Resolved struct {
 
 // New builds a Client. creds may be nil (anonymous only).
 func New(creds *registryauth.Store, timeout, cacheTTL time.Duration) *Client {
+	// At zero from the first client on: resolves come once per image, and
+	// a series born holding them would never show them in rate().
+	requestSeconds.Init("resolve")
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = 30 * time.Second
 	return &Client{

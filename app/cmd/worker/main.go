@@ -265,6 +265,9 @@ func main() {
 		rescue.OnSuccess(reporter.Kick)
 	}
 	var extra []func(*http.ServeMux)
+	// The duration series of what this node turns on, created at zero once
+	// it is all set up (worker.InitTimings).
+	timings := worker.TimingSeries{Rescue: rescue != nil, DirectWrites: store != nil && store.DirectWrites()}
 	if store != nil && tokenErr == nil && feat.Spread {
 		// Blob-by-blob spreading. Registry pulls by digest use the same
 		// pull secret as CRI pulls; the stream itself has no whole-request
@@ -328,6 +331,8 @@ func main() {
 			}
 		}
 		log.Printf("angryduck-worker[%s]: spread enabled: platform=%s transfer_timeout=%s streaming=%t unpack_on_arrival=%t unpack_while_arriving=%t unpack_parallel=%d", nodeID, platform, timeout, streams, unpacks, unpackStream, unpackParallel)
+		timings.Spread, timings.Unpack = true, unpacks
+		timings.StreamUnpack, timings.ParallelUnpack = unpackStream, unpackParallel > 0
 	}
 
 	// Images being pulled or received right now: cleanup and repair never
@@ -353,10 +358,12 @@ func main() {
 		reporter.SetExclude(repair.Broken)
 		deletedHooks = append(deletedHooks, repair.Deleted)
 		log.Printf("angryduck-worker[%s]: image repair enabled: interval=%s, from peers=%t then the registry", nodeID, interval, tokenErr == nil)
+		timings.Repair = true
 		go repair.Run(ctx)
 	} else if store != nil {
 		log.Printf("angryduck-worker[%s]: image repair disabled (IMAGE_REPAIR_ENABLED=false): an image that can't start containers stays until removed by hand", nodeID)
 	}
+	worker.InitTimings(timings)
 
 	if store != nil && feat.GC {
 		// Retention marks images on the controller's orders, which need
