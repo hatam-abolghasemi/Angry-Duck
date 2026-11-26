@@ -226,6 +226,7 @@ func TestContainerd_StreamUnpackMakesContainerdsFiles(t *testing.T) {
 		compressedLayer{entries: baseLayer}, compressedLayer{entries: appLayer, zstd: true}, compressedLayer{entries: third})
 	reg := &rateRegistry{blobs: img.blobs, rate: 16 << 20} // the big layer takes over a second
 	sp, srv := streamUnpackSpread(t, s, reg, "su1")
+	before := timings()
 
 	for i := range img.layers {
 		postSpread(t, srv, "/spread/fetch", fetchOf(img, types, "j1", i))
@@ -261,6 +262,77 @@ func TestContainerd_StreamUnpackMakesContainerdsFiles(t *testing.T) {
 	if _, got, err := s.Resolve(ctx, img.name); err != nil || got != img.manifest {
 		t.Fatalf("resolves to %q (%v)", got, err)
 	}
+
+	// Every unpack is timed once, under who did it, with the stages of
+	// the ones this worker ran, and one commit each: in place, or attached
+	// for a layer that streamed in before the one below was unpacked.
+	d := timings().minus(before)
+	if d.unpack[unpackStreamed] != int64(streamed) || d.unpack[unpackLanded] != int64(applied) || d.unpack[unpackLandedOwn] != 0 {
+		t.Errorf("unpack timings %v, want streamed=%v landed=%v", d.unpack, streamed, applied)
+	}
+	if d.stages != int64(streamed) {
+		t.Errorf("stage timings for %d layers, want %v (the streamed ones)", d.stages, streamed)
+	}
+	if d.commit[commitInPlace]+d.commit[commitAttach] != 3 || d.commit[commitOntoParent] != 0 {
+		t.Errorf("commit timings %v, want 3 in place or attached", d.commit)
+	}
+	if d.zstd != 1 {
+		t.Errorf("zstd unpacks timed: %d, want 1 (by containerd)", d.zstd)
+	}
+	if d.imports["register"] != 1 || d.imports["publish"] != 1 || d.hold != 1 || d.drain != 0 {
+		t.Errorf("finalize timings: imports %v hold %d drain %d, want one each and no drain (nothing was unpacking)", d.imports, d.hold, d.drain)
+	}
+}
+
+// timingCounts adds up what the duration histograms recorded on this
+// node, for before-and-after comparisons.
+type timingCounts struct {
+	unpack, commit, imports map[string]int64
+	stages, zstd            int64
+	hold, drain             int64
+}
+
+func timings() timingCounts {
+	n := hnode()
+	t := timingCounts{unpack: map[string]int64{}, commit: map[string]int64{}, imports: map[string]int64{}}
+	for _, m := range []string{unpackLanded, unpackStreamed, unpackLandedOwn} {
+		for _, c := range []string{"gzip", "zstd", "none", "other"} {
+			for _, sc := range []string{"small", "medium", "large"} {
+				k := layerUnpackSeconds.Count(n, m, c, sc)
+				t.unpack[m] += k
+				if c == "zstd" {
+					t.zstd += k
+				}
+			}
+		}
+	}
+	for _, c := range []string{"gzip", "zstd", "none", "other"} {
+		t.stages += layerUnpackStageSeconds.Count(n, "input", c)
+	}
+	for _, k := range []string{commitInPlace, commitOntoParent, commitAttach} {
+		t.commit[k] = layerCommitSeconds.Count(n, k)
+	}
+	for _, p := range []string{"register", "unpack", "publish"} {
+		t.imports[p] = importSeconds.Count(n, importBySpread, p)
+	}
+	t.hold = spreadFinalizeSeconds.Count(n, "hold")
+	t.drain = spreadFinalizeSeconds.Count(n, "drain")
+	return t
+}
+
+func (a timingCounts) minus(b timingCounts) timingCounts {
+	d := timingCounts{unpack: map[string]int64{}, commit: map[string]int64{}, imports: map[string]int64{},
+		stages: a.stages - b.stages, zstd: a.zstd - b.zstd, hold: a.hold - b.hold, drain: a.drain - b.drain}
+	for k, v := range a.unpack {
+		d.unpack[k] = v - b.unpack[k]
+	}
+	for k, v := range a.commit {
+		d.commit[k] = v - b.commit[k]
+	}
+	for k, v := range a.imports {
+		d.imports[k] = v - b.imports[k]
+	}
+	return d
 }
 
 // ociArchive is the image as an OCI archive, for a reference import.
@@ -654,6 +726,7 @@ func TestContainerd_ParallelUnpackMakesContainerdsFiles(t *testing.T) {
 		if !sp.EnableParallelUnpack(s, 3) {
 			t.Fatal("refused")
 		}
+		before := timings()
 		for i := len(img.layers) - 1; i >= 0; i-- {
 			postSpread(t, srv, "/spread/fetch", fetchOf(img, types, "pj", i))
 			if !stream {
@@ -680,6 +753,26 @@ func TestContainerd_ParallelUnpackMakesContainerdsFiles(t *testing.T) {
 		}
 		for _, ch := range img.chains[1:] {
 			sameTree(t, tree(t, ref, ch), tree(t, s, ch))
+		}
+		// Each layer: one unpack, one commit, of the kind its path used.
+		// Top first, the upper layers had no layer below yet: unpacked on
+		// their own, committed onto it later.
+		d := timings().minus(before)
+		var unpacks, commits int64
+		for _, v := range d.unpack {
+			unpacks += v
+		}
+		for _, v := range d.commit {
+			commits += v
+		}
+		if unpacks != 3 || commits != 3 {
+			t.Errorf("stream=%t: %d unpack and %d commit timings, want 3 each (%v, %v)", stream, unpacks, commits, d.unpack, d.commit)
+		}
+		if !stream && (d.commit[commitOntoParent] < 1 || d.commit[commitAttach] != 0) {
+			t.Errorf("stream=%t: commits %v, want onto_parent for the layers containerd unpacked on their own", stream, d.commit)
+		}
+		if stream && (d.commit[commitAttach] < 1 || d.stages < 1) {
+			t.Errorf("stream=%t: commits %v stages %d, want the worker's own unpacks attached, with stage timings", stream, d.commit, d.stages)
 		}
 		resp := postSpread(t, srv, "/spread/finalize", spreadFinalizeOf(img, "pj"))
 		if resp.StatusCode != http.StatusOK {
