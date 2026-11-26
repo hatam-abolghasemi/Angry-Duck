@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.15.1
+
+### Fixed
+
+- **Idle connections between Angry Duck processes were never closed.**
+  Workers keep connections to each other open between the requests of a
+  job (spread, repair, rescue, the mirror), and the controller to every
+  worker it sends spread orders to; nothing ever closed them once the work
+  ended. Each one held about three goroutines and 16 KiB of buffers across
+  both ends, for as long as the pods ran: on a 21-node cluster about
+  0.5 MiB per worker after a preheat, with up to a connection to every
+  peer, each way. 1.15.0 made it more visible, since hand-offs have a
+  node talk to more peers per preheat. Connections are now closed when the
+  work that used them ends (a node's last spread job, each repair, a
+  node's last rescue, the controller's last spread), and after
+  `IDLE_CONN_TIMEOUT_S` idle on both sides, for what has no end of its
+  own (the mirror's requests) and for peers that don't close their side.
+
+### Added
+
+- `IDLE_CONN_TIMEOUT_S` (default `60`, controller and worker): how long a
+  keep-alive connection between Angry Duck processes may sit idle before
+  it is closed, on the client and the server side. The worker's API
+  (`WORKER_LISTEN_ADDR`), the mirror's server (`MIRROR_LISTEN_ADDR`) and
+  the controller's server close idle connections after it too. `0`: only
+  the end of the work closes them.
+- **Metric:** `angryduck_worker_peer_connections{node,direction}`, open
+  connections between a worker and other Angry Duck processes: `in`,
+  accepted by its API from peers and the controller; `out`, opened by its
+  spread, repair, rescue and mirror.
+- **Dashboard:** the Runtime tab's *Connections to Other Angry Duck
+  Processes per Worker* panel.
+
 ## 1.15.0
 
 ### Added
