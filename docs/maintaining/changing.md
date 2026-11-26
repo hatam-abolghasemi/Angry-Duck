@@ -39,8 +39,13 @@ something that was once forgotten.
    a caller that also does other things (a caller's span silently takes in a
    prepare, a commit or a retry). Every value of a label must mean the same
    span. Record successes only, after the outcome is known. Don't time the
-   same span twice under two names. Its series appear with their first
-   observation, not at 0: panels on it say "Nothing in this time range".
+   same span twice under two names. Create the series that can happen at
+   zero at startup (`HistogramVec.Init`; `InitTimings` in the worker), only
+   for features that are on: a series born holding its first observations
+   never shows them in `rate()` or `increase()`, and events that come once
+   per image or in bursts (most of Angry Duck's) would never show at all.
+   Quantile queries end in `>= 0`, so a window with no samples shows
+   nothing rather than `NaN`.
 
 ## A wire type or endpoint
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.14.13
+
+### Fixed
+
+- **The duration histograms missed most of what happened.** Their series
+  appeared with their first observation, and `rate()` and `increase()` only
+  count what happens after a series' first scrape. Stages that happen once
+  per image and node (hold, import, publish, time to ready) never showed,
+  and bursty ones (layer unpacks) barely did, worst on the first spread
+  after a restart: on a test cluster's first spread after upgrading, the
+  Timings row showed 4 of 15 stages and 0 images per node. Every stage a
+  node can go through now has its series at zero from the worker's start,
+  only for the features that are on: 39 series on a worker with spread,
+  unpack on arrival, direct writes, rescue and repair, 59 with stream and
+  parallel unpack too, about 16 KiB allocated once at start. The registry resolve
+  series starts at zero once a component creates a registry client.
+- **Dashboard: `NaN` in the Timings row.** A percentile over a window with
+  no samples showed as `NaN` in tables and filled legends with empty series.
+  Those are now left out, and *Stage p95 per Node* lists only nodes that
+  registered spread images in the range.
+
+### Added
+
+- `metrics.HistogramVec.Init` and `Exists`.
+
 ## 1.14.12
 
 ### Fixed

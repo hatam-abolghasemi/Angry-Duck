@@ -275,13 +275,22 @@ The `registry` label is filled only with `METRICS_LABEL_REGISTRY=true`.
 life on a node took, so a slow registry, a slow disk, slow decompression or
 one unusually slow layer shows up in a quantile instead of an average. They
 record **successful** operations only; failures and cancellations stay in
-the counters above. A series appears with its first observation (not at
-zero). Labels are the node, small fixed vocabularies and a size class
-(`small` under 8 MiB, `medium` under 64 MiB, `large` from there), never an
-image, digest or layer; per-image detail stays in
-[image history](#image-history). Buckets, in seconds: 0.05 to 300. On a busy
-node about 40 series exist (about 600 lines per scrape); a quiet node has
-fewer, since a series only appears once its combination happened.
+the counters above. Labels are the node, small fixed vocabularies and a
+size class (`small` under 8 MiB, `medium` under 64 MiB, `large` from there),
+never an image, digest or layer; per-image detail stays in
+[image history](#image-history). Buckets, in seconds: 0.05 to 300.
+
+The series of every stage a node can go through exist at zero from the
+worker's start: spreads come in bursts and an image is finalized once per
+node, and `rate()` and `increase()` only count what happens after a
+series' first scrape, so a series born holding its first observations
+would never show them. Only stages of features that are on get series
+(stream unpack, parallel unpack, direct writes, rescue, repair); a
+compression of `other` appears with its first observation. With spread,
+unpack on arrival, direct writes, rescue and repair on, a worker has 39
+series (585 lines per scrape); with stream and parallel unpack too, 59
+(885 lines). Creating them allocates about 16 KiB once, at start
+(measured, every feature on).
 
 A blob, in the order it happens:
 
