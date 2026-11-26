@@ -59,3 +59,25 @@ func TestHistogramVecCount(t *testing.T) {
 		t.Errorf("Count(x) = %d, want 2", got)
 	}
 }
+
+// A series made by Init renders at zero before any observation, so the
+// first observation is an increase a scraper can see.
+func TestHistogramVecInitRendersZero(t *testing.T) {
+	h := &HistogramVec{name: "i_seconds", help: "x", labelNames: []string{"a"}, bounds: []float64{1}, series: map[string]*histSeries{}}
+	h.Init("x")
+	var buf bytes.Buffer
+	h.write(&buf)
+	for _, want := range []string{`i_seconds_bucket{a="x",le="1"} 0`, `i_seconds_count{a="x"} 0`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, buf.String())
+		}
+	}
+	h.Observe(0.5, "x")
+	h.Init("x") // keeps what was observed
+	if got := h.Count("x"); got != 1 {
+		t.Errorf("Count after Init again = %d, want 1", got)
+	}
+	if h.Exists("y") {
+		t.Error("a series nobody created exists")
+	}
+}

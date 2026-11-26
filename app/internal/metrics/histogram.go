@@ -14,10 +14,12 @@ import (
 // and `_count`, so histogram_quantile() works on it. Safe for concurrent
 // use.
 //
-// Series appear with their first observation. Histograms are meant for
-// quantiles over rate(), where one missing first sample costs nothing, so
-// unlike counters they are not created at zero up front: a histogram
-// pre-created for every label combination would add bounds+2 series each.
+// A series exists from its first observation, or from Init. Create the
+// series that will be observed at zero up front (Init) wherever the
+// observations come in bursts or one at a time: rate() and increase()
+// only count what happens after a series' first scrape, so a series born
+// holding its first observations never shows them. Only the combinations
+// that can happen, though: each costs bounds+3 lines per scrape.
 type HistogramVec struct {
 	name       string
 	help       string
@@ -106,6 +108,26 @@ func (h *HistogramVec) write(w io.Writer) {
 	}
 	_, _ = w.Write(b)
 	*bp = b[:0]
+}
+
+// Init creates the series for these label values at zero, if it doesn't
+// exist yet, so its first observations are seen by rate() and increase().
+func (h *HistogramVec) Init(labelValues ...string) {
+	key := strings.Join(labelValues, labelSep)
+	h.mu.Lock()
+	if h.series[key] == nil {
+		h.series[key] = &histSeries{counts: make([]int64, len(h.bounds)+1)}
+	}
+	h.mu.Unlock()
+}
+
+// Exists says whether the series for these label values exists (from Init
+// or an observation). For tests and debugging.
+func (h *HistogramVec) Exists(labelValues ...string) bool {
+	key := strings.Join(labelValues, labelSep)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.series[key] != nil
 }
 
 // Count is how many observations the series with these label values has
